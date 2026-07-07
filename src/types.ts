@@ -10,9 +10,10 @@ export interface InstallAction {
   instructions?: string;
   githubRepo?: string;       // owner/repo — for github-binary
   assetPattern?: string;     // regex to match release asset filename
-  mcpInstructions?: string;  // shown after binary install
+  mcpInstructions?: string;  // shown after install
   repo?: string;             // full git URL — for git-plugin
   dest?: string;             // install destination relative to home
+  postInstallCmd?: string;   // command to run after main install step
 }
 
 export interface Product {

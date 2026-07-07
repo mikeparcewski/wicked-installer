@@ -1,6 +1,27 @@
-import { existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, chmodSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+
+const SKIP_BINARY_EXTS = /\.(md|txt|sha256|sha512|asc|json|toml|yaml|yml|xml|html|css|js|ts)$/i;
+
+function findBinary(dir: string, productId: string, archiveName: string): string | undefined {
+  const priority: string[] = [];
+  const rest: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const sub = findBinary(full, productId, archiveName);
+      if (sub) rest.push(sub);
+    } else if (entry.isFile() && entry.name !== archiveName && !SKIP_BINARY_EXTS.test(entry.name)) {
+      if (entry.name === productId || entry.name === `${productId}-mcp` || entry.name.startsWith(productId)) {
+        priority.push(full);
+      } else {
+        rest.push(full);
+      }
+    }
+  }
+  return priority[0] ?? rest[0];
+}
 import { execa } from "execa";
 import type { Product, InstallResult } from "./types.js";
 
@@ -73,8 +94,29 @@ export async function installProduct(product: Product): Promise<InstallResult> {
 
         const dlRes = await fetch(asset.browser_download_url);
         if (!dlRes.ok) throw new Error(`Download failed: ${dlRes.status}`);
-        writeFileSync(dest, Buffer.from(await dlRes.arrayBuffer()));
-        chmodSync(dest, 0o755);
+        const data = Buffer.from(await dlRes.arrayBuffer());
+
+        const isArchive = /\.(tar\.gz|tgz|tar\.bz2|tar\.xz|zip)$/i.test(asset.name);
+        if (isArchive) {
+          const tmpBase = join(tmpdir(), `wicked-install-${Date.now()}`);
+          mkdirSync(tmpBase, { recursive: true });
+          const tmpArchive = join(tmpBase, asset.name);
+          writeFileSync(tmpArchive, data);
+          const isZip = asset.name.endsWith(".zip");
+          if (isZip && process.platform !== "win32") {
+            await execa("unzip", ["-o", tmpArchive, "-d", tmpBase]);
+          } else {
+            await execa("tar", ["-xf", tmpArchive, "-C", tmpBase]);
+          }
+          const binary = findBinary(tmpBase, id, asset.name);
+          if (!binary) throw new Error(`No binary found in ${asset.name}`);
+          renameSync(binary, dest);
+          chmodSync(dest, 0o755);
+          rmSync(tmpBase, { recursive: true, force: true });
+        } else {
+          writeFileSync(dest, data);
+          chmodSync(dest, 0o755);
+        }
 
         const note = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
         return { productId: id, success: true, skipped: false, message: `${displayName} installed to ${dest}${note}` };
@@ -97,7 +139,8 @@ export async function installProduct(product: Product): Promise<InstallResult> {
           await execa("npm", ["install", "--prefix", dest], { stdio: "inherit" });
         }
 
-        return { productId: id, success: true, skipped: false, message: `${displayName} installed to ${dest}` };
+        const postNote = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
+        return { productId: id, success: true, skipped: false, message: `${displayName} installed to ${dest}${postNote}` };
       }
 
       default:

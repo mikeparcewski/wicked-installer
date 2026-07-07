@@ -25,7 +25,8 @@ const CLI_SPECS: CliSpec[] = [
 
 function commandVersion(cmd: string): string | undefined {
   try {
-    return execSync(`${cmd} --version 2>/dev/null`, { timeout: 3000, encoding: "utf8" }).trim().split("\n")[0];
+    return execSync(`${cmd} --version`, { timeout: 3000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+      .trim().split("\n")[0];
   } catch {
     return undefined;
   }
@@ -33,7 +34,11 @@ function commandVersion(cmd: string): string | undefined {
 
 function commandExists(cmd: string): boolean {
   try {
-    execSync(`command -v ${cmd} 2>/dev/null`, { timeout: 2000 });
+    if (process.platform === "win32") {
+      execSync(`where ${cmd}`, { timeout: 2000, stdio: "ignore" });
+    } else {
+      execSync(`command -v ${cmd}`, { timeout: 2000, stdio: "ignore" });
+    }
     return true;
   } catch {
     return false;
@@ -75,7 +80,7 @@ export function isProductInstalled(productId: string): boolean {
     }
     case "wicked-bus": {
       try {
-        execSync("npx wicked-bus --version 2>/dev/null", { timeout: 3000 });
+        execSync("npx wicked-bus --version", { timeout: 3000, stdio: "ignore" });
         return true;
       } catch {
         return false;
@@ -84,6 +89,10 @@ export function isProductInstalled(productId: string): boolean {
     case "wicked-brain": {
       const home = homedir();
       return existsSync(join(home, ".wicked-brain"));
+    }
+    case "wicked-garden": {
+      const home = homedir();
+      return existsSync(join(home, ".claude", "plugins", "wicked-garden", ".claude-plugin", "plugin.json"));
     }
     default:
       return false;

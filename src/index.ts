@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import chalk from "chalk";
 import boxen from "boxen";
 import { detectClis } from "./detector.js";
@@ -7,7 +10,8 @@ import { promptSelectionMode, promptBundle, promptCustom, promptConfirm } from "
 import { listProducts, getProduct } from "./registry.js";
 import type { InstallResult } from "./types.js";
 
-const VERSION = "0.1.0";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const { version: VERSION } = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
 
 async function runInteractive(): Promise<void> {
   console.log(

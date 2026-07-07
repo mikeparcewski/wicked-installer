@@ -69,11 +69,12 @@
       "standalone": false,
       "opinionated": true,
       "status": "active",
-      "requires": ["wicked-bus"],
-      "recommended": ["wicked-estate", "wicked-brain", "wicked-testing"],
+      "requires": ["wicked-bus", "wicked-testing"],
+      "recommended": ["wicked-estate", "wicked-brain"],
       "install": {
         "type": "git-plugin",
-        "repo": "https://github.com/mikeparcewski/wicked-garden.git"
+        "repo": "https://github.com/mikeparcewski/wicked-garden.git",
+        "mcpInstructions": "Run /wicked-garden:setup in Claude Code to complete configuration."
       },
       "note": "Opinionated bundle — you get everything. Individual components cannot be disabled."
     },

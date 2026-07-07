@@ -48,6 +48,7 @@ npx wicked-installer --version
 | `quick-start` | wicked-testing | Fastest path to acceptance testing — standalone, no deps |
 | `garden` | wicked-bus + wicked-garden + wicked-testing | Recommended starting point — evidence-gated work + full QE pipeline |
 | `knowledge` | wicked-bus + wicked-estate + wicked-brain | Persistent memory and code-graph layer |
+| `creative` | wicked-interactive + wicked-studio | Self-contained HTML artifact builder + AI workflow console |
 | `full` | Everything stable | The complete wicked-\* experience |
 
 ---
@@ -60,7 +61,9 @@ npx wicked-installer --version
 | [wicked-bus](https://www.npmjs.com/package/wicked-bus) | Local-first SQLite event bus. At-least-once delivery, no network transport. |
 | [wicked-brain](https://www.npmjs.com/package/wicked-brain) | Digital brain + Claude Code skills adapter. Indexes codebase knowledge. |
 | wicked-estate | MCP server: code graph + memory + knowledge in one binary. 23 tools. |
-| wicked-garden | Curated toolkit for what coding agents can't do alone. |
+| wicked-garden | Curated toolkit for what coding agents can't do alone. Claude Code plugin. |
+| wicked-interactive | Design and vibe canvas — build self-contained interactive HTML artifacts. |
+| wicked-studio | Desktop operator console: live agent topology, HITL, and event replay. |
 | wicked-signals | Text-in / intent-out classifier. Routes Slack threads, alerts, file changes. |
 
 ---
