@@ -33,11 +33,11 @@ Interactive TUI — pick a bundle or select products individually. Detects which
 ## CLI
 
 ```
-wicked-installer                 Interactive install
-wicked-installer list            List available products
-wicked-installer install <ids>   Install specific products (space-separated)
-wicked-installer status          Show detected CLIs + installed products
-wicked-installer --version
+npx wicked-installer                 Interactive install
+npx wicked-installer list            List available products
+npx wicked-installer install <ids>   Install specific products (space-separated)
+npx wicked-installer status          Show detected CLIs + installed products
+npx wicked-installer --version
 ```
 
 ---
