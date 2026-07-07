@@ -1,6 +1,6 @@
 export type ProductStatus = "stable" | "active" | "preview" | "design";
 export type ProductType = "npm-cli" | "npm-lib" | "mcp-binary" | "claude-plugin";
-export type InstallType = "npm-global" | "npm-run" | "binary" | "manual";
+export type InstallType = "npm-global" | "npm-run" | "binary" | "manual" | "github-binary" | "git-plugin";
 
 export interface InstallAction {
   type: InstallType;
@@ -8,6 +8,11 @@ export interface InstallAction {
   command?: string;
   args?: string[];
   instructions?: string;
+  githubRepo?: string;       // owner/repo — for github-binary
+  assetPattern?: string;     // regex to match release asset filename
+  mcpInstructions?: string;  // shown after binary install
+  repo?: string;             // full git URL — for git-plugin
+  dest?: string;             // install destination relative to home
 }
 
 export interface Product {

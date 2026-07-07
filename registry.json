@@ -12,8 +12,9 @@
       "requires": [],
       "recommended": ["wicked-bus", "wicked-brain"],
       "install": {
-        "type": "manual",
-        "instructions": "Download the latest wicked-estate binary from https://github.com/mikeparcewski/wicked-estate/releases and add it to your PATH. Then add it as an MCP server in your CLI config."
+        "type": "github-binary",
+        "githubRepo": "mikeparcewski/wicked-estate",
+        "mcpInstructions": "Add wicked-estate as an MCP server in your CLI config with command: wicked-estate"
       }
     },
     {
@@ -71,8 +72,8 @@
       "requires": ["wicked-bus"],
       "recommended": ["wicked-estate", "wicked-brain", "wicked-testing"],
       "install": {
-        "type": "manual",
-        "instructions": "wicked-garden is not yet published to npm. Clone https://github.com/mikeparcewski/wicked-garden and follow the README install instructions."
+        "type": "git-plugin",
+        "repo": "https://github.com/mikeparcewski/wicked-garden.git"
       },
       "note": "Opinionated bundle — you get everything. Individual components cannot be disabled."
     },
