@@ -19,11 +19,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
 
       - run: npm ci
-
-      - name: Check npm auth identity
-        run: npm whoami || echo "whoami failed — OIDC token not recognized by registry"
 
       - run: npm publish --provenance --access public
