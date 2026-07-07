@@ -21,4 +21,11 @@ jobs:
 
       - run: npm ci
 
+      - name: Debug auth env
+        run: |
+          echo "npm version: $(npm --version)"
+          echo "OIDC URL set: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL != '' }}"
+          echo "npmrc contents:"
+          cat ~/.npmrc 2>/dev/null || echo "(none)"
+
       - run: npm publish --provenance --access public
