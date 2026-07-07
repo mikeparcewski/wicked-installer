@@ -23,4 +23,9 @@ jobs:
 
       - run: npm ci
 
-      - run: npm publish --provenance --access public
+      - name: Publish
+        run: |
+          # setup-node writes _authToken=${NODE_AUTH_TOKEN} using GITHUB_TOKEN,
+          # which npmjs.com rejects. Remove it so npm uses its own OIDC exchange.
+          sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
+          npm publish --provenance --access public
