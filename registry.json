@@ -1,0 +1,120 @@
+{
+  "version": "1",
+  "products": [
+    {
+      "id": "wicked-estate",
+      "displayName": "Wicked Estate",
+      "description": "MCP server: code graph + memory + knowledge in one binary. 23 tools across 3 domains. Stores injected edges that grep never sees.",
+      "type": "mcp-binary",
+      "standalone": true,
+      "opinionated": false,
+      "status": "stable",
+      "requires": [],
+      "recommended": ["wicked-bus", "wicked-brain"],
+      "install": {
+        "type": "manual",
+        "instructions": "Download the latest wicked-estate binary from https://github.com/mikeparcewski/wicked-estate/releases and add it to your PATH. Then add it as an MCP server in your CLI config."
+      }
+    },
+    {
+      "id": "wicked-bus",
+      "displayName": "Wicked Bus",
+      "description": "Local-first SQLite event bus. At-least-once delivery, poll-based, no network transport. Decouples agents and tools without external infrastructure.",
+      "type": "npm-lib",
+      "standalone": true,
+      "opinionated": false,
+      "status": "stable",
+      "requires": [],
+      "install": {
+        "type": "npm-global",
+        "package": "wicked-bus"
+      }
+    },
+    {
+      "id": "wicked-testing",
+      "displayName": "Wicked Testing",
+      "description": "47-skill QE pipeline with 3-agent acceptance testing. Enforces separation between the agent that runs tests and the agent that evaluates them. Eliminates self-grading.",
+      "type": "npm-cli",
+      "standalone": true,
+      "opinionated": false,
+      "status": "stable",
+      "requires": [],
+      "recommended": ["wicked-bus", "wicked-brain"],
+      "install": {
+        "type": "npm-run",
+        "package": "wicked-testing",
+        "command": "install"
+      }
+    },
+    {
+      "id": "wicked-brain",
+      "displayName": "Wicked Brain",
+      "description": "Digital brain + Claude Code skills adapter. SQLite-backed. Indexes codebase knowledge, surfaces context before work sessions.",
+      "type": "npm-lib",
+      "standalone": true,
+      "opinionated": false,
+      "status": "active",
+      "requires": [],
+      "install": {
+        "type": "npm-global",
+        "package": "wicked-brain"
+      }
+    },
+    {
+      "id": "wicked-garden",
+      "displayName": "Wicked Garden",
+      "description": "Curated toolkit for what coding agents can't do alone: re-derives 'done' from evidence, sees injected edges, renames across files as a graph operation, multi-model review. Opinionated bundle — all or nothing.",
+      "type": "claude-plugin",
+      "standalone": false,
+      "opinionated": true,
+      "status": "active",
+      "requires": ["wicked-bus"],
+      "recommended": ["wicked-estate", "wicked-brain", "wicked-testing"],
+      "install": {
+        "type": "manual",
+        "instructions": "wicked-garden is not yet published to npm. Clone https://github.com/mikeparcewski/wicked-garden and follow the README install instructions."
+      },
+      "note": "Opinionated bundle — you get everything. Individual components cannot be disabled."
+    },
+    {
+      "id": "wicked-signals",
+      "displayName": "Wicked Signals",
+      "description": "Text-in / intent-out classifier. Receives Slack threads, alerts, file changes, user requests — classifies and routes each to the right handler with confidence.",
+      "type": "npm-lib",
+      "standalone": false,
+      "opinionated": false,
+      "status": "design",
+      "requires": ["wicked-bus"],
+      "install": {
+        "type": "manual",
+        "instructions": "wicked-signals is in design phase and not yet available for installation."
+      }
+    }
+  ],
+  "bundles": [
+    {
+      "id": "quick-start",
+      "displayName": "Quick Start",
+      "description": "Just wicked-testing — the fastest way to add acceptance testing to your AI workflow. Standalone, no dependencies.",
+      "products": ["wicked-testing"]
+    },
+    {
+      "id": "garden",
+      "displayName": "Garden Bundle",
+      "description": "The recommended starting point. Bus + Garden + Testing gives you evidence-gated work, event coupling, and a full QE pipeline.",
+      "products": ["wicked-bus", "wicked-garden", "wicked-testing"]
+    },
+    {
+      "id": "knowledge",
+      "displayName": "Knowledge Stack",
+      "description": "Estate + Brain + Bus — the persistent memory and code-graph layer everything else can query.",
+      "products": ["wicked-bus", "wicked-estate", "wicked-brain"]
+    },
+    {
+      "id": "full",
+      "displayName": "Full Stack",
+      "description": "Everything stable — bus, estate, brain, garden, testing. The complete wicked-* experience.",
+      "products": ["wicked-bus", "wicked-estate", "wicked-brain", "wicked-garden", "wicked-testing"]
+    }
+  ]
+}

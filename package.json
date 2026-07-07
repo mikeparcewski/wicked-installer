@@ -1,0 +1,54 @@
+{
+  "name": "wicked-installer",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Interactive installer for the wicked-* ecosystem — registry-driven, dependency-aware, cross-CLI.",
+  "keywords": [
+    "ai",
+    "installer",
+    "cli",
+    "wicked-garden",
+    "wicked-testing",
+    "wicked-estate",
+    "wicked-bus",
+    "claude-code"
+  ],
+  "author": "Mike Parcewski",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mikeparcewski/wicked-installer.git"
+  },
+  "bin": {
+    "wicked-installer": "./dist/index.js",
+    "wicked": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/",
+    "registry.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --test tests/**/*.test.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.5.0",
+    "chalk": "^5.4.1",
+    "boxen": "^8.0.1",
+    "execa": "^9.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

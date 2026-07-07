@@ -1,0 +1,51 @@
+export type ProductStatus = "stable" | "active" | "preview" | "design";
+export type ProductType = "npm-cli" | "npm-lib" | "mcp-binary" | "claude-plugin";
+export type InstallType = "npm-global" | "npm-run" | "binary" | "manual";
+
+export interface InstallAction {
+  type: InstallType;
+  package?: string;
+  command?: string;
+  args?: string[];
+  instructions?: string;
+}
+
+export interface Product {
+  id: string;
+  displayName: string;
+  description: string;
+  type: ProductType;
+  standalone: boolean;
+  opinionated: boolean;
+  status: ProductStatus;
+  requires: string[];
+  recommended?: string[];
+  install: InstallAction;
+  note?: string;
+}
+
+export interface Bundle {
+  id: string;
+  displayName: string;
+  description: string;
+  products: string[];
+}
+
+export interface Registry {
+  version: string;
+  products: Product[];
+  bundles: Bundle[];
+}
+
+export interface InstallResult {
+  productId: string;
+  success: boolean;
+  skipped: boolean;
+  message: string;
+}
+
+export interface DetectedCli {
+  id: string;
+  displayName: string;
+  version?: string;
+}
