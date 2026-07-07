@@ -23,4 +23,7 @@ jobs:
 
       - run: npm ci
 
+      - name: Check npm auth identity
+        run: npm whoami || echo "whoami failed — OIDC token not recognized by registry"
+
       - run: npm publish --provenance --access public
