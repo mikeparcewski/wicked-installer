@@ -78,14 +78,46 @@
       "note": "Opinionated bundle — you get everything. Individual components cannot be disabled."
     },
     {
+      "id": "wicked-interactive",
+      "displayName": "Wicked Interactive",
+      "description": "Design and vibe canvas for creating self-contained, single-file interactive HTML artifacts. Presentation builder, artifact creator, and narrative content tool. Export as a self-contained HTML file that runs anywhere.",
+      "type": "npm-cli",
+      "standalone": true,
+      "opinionated": false,
+      "status": "stable",
+      "requires": [],
+      "recommended": ["wicked-bus"],
+      "install": {
+        "type": "npm-global",
+        "package": "wicked-interactive"
+      }
+    },
+    {
+      "id": "wicked-studio",
+      "displayName": "Wicked Studio",
+      "description": "Desktop operator console for AI-native workflows. Live agent topology, PTY terminal, human-in-the-loop (HITL) response, and cross-session event replay. Requires wicked-core at runtime.",
+      "type": "desktop-binary",
+      "standalone": true,
+      "opinionated": false,
+      "status": "active",
+      "requires": [],
+      "recommended": ["wicked-estate"],
+      "install": {
+        "type": "github-binary",
+        "githubRepo": "mikeparcewski/wicked-studio",
+        "mcpInstructions": "Launch wicked-studio and connect it to a running wicked-core session."
+      }
+    },
+    {
       "id": "wicked-signals",
       "displayName": "Wicked Signals",
-      "description": "Text-in / intent-out classifier. Receives Slack threads, alerts, file changes, user requests — classifies and routes each to the right handler with confidence.",
+      "description": "Inference and routing layer — the ecosystem's nervous system. Turns text, alerts, Slack threads, and wicked-bus events into the right workflow, qe trigger, or direct outcome. Confidence-threshold routing with multi-model consensus.",
       "type": "npm-lib",
       "standalone": false,
       "opinionated": false,
       "status": "design",
       "requires": ["wicked-bus"],
+      "recommended": ["wicked-estate", "wicked-garden"],
       "install": {
         "type": "manual",
         "instructions": "wicked-signals is in design phase and not yet available for installation."
@@ -112,10 +144,16 @@
       "products": ["wicked-bus", "wicked-estate", "wicked-brain"]
     },
     {
+      "id": "creative",
+      "displayName": "Creative Suite",
+      "description": "Wicked Interactive + Studio — the creative and operator surfaces. Build self-contained HTML artifacts and get live visibility into AI workflow sessions.",
+      "products": ["wicked-interactive", "wicked-studio"]
+    },
+    {
       "id": "full",
       "displayName": "Full Stack",
-      "description": "Everything stable — bus, estate, brain, garden, testing. The complete wicked-* experience.",
-      "products": ["wicked-bus", "wicked-estate", "wicked-brain", "wicked-garden", "wicked-testing"]
+      "description": "Everything stable — bus, estate, brain, garden, testing, interactive, and studio. The complete wicked-* experience.",
+      "products": ["wicked-bus", "wicked-estate", "wicked-brain", "wicked-garden", "wicked-testing", "wicked-interactive", "wicked-studio"]
     }
   ]
 }
