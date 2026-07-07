@@ -18,14 +18,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
 
       - run: npm ci
 
       - name: Debug auth env
         run: |
           echo "npm version: $(npm --version)"
-          echo "OIDC URL set: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL != '' }}"
-          echo "npmrc contents:"
-          cat ~/.npmrc 2>/dev/null || echo "(none)"
+          echo "NODE_AUTH_TOKEN set: $([ -n "$NODE_AUTH_TOKEN" ] && echo yes || echo no)"
+          echo "npmrc:"
+          cat "$NPM_CONFIG_USERCONFIG" 2>/dev/null || cat ~/.npmrc 2>/dev/null || echo "(none)"
+        env:
+          NODE_AUTH_TOKEN: ${{ env.NODE_AUTH_TOKEN }}
 
       - run: npm publish --provenance --access public
