@@ -22,13 +22,4 @@ jobs:
 
       - run: npm ci
 
-      - name: Debug auth env
-        run: |
-          echo "npm version: $(npm --version)"
-          echo "NODE_AUTH_TOKEN set: $([ -n "$NODE_AUTH_TOKEN" ] && echo yes || echo no)"
-          echo "npmrc:"
-          cat "$NPM_CONFIG_USERCONFIG" 2>/dev/null || cat ~/.npmrc 2>/dev/null || echo "(none)"
-        env:
-          NODE_AUTH_TOKEN: ${{ env.NODE_AUTH_TOKEN }}
-
       - run: npm publish --provenance --access public
