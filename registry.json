@@ -111,6 +111,21 @@
       }
     },
     {
+      "id": "wicked-crew",
+      "displayName": "Wicked Crew",
+      "description": "Local daemon (REST + WS) that drives the wicked-core orchestration engine via the wicked-core-ts native addon — launch/resume runs, resolve human gates, stream live events and PTY terminals. Install once, then `wicked-crew serve`.",
+      "type": "npm-cli",
+      "standalone": true,
+      "opinionated": false,
+      "status": "active",
+      "requires": [],
+      "recommended": ["wicked-estate", "wicked-bus"],
+      "install": {
+        "type": "npm-global",
+        "package": "wicked-crew"
+      }
+    },
+    {
       "id": "wicked-signals",
       "displayName": "Wicked Signals",
       "description": "Inference and routing layer — the ecosystem's nervous system. Turns text, alerts, Slack threads, and wicked-bus events into the right workflow, qe trigger, or direct outcome. Confidence-threshold routing with multi-model consensus.",
@@ -155,7 +170,7 @@
       "id": "full",
       "displayName": "Full Stack",
       "description": "Everything stable — bus, estate, brain, garden, testing, interactive, and studio. The complete wicked-* experience.",
-      "products": ["wicked-bus", "wicked-estate", "wicked-brain", "wicked-garden", "wicked-testing", "wicked-interactive", "wicked-studio"]
+      "products": ["wicked-bus", "wicked-estate", "wicked-brain", "wicked-garden", "wicked-testing", "wicked-interactive", "wicked-studio", "wicked-crew"]
     }
   ]
 }
