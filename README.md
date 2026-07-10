@@ -58,12 +58,12 @@ npx wicked-installer --version
 | Product | What it does |
 |---|---|
 | [wicked-testing](https://github.com/mikeparcewski/wicked-testing) | 47-skill QE pipeline with 3-agent acceptance testing. Eliminates self-grading. |
-| [wicked-bus](https://www.npmjs.com/package/wicked-bus) | Local-first SQLite event bus. At-least-once delivery, no network transport. |
+| [wicked-bus](https://www.npmjs.com/package/wicked-bus) | Durable event fabric for agents — restart-durable at-least-once delivery with dead-lettering and replay. Zero infra (embedded SQLite), single-host. |
 | [wicked-brain](https://www.npmjs.com/package/wicked-brain) | Digital brain + Claude Code skills adapter. Indexes codebase knowledge. |
 | wicked-estate | MCP server: code graph + memory + knowledge in one binary. 23 tools. |
 | wicked-garden | Curated toolkit for what coding agents can't do alone. Claude Code plugin. |
 | wicked-interactive | Design and vibe canvas — build self-contained interactive HTML artifacts. |
-| wicked-studio | Desktop operator console: live agent topology, HITL, and event replay. |
+| wicked-studio | Browser operator console (served by wicked-crew) for human-in-the-loop agent sessions: live topology, HITL gates, evidence. |
 | wicked-signals | Text-in / intent-out classifier. Routes Slack threads, alerts, file changes. |
 
 ---
