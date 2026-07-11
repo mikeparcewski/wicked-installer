@@ -31,7 +31,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js',0o755)\"",
+    "build": "tsc && node -e \"const fs = require('fs'); ['dist/index.js', 'dist/install-codex.js', 'dist/install-antigravity.js', 'dist/install-claude.js'].forEach(f => fs.existsSync(f) && fs.chmodSync(f, 0o755))\"",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "node --test tests/**/*.test.mjs",

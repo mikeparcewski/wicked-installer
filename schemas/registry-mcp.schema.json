@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wicked.garden/schemas/registry-mcp-block.json",
+  "title": "registry.json product mcp block",
+  "type": "object",
+  "description": "The optional per-product \"mcp\" block in registry.json (INTERFACE.md §4.1). A map of MCP server name to stdio launch spec. All registry consumers MUST tolerate its presence (and that of any other unknown field); scripts that do not implement MCP wiring silently ignore it and keep surfacing install.mcpInstructions prose. Wire-time expansion: a leading ~/ or ~\\ in command and every env value is expanded to the user home; no other token expansion (${...} passes through untouched).",
+  "minProperties": 1,
+  "additionalProperties": {
+    "type": "object",
+    "required": ["command"],
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "Bare executable name (PATH-resolved by the CLI host) or a path; leading ~ expanded at wire time."
+      },
+      "args": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": []
+      },
+      "env": {
+        "type": "object",
+        "additionalProperties": { "type": "string" },
+        "description": "Environment for the server process; leading ~ in values expanded at wire time."
+      }
+    },
+    "additionalProperties": false
+  },
+  "examples": [
+    {
+      "wicked-estate": {
+        "command": "wicked-estate-mcp",
+        "args": [],
+        "env": {
+          "WICKED_ESTATE_DB": "~/.wicked-estate/graph.db",
+          "WICKED_MEMORY_DB": "~/.wicked/memory.db",
+          "WICKED_KNOWLEDGE_DB": "~/.wicked/knowledge.db",
+          "WICKED_XEDGE_DB": "~/.wicked/xedge.db"
+        }
+      }
+    }
+  ]
+}

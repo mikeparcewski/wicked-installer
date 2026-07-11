@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wicked.garden/schemas/install-marker-v2.json",
+  "title": "wicked-installer install marker v2",
+  "type": "object",
+  "description": "The bookkeeping file each install script writes at <configDir>/wicked-installer/<cli>-install.json (one per config dir it writes into). A statement of what exists on disk, not of success — written on every non-dry run including partial/failed. files[] is the manifest that makes exact uninstall possible. v1 markers ({ installedAt, <cli>Home, products: [...] } with no markerVersion) remain valid input to status/uninstall forever and are NOT described by this schema. See INTERFACE.md §10.",
+  "required": ["markerVersion", "cli", "configDir", "updatedAt", "products"],
+  "properties": {
+    "markerVersion": { "const": 2 },
+    "cli": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "configDir": { "type": "string" },
+    "installerVersion": { "type": "string" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "products": {
+      "type": "object",
+      "description": "Keyed by product id. Per-product merge (upsert by id), never whole-file overwrite; entries for products not in this run are preserved.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["installedAt", "lastResult", "files"],
+        "properties": {
+          "version": { "type": "string" },
+          "installedAt": { "type": "string", "format": "date-time" },
+          "source": { "type": "string", "enum": ["local", "npm-pack", "git"] },
+          "lastResult": { "type": "string", "enum": ["installed", "partial", "failed"] },
+          "assets": {
+            "type": "object",
+            "additionalProperties": { "type": "integer", "minimum": 0 }
+          },
+          "files": {
+            "type": "array",
+            "description": "Every path/config key this script CREATED (post-sanitization destination names, never source paths). Appended as operations succeed (journal), so a half-failed product lists exactly its partial footprint. This manifest is what enables EXACT removal: on upgrade the stale-sweep deletes every entry absent from the new set, and on uninstall the recorded set is removed — each deletion ownership-gated (§8.5/§12.3). It is also the primary source for the REQUIRED stale-artifact purge (§12.4); prior-era artifacts a marker never recorded (legacy/v1 markers) fall back to the product-prefixed naming heuristic. No dedicated purge field is needed — dir/file records already name the exact paths to remove.",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": ["kind", "path"],
+                  "properties": {
+                    "kind": { "type": "string", "enum": ["dir", "file"] },
+                    "path": {
+                      "type": "string",
+                      "description": "configDir-relative when inside the config dir, else absolute (~/ shorthand allowed); forward slashes always."
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": ["kind", "file", "pointer", "wroteHash"],
+                  "properties": {
+                    "kind": { "const": "json-key" },
+                    "file": { "type": "string" },
+                    "pointer": { "type": "string", "description": "RFC 6901 JSON Pointer into file." },
+                    "wroteHash": {
+                      "type": "string",
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "description": "sha256: + hash of the canonical (sorted-key) JSON of the value written. Guards deletion: uninstall removes the key only if the current value still hashes to this."
+                    },
+                    "prior": {
+                      "description": "The pre-existing value, non-null only when --force replaced a foreign value; enables restore on uninstall."
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": ["kind", "file", "event", "ownerMatch"],
+                  "properties": {
+                    "kind": { "const": "hooks-entry" },
+                    "file": { "type": "string" },
+                    "event": { "type": "string" },
+                    "ownerMatch": {
+                      "type": "object",
+                      "required": ["commandContains"],
+                      "description": "Ownership derivable from the entry itself (survives marker loss): an entry is owned by product P iff its command contains wicked-installer/products/<P> (compare with normalized separators).",
+                      "properties": { "commandContains": { "type": "string" } },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "notes": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "markerVersion": 2,
+      "cli": "claude",
+      "configDir": "/Users/x/.claude",
+      "installerVersion": "0.2.0",
+      "updatedAt": "2026-07-10T12:00:00.000Z",
+      "products": {
+        "wicked-testing": {
+          "version": "0.7.3",
+          "installedAt": "2026-07-10T12:00:00.000Z",
+          "source": "local",
+          "lastResult": "installed",
+          "assets": { "skills": 48, "agents": 0, "commands": 0, "mcp": 0, "hooks": 1 },
+          "files": [
+            { "kind": "dir", "path": "skills/wicked-testing-acceptance" },
+            { "kind": "file", "path": "skills/.wicked-testing-version" },
+            { "kind": "dir", "path": "wicked-installer/products/wicked-testing" },
+            {
+              "kind": "json-key",
+              "file": "~/.claude.json",
+              "pointer": "/mcpServers/wicked-estate",
+              "wroteHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "prior": null
+            },
+            {
+              "kind": "hooks-entry",
+              "file": "settings.json",
+              "event": "Stop",
+              "ownerMatch": { "commandContains": "wicked-installer/products/wicked-testing" }
+            }
+          ],
+          "notes": []
+        }
+      }
+    }
+  ]
+}

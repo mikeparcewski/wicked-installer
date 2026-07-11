@@ -1,8 +1,25 @@
-import { existsSync, mkdirSync, writeFileSync, chmodSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, chmodSync, readdirSync, renameSync, rmSync, cpSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 
 const SKIP_BINARY_EXTS = /\.(md|txt|sha256|sha512|asc|json|toml|yaml|yml|xml|html|css|js|ts)$/i;
+
+/**
+ * Resolve every Claude config directory that should receive dropped-in files.
+ * Honors CLAUDE_CONFIG_DIR (Claude Code's override, which may list multiple
+ * paths separated by ":" or ",") and always includes the default ~/.claude,
+ * so tooling lands in both the alt config and the default. De-duplicated.
+ */
+function configDirs(): string[] {
+  const dirs = [join(homedir(), ".claude")];
+  const override = process.env.CLAUDE_CONFIG_DIR;
+  if (override) {
+    for (const p of override.split(/[:,]/).map((s) => s.trim()).filter(Boolean)) {
+      dirs.push(p);
+    }
+  }
+  return [...new Set(dirs)];
+}
 
 function findBinary(dir: string, productId: string, archiveName: string): string | undefined {
   const priority: string[] = [];
@@ -122,25 +139,67 @@ export async function installProduct(product: Product): Promise<InstallResult> {
         return { productId: id, success: true, skipped: false, message: `${displayName} installed to ${dest}${note}` };
       }
 
+      case "cargo": {
+        const crate = install.crate ?? install.package;
+        if (!crate) throw new Error("install.crate required for cargo");
+
+        // Fail with a helpful message if the Rust toolchain is missing.
+        try {
+          await execa("cargo", ["--version"]);
+        } catch {
+          return {
+            productId: id, success: false, skipped: false,
+            message: `cargo not found — install the Rust toolchain (https://rustup.rs) then retry, or run: cargo install ${crate}`,
+          };
+        }
+
+        const args = ["install", crate];
+        if (install.version) args.push("--version", install.version);
+        await execa("cargo", args, { stdio: "inherit" });
+
+        const note = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
+        return {
+          productId: id, success: true, skipped: false,
+          message: `${displayName} installed via cargo install ${crate} (binary in ~/.cargo/bin)${note}`,
+        };
+      }
+
       case "git-plugin": {
         if (!install.repo) throw new Error("install.repo required for git-plugin");
 
-        const dest = install.dest
-          ? join(homedir(), install.dest)
-          : join(homedir(), ".claude", "plugins", id);
-
-        if (existsSync(dest)) {
-          await execa("git", ["-C", dest, "pull", "--ff-only"], { stdio: "inherit" });
-        } else {
-          await execa("git", ["clone", install.repo, dest], { stdio: "inherit" });
+        // Stage the repo once, then distribute its Claude assets into each config
+        // dir's TOP-LEVEL discovery folders (skills/agents/commands). Claude Code
+        // picks those up by convention. Copying into plugins/<id> does nothing
+        // without marketplace registration, so we deliberately do not do that.
+        const stage = join(tmpdir(), `wicked-${id}-${Date.now()}`);
+        await execa("git", ["clone", "--depth", "1", install.repo, stage], { stdio: "inherit" });
+        if (existsSync(join(stage, "package.json"))) {
+          await execa("npm", ["install", "--prefix", stage], { stdio: "inherit" });
         }
 
-        if (existsSync(join(dest, "package.json"))) {
-          await execa("npm", ["install", "--prefix", dest], { stdio: "inherit" });
+        const ASSET_DIRS = ["skills", "agents", "commands"];
+        const written: string[] = [];
+        for (const cfg of configDirs()) {
+          let any = false;
+          for (const sub of ASSET_DIRS) {
+            const src = join(stage, sub);
+            if (!existsSync(src)) continue;
+            const dst = join(cfg, sub);
+            mkdirSync(dst, { recursive: true });
+            for (const entry of readdirSync(src)) {
+              cpSync(join(src, entry), join(dst, entry), { recursive: true });
+            }
+            any = true;
+          }
+          if (any) written.push(cfg);
         }
+        rmSync(stage, { recursive: true, force: true });
 
+        if (written.length === 0) {
+          return { productId: id, success: false, skipped: false, message: `${displayName}: no skills/agents/commands found in ${install.repo}` };
+        }
         const postNote = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
-        return { productId: id, success: true, skipped: false, message: `${displayName} installed to ${dest}${postNote}` };
+        return { productId: id, success: true, skipped: false, message: `${displayName} skills/agents/commands copied into ${written.join(", ")}${postNote}` };
       }
 
       default:
