@@ -79,6 +79,44 @@ export async function promptCustom(): Promise<UserSelection> {
   return { products: resolved, addedDeps: added };
 }
 
+export interface CliOption {
+  cli: string;
+  displayName: string;
+  scriptPath: string;
+  detected: boolean;
+  binOnPath: boolean;
+  homeDetected: boolean;
+}
+
+/**
+ * Multi-select of CLIs to install into. Detected CLIs are pre-checked; absent
+ * ones remain selectable with a "(not detected)" tag. Selecting none is allowed
+ * and signals the caller to fall back to the legacy direct-install path.
+ */
+export async function promptClis(options: CliOption[]): Promise<CliOption[]> {
+  const choices = options.map((o) => {
+    let tag: string;
+    if (!o.detected) {
+      tag = chalk.dim("  (not detected — home will be created)");
+    } else if (o.binOnPath && o.homeDetected) {
+      tag = chalk.green("  (detected)");
+    } else if (o.binOnPath) {
+      tag = chalk.green("  (on PATH)");
+    } else {
+      tag = chalk.green("  (config found)");
+    }
+    return { name: `${chalk.bold(o.displayName)}${tag}`, value: o.cli, checked: o.detected };
+  });
+
+  const selected = await checkbox({
+    message: "Install into which CLIs? (space to toggle, enter to confirm — select none for legacy direct install):",
+    choices,
+  });
+
+  const chosen = new Set(selected);
+  return options.filter((o) => chosen.has(o.cli));
+}
+
 export async function promptConfirm(selection: UserSelection): Promise<boolean> {
   const all = [...selection.products, ...selection.addedDeps];
   const manualItems = all.filter(p => p.install.type === "manual" || p.install.type === "binary");

@@ -1,6 +1,6 @@
 export type ProductStatus = "stable" | "active" | "preview" | "design";
 export type ProductType = "npm-cli" | "npm-lib" | "mcp-binary" | "claude-plugin" | "desktop-binary";
-export type InstallType = "npm-global" | "npm-run" | "binary" | "manual" | "github-binary" | "git-plugin";
+export type InstallType = "npm-global" | "npm-run" | "binary" | "manual" | "github-binary" | "git-plugin" | "cargo";
 
 export interface InstallAction {
   type: InstallType;
@@ -14,6 +14,8 @@ export interface InstallAction {
   repo?: string;             // full git URL — for git-plugin
   dest?: string;             // install destination relative to home
   postInstallCmd?: string;   // command to run after main install step
+  crate?: string;            // crates.io crate name — for cargo
+  version?: string;          // exact version to pin — for cargo (omit for latest)
 }
 
 export interface Product {

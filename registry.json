@@ -12,9 +12,21 @@
       "requires": [],
       "recommended": ["wicked-bus", "wicked-brain"],
       "install": {
-        "type": "github-binary",
-        "githubRepo": "mikeparcewski/wicked-estate",
-        "mcpInstructions": "Add wicked-estate as an MCP server in your CLI config with command: wicked-estate"
+        "type": "cargo",
+        "crate": "wicked-estate-mcp",
+        "mcpInstructions": "Add wicked-estate as an MCP server in your CLI config with command: wicked-estate-mcp (installed to ~/.cargo/bin — ensure it is on PATH)"
+      },
+      "mcp": {
+        "wicked-estate": {
+          "command": "wicked-estate-mcp",
+          "args": [],
+          "env": {
+            "WICKED_ESTATE_DB": "~/.wicked-estate/graph.db",
+            "WICKED_MEMORY_DB": "~/.wicked/memory.db",
+            "WICKED_KNOWLEDGE_DB": "~/.wicked/knowledge.db",
+            "WICKED_XEDGE_DB": "~/.wicked/xedge.db"
+          }
+        }
       }
     },
     {
@@ -105,9 +117,8 @@
       "requires": [],
       "recommended": ["wicked-estate"],
       "install": {
-        "type": "github-binary",
-        "githubRepo": "mikeparcewski/wicked-studio",
-        "mcpInstructions": "Launch wicked-studio and connect it to a running wicked-core session."
+        "type": "manual",
+        "instructions": "Wicked Studio now ships inside Wicked Crew — installing wicked-crew includes the Studio console (wicked-crew/dist/studio). No separate install needed; launch it from Crew."
       }
     },
     {

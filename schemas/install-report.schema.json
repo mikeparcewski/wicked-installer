@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wicked.garden/schemas/install-report.json",
+  "title": "wicked-installer per-CLI install script report",
+  "type": "object",
+  "description": "The single JSON object each per-CLI install script prints to stdout under --json. Exactly one property matching ^[a-z][a-z0-9-]*Home$ MUST be present (e.g. codexHome, claudeHome, geminiHome). The key is the script's <cli> slug (the SAME lowercase/digit/hyphen character set as the marker `cli` field, ^[a-z][a-z0-9-]*$) followed by the literal `Home`, with NO transformation — so a distinct-config-root slug like `gemini-wicked` (§2.1) yields `gemini-wickedHome`, which is valid. v1 emits only that key plus reports[]; all other top-level keys are v1.1-optional. Consumers parse the LAST complete JSON object on stdout (acquisition child processes may interleave output on non-dry runs). See INTERFACE.md §9.",
+  "patternProperties": {
+    "^[a-z][a-z0-9-]*Home$": { "type": "string" }
+  },
+  "properties": {
+    "contract": { "type": "string", "enum": ["1.1"] },
+    "verb": { "type": "string", "enum": ["install", "status", "uninstall"] },
+    "dryRun": { "type": "boolean" },
+    "configDirs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "v1.1 multi-target CLIs (claude): full list of config dirs written; the *Home key stays the primary target."
+    },
+    "reports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["productId", "displayName", "success", "skipped", "message", "assets", "notes"],
+        "properties": {
+          "productId": { "type": "string" },
+          "displayName": { "type": "string" },
+          "success": { "type": "boolean" },
+          "skipped": {
+            "type": "boolean",
+            "description": "true only for install.type manual|binary (manual step noted, not a failure)."
+          },
+          "message": { "type": "string" },
+          "version": {
+            "type": "string",
+            "description": "v1.1: staged/acquired product version when known."
+          },
+          "heuristic": {
+            "type": "boolean",
+            "description": "v1.1 uninstall only: removal used v1-marker heuristics rather than an exact files[] manifest."
+          },
+          "assets": {
+            "type": "object",
+            "required": ["skills"],
+            "description": "Counts by installed asset type. Taxonomy: skills + mcp + hooks + bins. Only skills is guaranteed present — the codex reference emits it alone. agents/commands are LEGACY keys: no conforming script installs agents or commands (§7.2), so they are absent or always 0, never nonzero; they persist only so a v1 parser that reads them doesn't crash.",
+            "properties": {
+              "skills": { "type": "integer", "minimum": 0 },
+              "mcp": { "type": "integer", "minimum": 0 },
+              "hooks": { "type": "integer", "minimum": 0 },
+              "bins": { "type": "integer", "minimum": 0, "description": "v1.1 additive: count of verified product binaries." },
+              "agents": { "type": "integer", "minimum": 0, "description": "legacy; absent or 0, never nonzero." },
+              "commands": { "type": "integer", "minimum": 0, "description": "legacy; absent or 0, never nonzero." }
+            },
+            "additionalProperties": false
+          },
+          "actions": {
+            "type": "array",
+            "description": "v1.1: auditable per-action outcomes. Makes dry-run (result:planned) and uninstall reversible/inspectable.",
+            "items": {
+              "type": "object",
+              "required": ["kind", "target", "result"],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": ["copy-skill", "write-json-key", "merge-hook", "acquire", "migrate-removed", "collision-skipped", "restore-prior", "remove"]
+                },
+                "target": { "type": "string" },
+                "result": { "type": "string", "enum": ["ok", "planned", "skipped", "failed"] },
+                "detail": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "notes": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": ["reports"],
+  "additionalProperties": true,
+  "examples": [
+    {
+      "codexHome": "/Users/me/.codex",
+      "reports": [
+        {
+          "productId": "wicked-testing",
+          "displayName": "Wicked Testing",
+          "success": true,
+          "skipped": false,
+          "message": "Wicked Testing: installed (skills=48)",
+          "assets": { "skills": 48 },
+          "notes": ["assets source: local"]
+        }
+      ]
+    },
+    {
+      "claudeHome": "/Users/me/.claude",
+      "contract": "1.1",
+      "verb": "install",
+      "dryRun": true,
+      "configDirs": ["/Users/me/.claude"],
+      "reports": [
+        {
+          "productId": "wicked-estate",
+          "displayName": "Wicked Estate",
+          "success": true,
+          "skipped": false,
+          "message": "Wicked Estate: installed (skills=0, mcp=1)",
+          "version": "0.13.1",
+          "assets": { "skills": 0, "agents": 0, "commands": 0, "mcp": 1, "hooks": 0 },
+          "actions": [
+            { "kind": "acquire", "target": "cargo install wicked-estate-mcp", "result": "planned" },
+            { "kind": "write-json-key", "target": "~/.claude.json#/mcpServers/wicked-estate", "result": "planned", "detail": "add server entry" }
+          ],
+          "notes": ["assets source: npm-pack"]
+        }
+      ]
+    }
+  ]
+}
