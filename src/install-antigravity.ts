@@ -279,7 +279,9 @@ function run(cmd: string, args: string[], options: Options, cwd?: string, captur
 function ensureGeminiHome(options: Options): void {
   const dirs = [
     options.geminiHome,
-    join(options.geminiHome, "skills"),
+    // Antigravity / Gemini CLI loads global custom skills from ~/.gemini/config/skills/,
+    // not ~/.gemini/skills/. Writing to the wrong dir makes skills invisible to the agent.
+    join(options.geminiHome, "config", "skills"),
   ];
   if (options.dryRun) {
     for (const dir of dirs) log(options, `  dry-run: mkdir -p ${dir}`);
@@ -567,7 +569,7 @@ function copySkills(product: Product, root: string, options: Options): number {
     const rel = relative(skillsDir, skillRoot);
     const originalName = readSkillName(skillRoot);
     const nextName = antigravitySkillName(product.id, originalName ?? "", rel);
-    const dest = join(options.geminiHome, "skills", sanitizePathPart(nextName));
+    const dest = join(options.geminiHome, "config", "skills", sanitizePathPart(nextName));
     copyTree(skillRoot, dest, options);
     rewriteCopiedSkillName(dest, originalName, nextName, options);
     count += 1;
