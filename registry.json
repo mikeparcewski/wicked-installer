@@ -46,7 +46,7 @@
     {
       "id": "wicked-testing",
       "displayName": "Wicked Testing",
-      "description": "47-skill QE pipeline with 3-agent acceptance testing. Enforces separation between the agent that runs tests and the agent that evaluates them. Eliminates self-grading.",
+      "description": "48-skill QE pipeline (40 specialist + 8 Tier-1 workflow skills) with acceptance testing that enforces separation between the agent that runs tests and the agent that evaluates them. Eliminates self-grading.",
       "type": "npm-cli",
       "standalone": true,
       "opinionated": false,
@@ -111,14 +111,14 @@
       "displayName": "Wicked Studio",
       "description": "Desktop operator console for AI-native workflows. Live agent topology, PTY terminal, human-in-the-loop (HITL) response, and cross-session event replay. Requires wicked-core at runtime.",
       "type": "desktop-binary",
-      "standalone": true,
+      "standalone": false,
       "opinionated": false,
-      "status": "active",
+      "status": "archived",
       "requires": [],
-      "recommended": ["wicked-estate"],
+      "recommended": ["wicked-crew"],
       "install": {
         "type": "manual",
-        "instructions": "Wicked Studio now ships inside Wicked Crew — installing wicked-crew includes the Studio console (wicked-crew/dist/studio). No separate install needed; launch it from Crew."
+        "instructions": "Wicked Studio is not installed on its own — it ships inside Wicked Crew. Install wicked-crew and the Studio console (wicked-crew/dist/studio) comes with it; launch it from Crew."
       }
     },
     {
@@ -134,21 +134,6 @@
       "install": {
         "type": "npm-global",
         "package": "wicked-crew"
-      }
-    },
-    {
-      "id": "wicked-signals",
-      "displayName": "Wicked Signals",
-      "description": "Inference and routing layer — the ecosystem's nervous system. Turns text, alerts, Slack threads, and wicked-bus events into the right workflow, qe trigger, or direct outcome. Confidence-threshold routing with multi-model consensus.",
-      "type": "npm-lib",
-      "standalone": false,
-      "opinionated": false,
-      "status": "design",
-      "requires": ["wicked-bus"],
-      "recommended": ["wicked-estate", "wicked-garden"],
-      "install": {
-        "type": "manual",
-        "instructions": "wicked-signals is in design phase and not yet available for installation."
       }
     }
   ],
@@ -174,14 +159,14 @@
     {
       "id": "creative",
       "displayName": "Creative Suite",
-      "description": "Wicked Interactive + Studio — the creative and operator surfaces. Build self-contained HTML artifacts and get live visibility into AI workflow sessions.",
-      "products": ["wicked-interactive", "wicked-studio"]
+      "description": "Wicked Interactive + Crew — the creative and operator surfaces. Build self-contained HTML artifacts, and get live visibility into AI workflow sessions via the Studio console that ships inside Crew.",
+      "products": ["wicked-interactive", "wicked-crew"]
     },
     {
       "id": "full",
       "displayName": "Full Stack",
-      "description": "Everything stable — bus, estate, brain, garden, testing, interactive, and studio. The complete wicked-* experience.",
-      "products": ["wicked-bus", "wicked-estate", "wicked-brain", "wicked-garden", "wicked-testing", "wicked-interactive", "wicked-studio", "wicked-crew"]
+      "description": "Everything stable — bus, estate, brain, garden, testing, interactive, and crew (which includes the Studio console). The complete wicked-* experience.",
+      "products": ["wicked-bus", "wicked-estate", "wicked-brain", "wicked-garden", "wicked-testing", "wicked-interactive", "wicked-crew"]
     }
   ]
 }

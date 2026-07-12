@@ -48,7 +48,7 @@ npx wicked-installer --version
 | `quick-start` | wicked-testing | Fastest path to acceptance testing — standalone, no deps |
 | `garden` | wicked-bus + wicked-garden + wicked-testing | Recommended starting point — evidence-gated work + full QE pipeline |
 | `knowledge` | wicked-bus + wicked-estate + wicked-brain | Persistent memory and code-graph layer |
-| `creative` | wicked-interactive + wicked-studio | Self-contained HTML artifact builder + AI workflow console |
+| `creative` | wicked-interactive + wicked-crew | Self-contained HTML artifact builder + the AI workflow console (Studio ships inside Crew) |
 | `full` | Everything stable | The complete wicked-\* experience |
 
 ---
@@ -57,14 +57,13 @@ npx wicked-installer --version
 
 | Product | What it does |
 |---|---|
-| [wicked-testing](https://github.com/mikeparcewski/wicked-testing) | 47-skill QE pipeline with 3-agent acceptance testing. Eliminates self-grading. |
+| [wicked-testing](https://github.com/mikeparcewski/wicked-testing) | 48-skill QE pipeline (40 specialist + 8 Tier-1 workflow skills) with acceptance testing that eliminates self-grading. |
 | [wicked-bus](https://www.npmjs.com/package/wicked-bus) | Durable event fabric for agents — restart-durable at-least-once delivery with dead-lettering and replay. Zero infra (embedded SQLite), single-host. |
 | [wicked-brain](https://www.npmjs.com/package/wicked-brain) | Digital brain + Claude Code skills adapter. Indexes codebase knowledge. |
 | wicked-estate | MCP server: code graph + memory + knowledge in one binary. 23 tools. |
 | wicked-garden | Curated toolkit for what coding agents can't do alone. Claude Code plugin. |
 | wicked-interactive | Design and vibe canvas — build self-contained interactive HTML artifacts. |
-| wicked-studio | Browser operator console (served by wicked-crew) for human-in-the-loop agent sessions: live topology, HITL gates, evidence. |
-| wicked-signals | Text-in / intent-out classifier. Routes Slack threads, alerts, file changes. |
+| [wicked-crew](https://www.npmjs.com/package/wicked-crew) | Agentic execution platform — drives coding-agent CLIs through governed workflows. Includes the Studio operator console (browser HITL: live topology, gates, evidence). |
 
 ---
 
