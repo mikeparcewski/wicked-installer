@@ -139,8 +139,8 @@ const DETECT_SPECS: Record<string, CliDetectSpec> = {
     cli: "opencode",
     displayName: "OpenCode",
     bins: ["opencode"],
-    homeRoots: [],
-    markers: [],
+    homeRoots: [".config/opencode"],
+    markers: ["opencode.json", "opencode.jsonc"],
   },
   pi: {
     cli: "pi",
