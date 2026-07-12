@@ -421,17 +421,35 @@ function installGithubBinary(product: Product, options: Options): void {
   }
 }
 
-function codexMcpServerExists(serverName: string): boolean {
-  if (!commandExists("codex")) return false;
-  const result = spawnSync("codex", ["mcp", "list"], {
+// Returns whether the Codex MCP server is absent, already points at the expected
+// binary ("matches"), or exists but references a different/stale command ("drifted").
+// A name-only check would report a drifted registration as "already registered" and
+// never repair it — leaving the machine inconsistent, which is what the installer exists
+// to prevent.
+function codexMcpServerState(
+  serverName: string,
+  expectedPath: string,
+): "absent" | "matches" | "drifted" {
+  if (!commandExists("codex")) return "absent";
+  const list = spawnSync("codex", ["mcp", "list"], {
     encoding: "utf8",
     stdio: "pipe",
   });
-  if (result.status !== 0 || !result.stdout) return false;
-  return result.stdout.split("\n").some((line) => {
+  if (list.status !== 0 || !list.stdout) return "absent";
+  const exists = list.stdout.split("\n").some((line) => {
     const trimmed = line.trimStart();
     return trimmed.startsWith(`${serverName} `) || trimmed === serverName;
   });
+  if (!exists) return "absent";
+  // Server is registered — confirm it points at the expected binary. Prefer the
+  // detailed `mcp get`; fall back to the list output. If the expected path is
+  // absent from both, the registration has drifted and must be repaired.
+  const detail = spawnSync("codex", ["mcp", "get", serverName], {
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  const haystack = `${detail.stdout ?? ""}\n${list.stdout}`;
+  return haystack.includes(expectedPath) ? "matches" : "drifted";
 }
 
 function registerCodexMcp(product: Product, options: Options): string[] {
@@ -452,9 +470,21 @@ function registerCodexMcp(product: Product, options: Options): string[] {
     return notes;
   }
 
-  if (codexMcpServerExists(product.id)) {
-    notes.push(`Codex MCP server ${product.id} already registered`);
+  const state = codexMcpServerState(product.id, binaryPath);
+  if (state === "matches") {
+    notes.push(`Codex MCP server ${product.id} already registered -> ${binaryPath}`);
     return notes;
+  }
+  if (state === "drifted") {
+    // Registered under a different/stale path — remove before re-adding so the
+    // machine ends up consistent (best-effort; `mcp add` may itself overwrite).
+    const rm = spawnSync("codex", ["mcp", "remove", product.id], {
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+    if (rm.status === 0) {
+      notes.push(`removed stale Codex MCP server ${product.id} (path drift) before re-registering`);
+    }
   }
 
   run("codex", ["mcp", "add", product.id, "--", binaryPath], options);
@@ -678,6 +708,12 @@ async function installOne(product: Product, options: Options): Promise<InstallRe
   try {
     log(options, `Installing ${product.displayName} for Codex...`);
     notes.push(...installProductBinaries(product, options));
+
+    // Register (or repair) the MCP server with the Codex CLI after its binary is
+    // installed — an mcp-binary product is only usable in Codex once registered.
+    if (product.type === "mcp-binary") {
+      notes.push(...registerCodexMcp(product, options));
+    }
 
     source = stageProduct(product, options);
     if (source) {
