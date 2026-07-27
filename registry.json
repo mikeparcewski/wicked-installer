@@ -124,7 +124,7 @@
     {
       "id": "wicked-crew",
       "displayName": "Wicked Crew",
-      "description": "Local daemon (REST + WS) that drives the wicked-core orchestration engine via the wicked-core-ts native addon — launch/resume runs, resolve human gates, stream live events and PTY terminals. Install once, then `wicked-crew serve`.",
+      "description": "Governed multi-agent runs for the coding CLIs you already have, driven from the Studio browser console — launch a run, watch every agent stream over persistent ACP sessions, answer steering gates, and export the evidence bundle. Evaluator is never the creator. Install once, then `wicked-crew serve` and open the console.",
       "type": "npm-cli",
       "standalone": true,
       "opinionated": false,
