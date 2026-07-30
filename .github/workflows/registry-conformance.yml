@@ -1,0 +1,62 @@
+# Registry conformance — the "don't forget the installer" guard.
+#
+# The registry is version-free (npm/cargo entries resolve LATEST), so releases
+# don't need pin bumps here — what CAN rot is structure: a renamed package, a
+# yanked crate, a new product missing an entry, an absorbed product still
+# installable. This workflow asserts every registry entry still RESOLVES at its
+# channel, on a daily schedule and immediately when any product repo announces
+# a release via repository_dispatch (event_type: package-released — see the
+# notify-installer workflow in each product repo; requires a PAT secret there).
+name: registry conformance
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [package-released]
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: build + unit tests
+        run: npm ci && npm run build && npm test
+      - name: every registry entry resolves at its channel
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys, urllib.request
+
+          reg = json.load(open('registry.json'))
+          failures = []
+          for p in reg['products']:
+              inst = p.get('install', {})
+              t, pid = inst.get('type'), p['id']
+              if p.get('status') == 'archived' or t == 'manual':
+                  print(f"skip {pid} ({p.get('status')}/{t})")
+                  continue
+              if t in ('npm-global', 'npm-run', 'npm-lib'):
+                  pkg = inst['package']
+                  r = subprocess.run(['npm', 'view', pkg, 'version'], capture_output=True, text=True)
+                  ok, detail = r.returncode == 0, r.stdout.strip() or r.stderr.strip()[:80]
+              elif t == 'cargo':
+                  crate = inst['crate']
+                  try:
+                      with urllib.request.urlopen(
+                          f'https://crates.io/api/v1/crates/{crate}', timeout=30) as resp:
+                          data = json.load(resp)
+                      ok = not data['crate'].get('yanked', False)
+                      detail = data['crate']['max_stable_version']
+                  except Exception as e:
+                      ok, detail = False, str(e)[:80]
+              else:
+                  ok, detail = False, f'unknown install type {t!r}'
+              print(f"{'ok  ' if ok else 'FAIL'} {pid:22} {t:12} -> {detail}")
+              if not ok:
+                  failures.append(pid)
+          if failures:
+              sys.exit(f"unresolvable registry entries: {failures}")
+          PY
