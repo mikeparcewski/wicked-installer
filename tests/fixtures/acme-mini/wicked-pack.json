@@ -1,0 +1,10 @@
+{
+  "spec": 1,
+  "name": "acme-mini",
+  "vendor": "acme",
+  "version": "0.1.0",
+  "description": "Minimal pack fixture for wicked-installer pack-add tests.",
+  "skills_dir": "skills",
+  "domains": [{ "name": "mini" }],
+  "provenance": { "source": "https://github.com/acme/acme-mini", "publisher": "acme" }
+}
