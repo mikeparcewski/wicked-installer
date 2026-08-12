@@ -468,6 +468,7 @@ function printHelp(): void {
     "  wicked-installer                 Interactive install (pick products, then CLIs)",
     "  wicked-installer list            List available products",
     "  wicked-installer install <ids>   Install specific products (space-separated, direct)",
+    "  wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)",
     "  wicked-installer status          Show detected CLIs and installed products",
     "  wicked-installer --version       Show version",
     "",
@@ -511,6 +512,14 @@ async function main(): Promise<void> {
       }
       await runInstallDirect(rest);
       break;
+    case "pack": {
+      // Third-party skill packs (the extension contract). Pass the RAW argv
+      // tail (flags included) — pack has its own parser.
+      const { runPack } = await import("./pack.js");
+      const packIdx = argv.indexOf("pack");
+      process.exit(await runPack(argv.slice(packIdx + 1)));
+      break;
+    }
     default:
       await runInteractive(flags);
   }

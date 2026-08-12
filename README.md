@@ -35,9 +35,45 @@ Interactive TUI — pick a bundle or select products individually. Detects which
 npx wicked-installer                 Interactive install
 npx wicked-installer list            List available products
 npx wicked-installer install <ids>   Install specific products (space-separated)
+npx wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)
 npx wicked-installer status          Show detected CLIs + installed products
 npx wicked-installer --version
 ```
+
+---
+
+## Skill packs (the wicked-garden extension contract)
+
+Third parties extend the wicked-garden catalog with **packs** — a
+`wicked-pack.json` manifest plus a `skills/` tree following the
+`{vendor}-{domain}` router / `{vendor}-{domain}-{role}` worker contract.
+This command is the single acquisition path (garden's own
+`npx wicked-garden pack install` delegates here):
+
+```
+npx wicked-installer pack add acme-seo-pack        # npm package
+npx wicked-installer pack add ./acme-seo-pack      # local directory
+npx wicked-installer pack remove acme-seo
+npx wicked-installer pack list                     # what garden's runtime discovers
+npx wicked-installer pack check ./acme-seo-pack    # conformance gate only
+```
+
+`pack add` fetches the source, runs wicked-garden's shipped conformance
+gate (fail-closed; `--force` to override), copies the pack to
+`~/.something-wicked/wicked-garden/packs/installed/<name>`, makes its
+skills visible to **Claude Code** (`~/.claude/skills/` — or skips the copy
+when the pack ships as a Claude Code plugin), and registers it with the
+garden runtime (catalog + crew specialist routing + peer-floor probe).
+Validation and registration are wicked-garden's own tooling — this command
+never re-implements them.
+
+**Honest scope note:** skill visibility for the *other* supported CLIs
+(Codex, Antigravity, OpenCode, Pi) is not wired for packs yet; the per-CLI
+install-script seam (INTERFACE.md) is where that lands. Provenance is
+recorded (source URL + content hashes) but packs are **not signed** —
+install only from sources you trust, as with any npm dependency.
+
+Pack authoring guide: wicked-garden's `docs/extending.md`.
 
 ---
 
