@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +50,69 @@ test("unit: parsePackArgs keeps flag values out of positionals", async () => {
   assert.equal(flags.sourceUrl, "https://x.test/repo");
   assert.equal(flags.dryRun, true);
   assert.equal(flags.force, false);
+});
+
+test("unit: parsePackArgs rejects flag-like --source-url values", async () => {
+  const { parsePackArgs } = await import("../dist/pack.js");
+  assert.match(parsePackArgs(["add", "--source-url", "--dry-run", "./p"]).error, /requires a URL/);
+  assert.match(parsePackArgs(["add", "./p", "--source-url"]).error, /requires a URL/);
+});
+
+test("pack add: traversal-shaped manifest name is refused", () => {
+  const home = freshHome();
+  const stubLog = join(home, "stub.log");
+  try {
+    const evil = join(home, "evil-pack");
+    mkdirSync(join(evil, "skills"), { recursive: true });
+    writeFileSync(join(evil, "wicked-pack.json"), JSON.stringify({
+      spec: 1, name: "../../escape", vendor: "acme", version: "1.0.0",
+      domains: [{ name: "esc" }],
+    }));
+    const res = runPack(["add", evil], { home, stubLog });
+    assert.equal(res.status, 1);
+    assert.match(res.stdout + res.stderr, /must be kebab-case/);
+    assert.ok(!existsSync(join(home, ".something-wicked")), "nothing written");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("pack remove: refuses traversal-shaped names", () => {
+  const home = freshHome();
+  try {
+    const res = runPack(["remove", "../../etc"], { home });
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /must be kebab-case/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("pack remove: plugin-shaped pack leaves ~/.claude/skills alone", () => {
+  chmodSync(STUB, 0o755);
+  const home = freshHome();
+  const stubLog = join(home, "stub.log");
+  try {
+    // simulate an installed plugin-shaped pack + an unrelated user skill of the same name
+    const dest = join(home, ".something-wicked", "wicked-garden", "packs", "installed", "acme-mini");
+    mkdirSync(join(dest, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(dest, ".claude-plugin", "plugin.json"), "{}");
+    mkdirSync(join(dest, "skills", "acme-mini"), { recursive: true });
+    writeFileSync(join(dest, "skills", "acme-mini", "SKILL.md"), "---\nname: acme-mini\ndescription: r\n---\n");
+    writeFileSync(join(dest, "wicked-pack.json"), JSON.stringify({
+      spec: 1, name: "acme-mini", vendor: "acme", version: "1.0.0", domains: [{ name: "mini" }],
+    }));
+    const userSkill = join(home, ".claude", "skills", "acme-mini");
+    mkdirSync(userSkill, { recursive: true });
+    writeFileSync(join(userSkill, "SKILL.md"), "user's own skill, same name");
+
+    const res = runPack(["remove", "acme-mini"], { home, stubLog });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.ok(existsSync(join(userSkill, "SKILL.md")), "unrelated user skill untouched");
+    assert.ok(!existsSync(dest), "installed pack dir removed");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("unit: npmSpecName strips versions, keeps scopes", async () => {

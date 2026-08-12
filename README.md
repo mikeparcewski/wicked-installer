@@ -51,9 +51,10 @@ This command is the single acquisition path (garden's own
 `npx wicked-garden pack install` delegates here):
 
 ```
-npx wicked-installer pack add acme-seo-pack        # npm package
+npx wicked-installer pack add acme-seo-pack        # npm package spec
 npx wicked-installer pack add ./acme-seo-pack      # local directory
-npx wicked-installer pack remove acme-seo
+npx wicked-installer pack remove acme-seo          # the MANIFEST name (wicked-pack.json "name"),
+                                                   # not the npm spec — see `pack list`
 npx wicked-installer pack list                     # what garden's runtime discovers
 npx wicked-installer pack check ./acme-seo-pack    # conformance gate only
 ```

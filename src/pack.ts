@@ -57,19 +57,45 @@ function claudeSkillsHome(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Spawn helpers (Windows npm/npx rule: .cmd shims need shell: true)
+// Spawn helpers. Windows rule (INTERFACE.md §1.1): npm/npx — and any other
+// npm-installed bin like `wicked-garden` — are .cmd shims that need
+// { shell: true }, and every arg must then be cmd.exe-quoted via winQuote.
 // ---------------------------------------------------------------------------
 
 function isCmdShim(cmd: string): boolean {
-  return process.platform === "win32" && /^(npm|npx)$/i.test(cmd);
+  return process.platform === "win32" && /^(npm|npx|wicked-garden)$/i.test(cmd);
+}
+
+/**
+ * Quote ONE argument for cmd.exe when spawning a .cmd shim with { shell: true }.
+ * Verbatim from INTERFACE.md §1.1 (CommandLineToArgvW backslash/quote rule).
+ */
+function winQuote(arg: string): string {
+  if (arg === "") return '""';
+  if (/^[A-Za-z0-9_@+=:,./\\-]+$/.test(arg)) return arg;
+  let out = '"';
+  for (let i = 0; i < arg.length; ) {
+    let slashes = 0;
+    while (i < arg.length && arg[i] === "\\") { slashes += 1; i += 1; }
+    if (i === arg.length) { out += "\\".repeat(slashes * 2); break; }
+    else if (arg[i] === '"') { out += "\\".repeat(slashes * 2 + 1) + '"'; i += 1; }
+    else { out += "\\".repeat(slashes) + arg[i]; i += 1; }
+  }
+  return `${out}"`;
+}
+
+function shimArgs(cmd: string, args: string[]): { args: string[]; shell: boolean } {
+  if (!isCmdShim(cmd)) return { args, shell: false };
+  return { args: args.map(winQuote), shell: true };
 }
 
 function run(cmd: string, args: string[], opts: { cwd?: string } = {}): { status: number; out: string } {
-  const res = spawnSync(cmd, args, {
+  const prepared = shimArgs(cmd, args);
+  const res = spawnSync(cmd, prepared.args, {
     encoding: "utf8",
     cwd: opts.cwd,
     stdio: ["ignore", "pipe", "pipe"],
-    shell: isCmdShim(cmd),
+    shell: prepared.shell,
   });
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
   return { status: res.status ?? 1, out };
@@ -77,7 +103,8 @@ function run(cmd: string, args: string[], opts: { cwd?: string } = {}): { status
 
 /** Run and stream output straight through (for user-facing delegated verbs). */
 function runThrough(cmd: string, args: string[]): number {
-  const res = spawnSync(cmd, args, { stdio: "inherit", shell: isCmdShim(cmd) });
+  const prepared = shimArgs(cmd, args);
+  const res = spawnSync(cmd, prepared.args, { stdio: "inherit", shell: prepared.shell });
   return res.status ?? 1;
 }
 
@@ -127,10 +154,12 @@ function resolveSource(source: string, flags: AddFlags): ResolvedSource {
     throw new Error(`${local} exists but has no ${MANIFEST} — not a pack`);
   }
 
-  // npm spec
+  // npm spec. --ignore-scripts: this is pure acquisition/staging — a pack is
+  // data (manifest + skills), so its lifecycle scripts never need to run and
+  // letting them run here would be an avoidable supply-chain hole.
   const staging = mkdtempSync(join(tmpdir(), "wicked-pack-"));
   console.log(chalk.dim(`  fetching ${source} from npm...`));
-  const res = run("npm", ["install", "--prefix", staging, "--no-fund", "--no-audit", "--loglevel=error", source]);
+  const res = run("npm", ["install", "--prefix", staging, "--ignore-scripts", "--no-fund", "--no-audit", "--loglevel=error", source]);
   if (res.status !== 0) {
     rmSync(staging, { recursive: true, force: true });
     throw new Error(`npm install failed for ${source}:\n${res.out.trim()}`);
@@ -143,9 +172,22 @@ function resolveSource(source: string, flags: AddFlags): ResolvedSource {
   return { dir, origin: flags.sourceUrl ?? `npm:${source}`, staging };
 }
 
+/** Pack names double as filesystem path segments (install home, remove) —
+ *  restrict to a single kebab-case segment so a hostile manifest can never
+ *  traverse (`../../…`) out of the packs directory. Mirrors garden's rule. */
+const SAFE_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+function assertSafeName(name: string): string {
+  if (!SAFE_NAME.test(name) || name.length > 64) {
+    throw new Error(`pack name ${JSON.stringify(name)} must be kebab-case (max 64 chars) — refusing to use it as a path`);
+  }
+  return name;
+}
+
 function readManifest(dir: string): PackManifest {
   const parsed = JSON.parse(readFileSync(join(dir, MANIFEST), "utf8")) as PackManifest;
   if (!parsed.name) throw new Error(`${MANIFEST} has no "name"`);
+  assertSafeName(parsed.name);
   return parsed;
 }
 
@@ -236,9 +278,19 @@ export async function packAdd(source: string, flags: AddFlags): Promise<number> 
 }
 
 export async function packRemove(name: string): Promise<number> {
+  try {
+    assertSafeName(name);
+  } catch (err) {
+    console.error(chalk.red("Error:"), err instanceof Error ? err.message : String(err));
+    return 1;
+  }
   const dest = join(installedHome(), name);
   let skills: string[] = [];
-  if (existsSync(join(dest, MANIFEST))) {
+  // Only reap ~/.claude/skills entries that `pack add` could have created:
+  // plugin-shaped packs never had their skills copied there (add skips the
+  // copy), so deleting by name would nuke unrelated user skills.
+  const isPluginPack = existsSync(join(dest, ".claude-plugin", "plugin.json"));
+  if (!isPluginPack && existsSync(join(dest, MANIFEST))) {
     try {
       const manifest = readManifest(dest);
       const skillsDir = join(dest, manifest.skills_dir ?? "skills");
@@ -281,22 +333,37 @@ export function printPackHelp(): void {
   ].join("\n"));
 }
 
-/** Split pack argv into positionals + flags (flag values never leak into positionals). */
-export function parsePackArgs(argv: string[]): { positionals: string[]; flags: AddFlags } {
+/** Split pack argv into positionals + flags (flag values never leak into
+ *  positionals). A missing/flag-like `--source-url` value is a parse error —
+ *  silently swallowing the next flag would corrupt both flags AND provenance. */
+export function parsePackArgs(argv: string[]): { positionals: string[]; flags: AddFlags; error?: string } {
   const positionals: string[] = [];
   const flags: AddFlags = { dryRun: false, force: false };
+  let error: string | undefined;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--dry-run") flags.dryRun = true;
     else if (arg === "--force") flags.force = true;
-    else if (arg === "--source-url") { flags.sourceUrl = argv[i + 1]; i += 1; }
+    else if (arg === "--source-url") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        error = "--source-url requires a URL value";
+      } else {
+        flags.sourceUrl = value;
+        i += 1;
+      }
+    }
     else positionals.push(arg);
   }
-  return { positionals, flags };
+  return { positionals, flags, error };
 }
 
 export async function runPack(argv: string[]): Promise<number> {
-  const { positionals, flags } = parsePackArgs(argv);
+  const { positionals, flags, error } = parsePackArgs(argv);
+  if (error) {
+    console.error(chalk.red(`Error: ${error}`));
+    return 1;
+  }
   const verb = positionals[0];
   const rest = positionals.slice(1);
 
