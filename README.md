@@ -82,25 +82,28 @@ Pack authoring guide: wicked-garden's `docs/extending.md`.
 
 | Bundle | What it installs | Best for |
 |---|---|---|
-| `quick-start` | wicked-testing | Fastest path to acceptance testing — standalone, no deps |
-| `garden` | wicked-bus + wicked-garden + wicked-testing | Recommended starting point — evidence-gated work + full QE pipeline |
-| `knowledge` | wicked-bus + wicked-estate + wicked-brain | Persistent memory and code-graph layer |
-| `creative` | wicked-interactive + wicked-crew | Self-contained HTML artifact builder + the AI workflow console (Studio ships inside Crew) |
-| `full` | Everything stable | The complete wicked-\* experience |
+| `quick-start` | wicked-bus + wicked-crew | Fastest path to a governed multi-agent session — daemon up, Studio console open, first run in under five minutes |
+| `garden` | wicked-bus + wicked-garden | Recommended starting point for Claude Code users — evidence-gated work, graph-aware refactoring, and the full 40-specialist QE domain |
+| `knowledge` | wicked-bus + wicked-estate | Persistent memory, knowledge, and code-graph layer — everything else queries it |
+| `creative` | wicked-interactive + wicked-crew | Self-contained HTML/PDF/deck builder + the AI workflow console (Studio ships inside Crew) |
+| `full` | wicked-bus + wicked-estate + wicked-garden + wicked-interactive + wicked-crew | The complete wicked-\* experience |
 
 ---
 
 ## Products
 
-| Product | What it does |
-|---|---|
-| [wicked-testing](https://github.com/mikeparcewski/wicked-testing) | 48-skill QE pipeline (40 specialist + 8 Tier-1 workflow skills) with acceptance testing that eliminates self-grading. |
-| [wicked-bus](https://www.npmjs.com/package/wicked-bus) | Durable event fabric for agents — restart-durable at-least-once delivery with dead-lettering and replay. Zero infra (embedded SQLite), single-host. |
-| [wicked-brain](https://www.npmjs.com/package/wicked-brain) | Digital brain + Claude Code skills adapter. Indexes codebase knowledge. |
-| wicked-estate | MCP server: code graph + memory + knowledge in one binary. 23 tools. |
-| wicked-garden | Curated toolkit for what coding agents can't do alone. Claude Code plugin. |
-| wicked-interactive | Design and vibe canvas — build self-contained interactive HTML artifacts. |
-| [wicked-crew](https://www.npmjs.com/package/wicked-crew) | Agentic execution platform — drives coding-agent CLIs through governed workflows. Includes the Studio operator console (browser HITL: live topology, gates, evidence). |
+| Product | Status | What it does |
+|---|---|---|
+| [wicked-estate](https://github.com/mikeparcewski/wicked-estate) | stable | MCP server: code graph + memory + knowledge in one binary. 23 tools across 3 domains. 113 languages. |
+| [wicked-bus](https://www.npmjs.com/package/wicked-bus) | stable | Durable event fabric for agents — restart-durable at-least-once delivery with dead-lettering and replay. Zero infra (embedded SQLite), single-host. |
+| [wicked-garden](https://github.com/mikeparcewski/wicked-garden) | active | Curated toolkit for what coding agents can't do alone. Claude Code plugin. Includes the 40-specialist QE domain (acceptance testing, evidence-gated, no self-grading). |
+| [wicked-interactive](https://github.com/mikeparcewski/wicked-interactive) | stable | Design and vibe canvas — build self-contained interactive HTML artifacts. Export as HTML, PDF, PowerPoint, or video. |
+| [wicked-studio](https://github.com/mikeparcewski/wicked-studio) | active | Browser console for wicked-crew — launch/steer governed runs, answer HITL gates, live event streams. Ships bundled inside wicked-crew. |
+| [wicked-crew](https://www.npmjs.com/package/wicked-crew) | active | Governed multi-agent execution — drives coding-agent CLIs through durable workflows with deny-dominates dual gates and evidence-re-derived "done". Includes the Studio console. |
+
+> **Retired products** — do not install:
+> - `wicked-testing` (retired 2026-08, v0.11.0 final): QE capabilities moved to wicked-garden's `qe` domain; acceptance gate is now wicked-crew.
+> - `wicked-brain` (retired 2026-08): memory + knowledge absorbed into wicked-estate. npm package deprecated.
 
 ---
 
