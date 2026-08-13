@@ -4,13 +4,13 @@
     {
       "id": "wicked-estate",
       "displayName": "Wicked Estate",
-      "description": "MCP server: code graph + memory + knowledge in one binary. 23 tools across 3 domains. Stores injected edges that grep never sees.",
+      "description": "MCP server: code graph + memory + knowledge in one binary. 23 tools across 3 domains. Stores injected edges that grep never sees. Absorbed wicked-brain (retired 2026-08): indexes codebase knowledge + memories, surfaced through wicked-garden's mem/search skill domains.",
       "type": "mcp-binary",
       "standalone": true,
       "opinionated": false,
       "status": "stable",
       "requires": [],
-      "recommended": ["wicked-bus", "wicked-brain"],
+      "recommended": ["wicked-bus"],
       "install": {
         "type": "cargo",
         "crate": "wicked-estate-mcp",
@@ -46,43 +46,44 @@
     {
       "id": "wicked-testing",
       "displayName": "Wicked Testing",
-      "description": "48-skill QE pipeline (40 specialist + 8 Tier-1 workflow skills) with acceptance testing that enforces separation between the agent that runs tests and the agent that evaluates them. Eliminates self-grading.",
+      "description": "RETIRED (2026-08, v0.11.0 final). QE capabilities (40 specialist skills + acceptance trio) have moved to wicked-garden's qe domain. The acceptance gate is now wicked-crew. Data layer is wicked-ledger + wicked-vault. Install wicked-garden and wicked-crew instead.",
       "type": "npm-cli",
       "standalone": true,
       "opinionated": false,
-      "status": "stable",
+      "status": "retired",
       "requires": [],
-      "recommended": ["wicked-bus", "wicked-brain"],
       "install": {
         "type": "npm-run",
         "package": "wicked-testing",
         "command": "install"
-      }
+      },
+      "note": "Retired. npm package deprecated at 0.11.0. Do not install — use wicked-garden (qe domain) + wicked-crew instead."
     },
     {
       "id": "wicked-brain",
       "displayName": "Wicked Brain",
-      "description": "Digital brain + Claude Code skills adapter. SQLite-backed. Indexes codebase knowledge, surfaces context before work sessions.",
+      "description": "RETIRED (2026-08, Phase 5-S7). Memory, knowledge, and search capabilities consolidated into wicked-estate. The npm package is deprecated. Use wicked-estate (memory + knowledge domains) via wicked-garden's mem/search skills instead.",
       "type": "npm-lib",
       "standalone": true,
       "opinionated": false,
-      "status": "active",
+      "status": "retired",
       "requires": [],
       "install": {
         "type": "npm-global",
         "package": "wicked-brain"
-      }
+      },
+      "note": "Retired. npm package deprecated. Use wicked-estate instead — it ships all memory/knowledge/search capabilities. ~/.wicked-brain on disk is a frozen archive; never delete it."
     },
     {
       "id": "wicked-garden",
       "displayName": "Wicked Garden",
-      "description": "Curated toolkit for what coding agents can't do alone: re-derives 'done' from evidence, sees injected edges, renames across files as a graph operation, multi-model review. Opinionated bundle — all or nothing.",
+      "description": "Curated toolkit for what coding agents can't do alone: re-derives 'done' from evidence, sees injected edges, renames across files as a graph operation, multi-model review, 40-specialist QE domain, mem/search via wicked-estate. Opinionated bundle — all or nothing.",
       "type": "claude-plugin",
       "standalone": false,
       "opinionated": true,
       "status": "active",
-      "requires": ["wicked-bus", "wicked-testing"],
-      "recommended": ["wicked-estate", "wicked-brain"],
+      "requires": ["wicked-bus"],
+      "recommended": ["wicked-estate", "wicked-crew"],
       "install": {
         "type": "npm-run",
         "package": "wicked-garden",
@@ -109,28 +110,28 @@
     {
       "id": "wicked-studio",
       "displayName": "Wicked Studio",
-      "description": "Desktop operator console for AI-native workflows. Live agent topology, PTY terminal, human-in-the-loop (HITL) response, and cross-session event replay. Requires wicked-core at runtime.",
+      "description": "Coder-facing browser console for wicked-crew — launch/steer governed runs, answer HITL gates, view live agent streams and evidence. Pure HTTP/WS client of crew's API. Ships bundled inside wicked-crew (npx wicked-crew serve opens the UI); also available as a standalone repo for custom deployments.",
       "type": "desktop-binary",
       "standalone": false,
       "opinionated": false,
-      "status": "archived",
-      "requires": [],
-      "recommended": ["wicked-crew"],
+      "status": "active",
+      "requires": ["wicked-crew"],
+      "recommended": [],
       "install": {
         "type": "manual",
-        "instructions": "Wicked Studio is not installed on its own — it ships inside Wicked Crew. Install wicked-crew and the Studio console (wicked-crew/dist/studio) comes with it; launch it from Crew."
+        "instructions": "Wicked Studio ships bundled inside Wicked Crew — install wicked-crew and run `wicked-crew serve` to get the Studio console. For custom deployments, the standalone repo is mikeparcewski/wicked-studio."
       }
     },
     {
       "id": "wicked-crew",
       "displayName": "Wicked Crew",
-      "description": "Governed multi-agent runs for the coding CLIs you already have, driven from the Studio browser console — launch a run, watch every agent stream over persistent ACP sessions, answer steering gates, and export the evidence bundle. Evaluator is never the creator. Install once, then `wicked-crew serve` and open the console.",
+      "description": "Governed multi-agent runs for the coding CLIs you already have. Evaluator is never the creator. Deny-dominates dual gates. 'Done' re-derived from evidence, never asserted. Launch a run, watch every agent stream, answer steering gates, export the evidence bundle. Ships with Wicked Studio console.",
       "type": "npm-cli",
       "standalone": true,
       "opinionated": false,
       "status": "active",
       "requires": [],
-      "recommended": ["wicked-estate", "wicked-bus"],
+      "recommended": ["wicked-estate", "wicked-bus", "wicked-garden"],
       "install": {
         "type": "npm-global",
         "package": "wicked-crew"
@@ -141,32 +142,32 @@
     {
       "id": "quick-start",
       "displayName": "Quick Start",
-      "description": "Just wicked-testing — the fastest way to add acceptance testing to your AI workflow. Standalone, no dependencies.",
-      "products": ["wicked-testing"]
+      "description": "Crew + Bus — the fastest way to run a governed multi-agent session. Install crew, start the daemon, open the Studio console, and launch a run in under five minutes.",
+      "products": ["wicked-bus", "wicked-crew"]
     },
     {
       "id": "garden",
       "displayName": "Garden Bundle",
-      "description": "The recommended starting point. Bus + Garden + Testing gives you evidence-gated work, event coupling, and a full QE pipeline.",
-      "products": ["wicked-bus", "wicked-garden", "wicked-testing"]
+      "description": "The recommended starting point for Claude Code users. Bus + Garden gives you evidence-gated work, graph-aware refactoring, multi-model review, and the full QE skill domain.",
+      "products": ["wicked-bus", "wicked-garden"]
     },
     {
       "id": "knowledge",
       "displayName": "Knowledge Stack",
-      "description": "Estate + Brain + Bus — the persistent memory and code-graph layer everything else can query.",
-      "products": ["wicked-bus", "wicked-estate", "wicked-brain"]
+      "description": "Estate + Bus — the persistent memory, knowledge, and code-graph layer. Everything else queries it. Surfaced through wicked-garden's mem/search skill domains.",
+      "products": ["wicked-bus", "wicked-estate"]
     },
     {
       "id": "creative",
       "displayName": "Creative Suite",
-      "description": "Wicked Interactive + Crew — the creative and operator surfaces. Build self-contained HTML artifacts, and get live visibility into AI workflow sessions via the Studio console that ships inside Crew.",
+      "description": "Wicked Interactive + Crew — the creative and operator surfaces. Build self-contained HTML artifacts and get live visibility into AI workflow sessions via the Studio console that ships inside Crew.",
       "products": ["wicked-interactive", "wicked-crew"]
     },
     {
       "id": "full",
       "displayName": "Full Stack",
-      "description": "Everything stable — bus, estate, brain, garden, testing, interactive, and crew (which includes the Studio console). The complete wicked-* experience.",
-      "products": ["wicked-bus", "wicked-estate", "wicked-brain", "wicked-garden", "wicked-testing", "wicked-interactive", "wicked-crew"]
+      "description": "Everything active — bus, estate, garden, interactive, and crew (which includes the Studio console). The complete wicked-* experience.",
+      "products": ["wicked-bus", "wicked-estate", "wicked-garden", "wicked-interactive", "wicked-crew"]
     }
   ]
 }
