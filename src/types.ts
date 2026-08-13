@@ -1,4 +1,4 @@
-export type ProductStatus = "stable" | "active" | "preview" | "design";
+export type ProductStatus = "stable" | "active" | "preview" | "design" | "retired";
 export type ProductType = "npm-cli" | "npm-lib" | "mcp-binary" | "claude-plugin" | "desktop-binary";
 export type InstallType = "npm-global" | "npm-run" | "binary" | "manual" | "github-binary" | "git-plugin" | "cargo";
 

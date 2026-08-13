@@ -9,6 +9,7 @@ const STATUS_BADGE: Record<string, string> = {
   active: chalk.cyan("[active]"),
   preview: chalk.yellow("[preview]"),
   design: chalk.gray("[design]"),
+  retired: chalk.gray("[retired]"),
 };
 
 export type SelectionMode = "bundle" | "custom";

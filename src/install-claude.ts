@@ -32,7 +32,7 @@ import { createHash, randomBytes } from "node:crypto";
 // rule for npm/npx, atomic tmp+rename with Windows retry, no unix-only shell tricks.
 // ---------------------------------------------------------------------------
 
-type ProductStatus = "stable" | "active" | "preview" | "design";
+type ProductStatus = "stable" | "active" | "preview" | "design" | "retired";
 type ProductType = "npm-cli" | "npm-lib" | "mcp-binary" | "claude-plugin" | "desktop-binary";
 type InstallType = "npm-global" | "npm-run" | "binary" | "manual" | "github-binary" | "git-plugin" | "cargo";
 

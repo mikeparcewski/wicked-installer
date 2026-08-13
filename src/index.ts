@@ -395,7 +395,7 @@ async function runList(): Promise<void> {
   const products = listProducts(true);
   console.log(chalk.bold("Available wicked-* products:\n"));
   for (const p of products) {
-    const badge = p.status === "design" ? chalk.gray(` [${p.status}]`) :
+    const badge = (p.status === "design" || p.status === "retired") ? chalk.gray(` [${p.status}]`) :
                   p.status === "preview" ? chalk.yellow(` [${p.status}]`) :
                   p.status === "active" ? chalk.cyan(` [${p.status}]`) :
                   chalk.green(` [${p.status}]`);
@@ -455,7 +455,7 @@ async function runStatus(): Promise<void> {
     const statusIcon = installed ? chalk.green("✓ installed") :
                        p.install.type === "manual" ? chalk.yellow("~ manual") :
                        chalk.dim("  not installed");
-    const statusBadge = p.status === "design" ? chalk.gray(` [${p.status}]`) : "";
+    const statusBadge = (p.status === "design" || p.status === "retired") ? chalk.gray(` [${p.status}]`) : "";
     console.log(`  ${statusIcon}  ${chalk.bold(p.id)}${statusBadge}`);
   }
 }
