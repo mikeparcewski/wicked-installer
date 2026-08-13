@@ -22,9 +22,9 @@ export function getBundle(id: string): Bundle | undefined {
   return loadRegistry().bundles.find(b => b.id === id);
 }
 
-export function listProducts(includeDesign = false): Product[] {
+export function listProducts(includeAll = false): Product[] {
   return loadRegistry().products.filter(
-    p => includeDesign || p.status !== "design"
+    p => includeAll || (p.status !== "design" && p.status !== "retired")
   );
 }
 
