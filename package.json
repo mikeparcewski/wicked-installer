@@ -1,6 +1,6 @@
 {
   "name": "wicked-installer",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "type": "module",
   "description": "Interactive installer for the wicked-* ecosystem \u2014 registry-driven, dependency-aware, cross-CLI.",
   "keywords": [
