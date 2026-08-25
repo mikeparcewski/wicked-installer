@@ -8,15 +8,25 @@
 # a release via repository_dispatch (event_type: package-released — see the
 # notify-installer workflow in each product repo; requires a PAT secret there).
 name: registry conformance
+# The unit tests ALSO run on every PR and push (the `test` job below). They used to run only
+# here, on the daily cron — so a change could break all of them and CI stayed silent until
+# 09:17 UTC the next day, long after the PR had merged. The NETWORK half (does every registry
+# entry still resolve at its channel?) stays on the schedule, because that answers a question
+# about the outside world rather than about the diff, and hitting npm + crates.io for every
+# entry on every push is both slow and rate-limit-prone.
 on:
   schedule:
     - cron: '17 9 * * *'
   workflow_dispatch:
   repository_dispatch:
     types: [package-released]
+  pull_request:
+  push:
+    branches: [main]
 
 jobs:
-  conformance:
+  # Fast, network-free, and gates every PR.
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +35,18 @@ jobs:
           node-version: '22'
       - name: build + unit tests
         run: npm ci && npm run build && npm test
+
+  conformance:
+    # The outside-world check: only where it is meaningful, never on a PR.
+    if: github.event_name != 'pull_request' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: build
+        run: npm ci && npm run build
       - name: every registry entry resolves at its channel
         run: |
           python3 - <<'PY'

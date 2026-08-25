@@ -2,7 +2,8 @@ import { existsSync, readdirSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
-import type { DetectedCli } from "./types.js";
+import type { DetectedCli, Product } from "./types.js";
+import { loadRegistry } from "./registry.js";
 
 interface CliSpec {
   id: string;
@@ -245,29 +246,110 @@ export function discoverCliScripts(dir: string): CliScript[] {
   return scripts;
 }
 
-export function isProductInstalled(productId: string): boolean {
+/**
+ * Is this product installed on this machine?
+ *
+ * The shape here used to be a switch over four product ids with `default: return false`, which
+ * meant every product NOT in the switch reported "not installed" no matter what was on disk. On a
+ * machine running `wicked-crew serve` this printed "not installed  wicked-crew" — the status command
+ * contradicting a daemon that was serving requests at that moment. wicked-estate, wicked-interactive
+ * and wicked-studio were wrong the same way. A status surface that answers `false` for anything it
+ * has not been taught about is worse than one that says "unknown": it reads as a checked negative.
+ *
+ * So the DEFAULT is now derived from what the registry already says about how a product installs,
+ * and the switch holds only the genuine special cases:
+ *
+ *  - `npm-global` / `npm-run` with a package ⇒ is its binary on PATH. That is the same question the
+ *    user is really asking ("can I run this?"), and it is agnostic about WHERE it came from —
+ *    homebrew's prefix, an npm global prefix, `~/.local/bin`, a version manager's shim. The old
+ *    hand-rolled checks were all location-specific and this machine has products in three different
+ *    prefixes;
+ *  - `cargo` ⇒ the crate's binary, likewise on PATH (`~/.cargo/bin`, or `~/.local/bin`);
+ *  - `manual` ⇒ not independently installable, so it is installed exactly when its requirements are
+ *    (wicked-studio ships INSIDE wicked-crew). The caller renders these as "manual" anyway.
+ *
+ * Special cases that survive, and why each one is not just a PATH probe:
+ *
+ *  - **wicked-testing** is retired and was never a binary — it installed SKILLS into `~/.claude`, so
+ *    the skills dir is the only evidence it was ever here.
+ *  - **wicked-garden** is a Claude Code PLUGIN, not a CLI: its evidence is the installed plugin
+ *    manifest, and `wicked-garden` on PATH would prove nothing about the plugin being wired in.
+ *  - **wicked-brain** is retired, and `~/.wicked-brain` is a FROZEN ARCHIVE that must never be
+ *    deleted. Reporting "installed" because the archive exists tells an operator to uninstall
+ *    something that is not installed — and the safe answer to "is this retired thing present" is
+ *    about the PACKAGE, not its leftover data. The archive is deliberately not consulted.
+ */
+export function isProductInstalled(productId: string, seen: ReadonlySet<string> = new Set()): boolean {
+  // The `manual` arm recurses through `requires`, and requires comes from registry.json — data
+  // that ships in the package and can be hand-edited or corrupted, exactly like the binary names
+  // guarded above. A self-reference (`requires: ["itself"]`) or a cycle (A→B→A) would recurse
+  // until the stack blew, turning a corrupt data file into a crash of the status command rather
+  // than a wrong answer. A product already on the current chain is treated as NOT satisfied:
+  // nothing in a dependency cycle can be shown installed on the strength of the cycle itself.
+  if (seen.has(productId)) return false;
+  const chain = new Set(seen).add(productId);
+  const home = homedir();
   switch (productId) {
-    case "wicked-testing": {
-      // Checks for a Claude Code install by looking for the skills dir
-      const home = homedir();
+    case "wicked-testing":
+      // Retired, and never a binary: it installed skills into Claude Code's skills dir.
       return existsSync(join(home, ".claude", "skills", "wicked-testing-acceptance-testing")) ||
              existsSync(join(home, ".claude", "skills", "wicked-testing:acceptance-testing"));
-    }
-    case "wicked-bus": {
-      try {
-        execSync("npx wicked-bus --version", { timeout: 3000, stdio: "ignore" });
-        return true;
-      } catch {
-        return false;
-      }
-    }
-    case "wicked-brain": {
-      const home = homedir();
-      return existsSync(join(home, ".wicked-brain"));
-    }
-    case "wicked-garden": {
-      const home = homedir();
+    case "wicked-garden":
+      // A plugin, not a CLI — the manifest is the evidence.
       return existsSync(join(home, ".claude", "plugins", "wicked-garden", ".claude-plugin", "plugin.json"));
+    case "wicked-brain":
+      // Retired. `~/.wicked-brain` is a frozen archive, NOT an install — see the header.
+      return commandExists("wicked-brain");
+    default:
+      return installedPerRegistry(productId, chain);
+  }
+}
+
+/**
+ * A shell-safe executable name.
+ *
+ * `commandExists` interpolates into `execSync`, and these names come from registry.json rather
+ * than from source — a file that ships in the package and could be corrupted, hand-edited, or
+ * replaced. An entry like `x; rm -rf ~` would otherwise reach a shell. Nothing legitimate needs
+ * more than this alphabet, so anything outside it is rejected rather than escaped: a name we would
+ * have to quote to make safe is a name we should not be probing.
+ *
+ * It also removes a quieter failure — a package name carrying a space or a `$` would make
+ * `command -v` answer about something other than the thing asked about, and report it as fact.
+ */
+const SAFE_BINARY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function commandExistsSafe(name: string): boolean {
+  return SAFE_BINARY.test(name) && commandExists(name);
+}
+
+/** Detection derived from the product's own `install` spec, so a new product needs no new branch. */
+function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boolean {
+  const product: Product | undefined = loadRegistry().products.find((p) => p.id === productId);
+  if (product === undefined) return false;
+  const install = product.install;
+  switch (install.type) {
+    case "npm-global":
+    case "npm-run":
+      // The binary is conventionally the package name for every wicked-* product.
+      return typeof install.package === "string" && commandExistsSafe(install.package);
+    case "cargo": {
+      // The crate may publish a differently-named binary (wicked-estate-mcp ⇒ wicked-estate).
+      const crate = install.crate ?? install.package;
+      if (typeof crate !== "string") return false;
+      return commandExistsSafe(crate) || commandExistsSafe(crate.replace(/-mcp$/, ""));
+    }
+    case "manual": {
+      // Ships inside something else; installed exactly when that thing is.
+      //
+      // `requires` is validated, not assumed. This whole function exists to tolerate a corrupted
+      // registry.json — it guards binary names against shell metacharacters and `requires` against
+      // cycles — so reaching `.every` on a value that turned out to be a string or an object would
+      // throw and crash `status` for exactly the input the rest of the code is careful about.
+      // Bad data yields a safe `false`; it never yields an exception.
+      const requires = product.requires;
+      if (!Array.isArray(requires) || requires.length === 0) return false;
+      return requires.every((r) => typeof r === "string" && isProductInstalled(r, seen));
     }
     default:
       return false;

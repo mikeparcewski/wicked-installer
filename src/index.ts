@@ -452,9 +452,17 @@ async function runStatus(): Promise<void> {
   console.log(chalk.bold("\nwicked-* products:"));
   for (const p of products) {
     const installed = isProductInstalled(p.id);
-    const statusIcon = installed ? chalk.green("✓ installed") :
-                       p.install.type === "manual" ? chalk.yellow("~ manual") :
-                       chalk.dim("  not installed");
+    // A `manual` product is not installed DIRECTLY — it arrives inside something else
+    // (wicked-studio ships in wicked-crew). Both facts matter and neither replaces the other:
+    // "is it here?" and "how would I get it?" are different questions, and until detection was
+    // fixed this line could only ever answer the second, because `isProductInstalled` returned
+    // false for every product it had not been taught about.
+    const manual = p.install.type === "manual";
+    const statusIcon = installed
+      ? chalk.green("✓ installed") + (manual ? chalk.dim(" (bundled)") : "")
+      : manual
+        ? chalk.yellow("~ manual")
+        : chalk.dim("  not installed");
     const statusBadge = (p.status === "design" || p.status === "retired") ? chalk.gray(` [${p.status}]`) : "";
     console.log(`  ${statusIcon}  ${chalk.bold(p.id)}${statusBadge}`);
   }
