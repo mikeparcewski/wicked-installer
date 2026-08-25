@@ -339,10 +339,18 @@ function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boo
       if (typeof crate !== "string") return false;
       return commandExistsSafe(crate) || commandExistsSafe(crate.replace(/-mcp$/, ""));
     }
-    case "manual":
+    case "manual": {
       // Ships inside something else; installed exactly when that thing is.
-      return (product.requires ?? []).length > 0 &&
-             (product.requires ?? []).every((r) => isProductInstalled(r, seen));
+      //
+      // `requires` is validated, not assumed. This whole function exists to tolerate a corrupted
+      // registry.json — it guards binary names against shell metacharacters and `requires` against
+      // cycles — so reaching `.every` on a value that turned out to be a string or an object would
+      // throw and crash `status` for exactly the input the rest of the code is careful about.
+      // Bad data yields a safe `false`; it never yields an exception.
+      const requires = product.requires;
+      if (!Array.isArray(requires) || requires.length === 0) return false;
+      return requires.every((r) => typeof r === "string" && isProductInstalled(r, seen));
+    }
     default:
       return false;
   }

@@ -17,10 +17,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, cpSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const registry = JSON.parse(readFileSync(join(root, "registry.json"), "utf8"));
@@ -142,25 +143,29 @@ test("a cyclic or self-referential `requires` cannot hang or crash detection", (
   // `requires` comes from registry.json — data that ships in the package and can be hand-edited
   // or corrupted, exactly like the binary names. Before the guard, A→B→A recursed until the stack
   // blew, so a bad data file crashed the status command instead of yielding a wrong answer.
-  // Proven against a REAL poisoned registry, not by reading the source.
-  const regPath = join(root, "registry.json");
-  const original = readFileSync(regPath, "utf8");
+  //
+  // Run against a poisoned registry in a TEMP COPY, never the working tree. `node --test` runs
+  // test files concurrently and several of them read registry.json, so mutating the real file
+  // would let this test poison its siblings — a flake I would have introduced while fixing one.
+  const tmp = mkdtempSync(join(tmpdir(), "installer-cycle-"));
   try {
-    const poisoned = JSON.parse(original);
+    cpSync(join(root, "dist"), join(tmp, "dist"), { recursive: true });
+    const poisoned = JSON.parse(readFileSync(join(root, "registry.json"), "utf8"));
     const byId = Object.fromEntries(poisoned.products.map((p) => [p.id, p]));
-    // A ↔ B cycle plus a self-reference — both shapes, one file.
+    // Three corrupt shapes in one file: an A↔B cycle, a self-reference, and a non-array `requires`.
     byId["wicked-studio"].install = { type: "manual" };
     byId["wicked-studio"].requires = ["wicked-crew"];
     byId["wicked-crew"].install = { type: "manual" };
     byId["wicked-crew"].requires = ["wicked-studio"];
     byId["wicked-interactive"].install = { type: "manual" };
     byId["wicked-interactive"].requires = ["wicked-interactive"];
-    writeFileSync(regPath, JSON.stringify(poisoned, null, 2));
+    byId["wicked-bus"].install = { type: "manual" };
+    byId["wicked-bus"].requires = "wicked-crew";           // a STRING, not an array
+    writeFileSync(join(tmp, "registry.json"), JSON.stringify(poisoned, null, 2));
 
-    // A fresh process so the registry module cache cannot serve the clean copy.
     const probe = `
-      const { isProductInstalled } = await import(${JSON.stringify(join(root, "dist", "detector.js"))});
-      for (const id of ["wicked-studio", "wicked-crew", "wicked-interactive"]) {
+      const { isProductInstalled } = await import(${JSON.stringify("file://" + join(tmp, "dist", "detector.js"))});
+      for (const id of ["wicked-studio", "wicked-crew", "wicked-interactive", "wicked-bus"]) {
         process.stdout.write(id + "=" + isProductInstalled(id) + "\\n");
       }
     `;
@@ -168,13 +173,14 @@ test("a cyclic or self-referential `requires` cannot hang or crash detection", (
       encoding: "utf8",
       timeout: 20_000,
     });
-    assert.equal(r.status, 0, `detection crashed on a cyclic registry:\n${r.stderr}`);
+    assert.equal(r.status, 0, `detection crashed on a corrupt registry:\n${r.stderr}`);
     assert.ok(!/Maximum call stack/i.test(r.stderr), "a cycle must not overflow the stack");
-    // Nothing in a cycle is installed on the strength of the cycle itself.
-    assert.match(r.stdout, /wicked-studio=false/);
-    assert.match(r.stdout, /wicked-crew=false/);
-    assert.match(r.stdout, /wicked-interactive=false/);
+    assert.ok(!/is not a function|TypeError/i.test(r.stderr), "a non-array `requires` must not throw");
+    // Nothing corrupt is installed on the strength of its own corruption.
+    for (const id of ["wicked-studio", "wicked-crew", "wicked-interactive", "wicked-bus"]) {
+      assert.match(r.stdout, new RegExp(`${id}=false`), `${id} must resolve false, not crash`);
+    }
   } finally {
-    writeFileSync(regPath, original);
+    rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
