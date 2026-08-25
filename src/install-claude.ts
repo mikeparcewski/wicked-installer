@@ -13,6 +13,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { isInstallable } from "./types.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -387,7 +388,7 @@ function loadRegistry(path: string): Registry {
 function resolveProducts(registry: Registry, ids: string[], all: boolean): Product[] {
   const byId = new Map(registry.products.map((product) => [product.id, product]));
   const requested = all
-    ? registry.products.filter((product) => product.status !== "design").map((product) => product.id)
+    ? registry.products.filter(isInstallable).map((product) => product.id)
     : ids;
 
   if (requested.length === 0) {

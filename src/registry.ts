@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import type { Registry, Product, Bundle } from "./types.js";
+import { isInstallable } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -23,9 +24,7 @@ export function getBundle(id: string): Bundle | undefined {
 }
 
 export function listProducts(includeAll = false): Product[] {
-  return loadRegistry().products.filter(
-    p => includeAll || (p.status !== "design" && p.status !== "retired")
-  );
+  return loadRegistry().products.filter(p => includeAll || isInstallable(p));
 }
 
 export function listBundles(): Bundle[] {

@@ -57,3 +57,19 @@ export interface DetectedCli {
   displayName: string;
   version?: string;
 }
+
+/**
+ * May this product be installed?
+ *
+ * `design` is unbuilt; `retired` is gone — wicked-testing and wicked-brain are both
+ * npm-DEPRECATED, so installing one hands the operator a package whose own registry entry
+ * tells them to use something else instead.
+ *
+ * Lives here, beside {@link ProductStatus}, because it is a fact about the status and has no
+ * dependencies. It was previously written out THREE times and one copy drifted: the two `--all`
+ * paths filtered only `design`, so `--all` installed both retired products. The duplication was
+ * the bug; one definition is the fix.
+ */
+export function isInstallable(p: { status: ProductStatus }): boolean {
+  return p.status !== "design" && p.status !== "retired";
+}
