@@ -17,9 +17,10 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const registry = JSON.parse(readFileSync(join(root, "registry.json"), "utf8"));
@@ -53,7 +54,7 @@ test("detection is derived from the install spec, so a new product needs no new 
   // structure, and a test that fails a harmless reformat is measuring layout, not behaviour.
   assert.match(
     src,
-    /default:\s*return\s+installedPerRegistry\(\s*productId\s*\)\s*;/,
+    /default:\s*return\s+installedPerRegistry\(\s*productId\s*(?:,[^)]*)?\)\s*;/,
     "isProductInstalled's default arm must delegate to the registry-derived check",
   );
   // And that helper must branch on install.type, i.e. read the registry rather than hardcode ids.
@@ -134,5 +135,46 @@ test("registry-sourced names are validated before they reach a shell", () => {
   }
   for (const ok of ["wicked-crew", "wicked-estate-mcp", "node", "a.b_c-1"]) {
     assert.equal(re.test(ok), true, `SAFE_BINARY must accept ${JSON.stringify(ok)}`);
+  }
+});
+
+test("a cyclic or self-referential `requires` cannot hang or crash detection", () => {
+  // `requires` comes from registry.json — data that ships in the package and can be hand-edited
+  // or corrupted, exactly like the binary names. Before the guard, A→B→A recursed until the stack
+  // blew, so a bad data file crashed the status command instead of yielding a wrong answer.
+  // Proven against a REAL poisoned registry, not by reading the source.
+  const regPath = join(root, "registry.json");
+  const original = readFileSync(regPath, "utf8");
+  try {
+    const poisoned = JSON.parse(original);
+    const byId = Object.fromEntries(poisoned.products.map((p) => [p.id, p]));
+    // A ↔ B cycle plus a self-reference — both shapes, one file.
+    byId["wicked-studio"].install = { type: "manual" };
+    byId["wicked-studio"].requires = ["wicked-crew"];
+    byId["wicked-crew"].install = { type: "manual" };
+    byId["wicked-crew"].requires = ["wicked-studio"];
+    byId["wicked-interactive"].install = { type: "manual" };
+    byId["wicked-interactive"].requires = ["wicked-interactive"];
+    writeFileSync(regPath, JSON.stringify(poisoned, null, 2));
+
+    // A fresh process so the registry module cache cannot serve the clean copy.
+    const probe = `
+      const { isProductInstalled } = await import(${JSON.stringify(join(root, "dist", "detector.js"))});
+      for (const id of ["wicked-studio", "wicked-crew", "wicked-interactive"]) {
+        process.stdout.write(id + "=" + isProductInstalled(id) + "\\n");
+      }
+    `;
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", probe], {
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    assert.equal(r.status, 0, `detection crashed on a cyclic registry:\n${r.stderr}`);
+    assert.ok(!/Maximum call stack/i.test(r.stderr), "a cycle must not overflow the stack");
+    // Nothing in a cycle is installed on the strength of the cycle itself.
+    assert.match(r.stdout, /wicked-studio=false/);
+    assert.match(r.stdout, /wicked-crew=false/);
+    assert.match(r.stdout, /wicked-interactive=false/);
+  } finally {
+    writeFileSync(regPath, original);
   }
 });

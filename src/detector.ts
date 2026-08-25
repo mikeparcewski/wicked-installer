@@ -279,7 +279,15 @@ export function discoverCliScripts(dir: string): CliScript[] {
  *    something that is not installed — and the safe answer to "is this retired thing present" is
  *    about the PACKAGE, not its leftover data. The archive is deliberately not consulted.
  */
-export function isProductInstalled(productId: string): boolean {
+export function isProductInstalled(productId: string, seen: ReadonlySet<string> = new Set()): boolean {
+  // The `manual` arm recurses through `requires`, and requires comes from registry.json — data
+  // that ships in the package and can be hand-edited or corrupted, exactly like the binary names
+  // guarded above. A self-reference (`requires: ["itself"]`) or a cycle (A→B→A) would recurse
+  // until the stack blew, turning a corrupt data file into a crash of the status command rather
+  // than a wrong answer. A product already on the current chain is treated as NOT satisfied:
+  // nothing in a dependency cycle can be shown installed on the strength of the cycle itself.
+  if (seen.has(productId)) return false;
+  const chain = new Set(seen).add(productId);
   const home = homedir();
   switch (productId) {
     case "wicked-testing":
@@ -293,7 +301,7 @@ export function isProductInstalled(productId: string): boolean {
       // Retired. `~/.wicked-brain` is a frozen archive, NOT an install — see the header.
       return commandExists("wicked-brain");
     default:
-      return installedPerRegistry(productId);
+      return installedPerRegistry(productId, chain);
   }
 }
 
@@ -316,7 +324,7 @@ function commandExistsSafe(name: string): boolean {
 }
 
 /** Detection derived from the product's own `install` spec, so a new product needs no new branch. */
-function installedPerRegistry(productId: string): boolean {
+function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boolean {
   const product: Product | undefined = loadRegistry().products.find((p) => p.id === productId);
   if (product === undefined) return false;
   const install = product.install;
@@ -334,7 +342,7 @@ function installedPerRegistry(productId: string): boolean {
     case "manual":
       // Ships inside something else; installed exactly when that thing is.
       return (product.requires ?? []).length > 0 &&
-             (product.requires ?? []).every((r) => isProductInstalled(r));
+             (product.requires ?? []).every((r) => isProductInstalled(r, seen));
     default:
       return false;
   }
