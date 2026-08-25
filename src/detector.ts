@@ -297,6 +297,24 @@ export function isProductInstalled(productId: string): boolean {
   }
 }
 
+/**
+ * A shell-safe executable name.
+ *
+ * `commandExists` interpolates into `execSync`, and these names come from registry.json rather
+ * than from source — a file that ships in the package and could be corrupted, hand-edited, or
+ * replaced. An entry like `x; rm -rf ~` would otherwise reach a shell. Nothing legitimate needs
+ * more than this alphabet, so anything outside it is rejected rather than escaped: a name we would
+ * have to quote to make safe is a name we should not be probing.
+ *
+ * It also removes a quieter failure — a package name carrying a space or a `$` would make
+ * `command -v` answer about something other than the thing asked about, and report it as fact.
+ */
+const SAFE_BINARY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function commandExistsSafe(name: string): boolean {
+  return SAFE_BINARY.test(name) && commandExists(name);
+}
+
 /** Detection derived from the product's own `install` spec, so a new product needs no new branch. */
 function installedPerRegistry(productId: string): boolean {
   const product: Product | undefined = loadRegistry().products.find((p) => p.id === productId);
@@ -306,12 +324,12 @@ function installedPerRegistry(productId: string): boolean {
     case "npm-global":
     case "npm-run":
       // The binary is conventionally the package name for every wicked-* product.
-      return typeof install.package === "string" && commandExists(install.package);
+      return typeof install.package === "string" && commandExistsSafe(install.package);
     case "cargo": {
       // The crate may publish a differently-named binary (wicked-estate-mcp ⇒ wicked-estate).
       const crate = install.crate ?? install.package;
       if (typeof crate !== "string") return false;
-      return commandExists(crate) || commandExists(crate.replace(/-mcp$/, ""));
+      return commandExistsSafe(crate) || commandExistsSafe(crate.replace(/-mcp$/, ""));
     }
     case "manual":
       // Ships inside something else; installed exactly when that thing is.

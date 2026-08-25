@@ -25,26 +25,35 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const registry = JSON.parse(readFileSync(join(root, "registry.json"), "utf8"));
 const { isProductInstalled } = await import(join(root, "dist", "detector.js"));
 
+/** Source with comments removed — assertions about CODE must not match prose. */
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
 test("every registry product gets a real answer, not a default-false", async () => {
   // The regression was structural: unknown id ⇒ false. If detection is derived from the install
   // spec, then every product in the registry is reachable by some branch. We prove that by
   // checking the SOURCE has no blanket default for known products, and that each id resolves
   // without throwing.
   for (const p of registry.products) {
-    assert.doesNotThrow(
-      () => isProductInstalled(p.id),
-      `isProductInstalled(${p.id}) threw — every registry id must resolve`,
-    );
-    assert.equal(typeof isProductInstalled(p.id), "boolean", `${p.id} must answer a boolean`);
+    // Called ONCE and captured: this spawns `command -v`, so a second call is both slow and a
+    // second chance for the environment to differ between the two assertions.
+    let answer;
+    assert.doesNotThrow(() => {
+      answer = isProductInstalled(p.id);
+    }, `isProductInstalled(${p.id}) threw — every registry id must resolve`);
+    assert.equal(typeof answer, "boolean", `${p.id} must answer a boolean`);
   }
 });
 
 test("detection is derived from the install spec, so a new product needs no new branch", () => {
   const src = readFileSync(join(root, "src", "detector.ts"), "utf8");
   // The default arm must delegate, not answer false.
+  // Whitespace-agnostic: `default: return installedPerRegistry(...)` on one line is the same
+  // structure, and a test that fails a harmless reformat is measuring layout, not behaviour.
   assert.match(
     src,
-    /default:\s*\n\s*return installedPerRegistry\(productId\);/,
+    /default:\s*return\s+installedPerRegistry\(\s*productId\s*\)\s*;/,
     "isProductInstalled's default arm must delegate to the registry-derived check",
   );
   // And that helper must branch on install.type, i.e. read the registry rather than hardcode ids.
@@ -55,8 +64,18 @@ test("detection is derived from the install spec, so a new product needs no new 
 test("a retired product is not 'installed' merely because its data survives", () => {
   // ~/.wicked-brain is a FROZEN ARCHIVE that must never be deleted. Reporting brain as installed
   // because that directory exists tells an operator to uninstall something that is not installed.
-  const src = readFileSync(join(root, "src", "detector.ts"), "utf8");
-  const brainArm = src.slice(src.indexOf('case "wicked-brain"'), src.indexOf('default:'));
+  // Comments are prose, not behaviour: the arm's own doc EXPLAINS that ~/.wicked-brain is a
+  // frozen archive, so a naive text search finds the path it exists to warn about. Strip comments
+  // and assert on code — the same trap that a sibling guard in wicked-crew hit.
+  const src = stripComments(readFileSync(join(root, "src", "detector.ts"), "utf8"));
+  // Assert the SLICE BOUNDS first. With indexOf returning -1 the slice still yields a string, and
+  // `!includes(...)` on the wrong text passes — the test would report success while checking
+  // nothing. A guard that can pass vacuously is worse than no guard.
+  const start = src.indexOf('case "wicked-brain"');
+  const end = src.indexOf("default:", start);
+  assert.ok(start !== -1, 'the wicked-brain arm must exist to be asserted about');
+  assert.ok(end > start, 'the wicked-brain arm must be followed by the default arm');
+  const brainArm = src.slice(start, end);
   assert.ok(
     !brainArm.includes(".wicked-brain"),
     "wicked-brain detection must not consult the frozen ~/.wicked-brain archive",
@@ -84,4 +103,36 @@ test("a manual product is installed exactly when its requirements are", () => {
     isProductInstalled("wicked-crew"),
     "a bundled product's presence must track the thing it is bundled into",
   );
+});
+
+test("registry-sourced names are validated before they reach a shell", () => {
+  // `commandExists` interpolates into execSync, and these names come from registry.json — a file
+  // that ships in the package and can be corrupted, hand-edited, or replaced. An entry like
+  // `x; rm -rf ~` would otherwise reach a shell. Rejected rather than escaped: a name that needs
+  // quoting to be safe is a name we should not probe. It also kills a quieter failure — a name
+  // carrying a space or `$` makes `command -v` answer about something else and report it as fact.
+  const src = readFileSync(join(root, "src", "detector.ts"), "utf8");
+  assert.match(src, /const SAFE_BINARY = \/\^/, "a binary-name allowlist must exist");
+  assert.match(src, /function commandExistsSafe/, "the guarded wrapper must exist");
+
+  // Every registry-sourced probe must go through the guarded wrapper, never commandExists direct.
+  const body = src.slice(src.indexOf("function installedPerRegistry"));
+  const end = body.indexOf("\n}\n");
+  assert.ok(end > 0, "installedPerRegistry must be delimited to be asserted about");
+  const fn = body.slice(0, end);
+  assert.ok(
+    !/[^e]commandExists\(/.test(fn.replace(/commandExistsSafe\(/g, "SAFE(")),
+    "installedPerRegistry must call commandExistsSafe, never commandExists directly",
+  );
+
+  // And the allowlist must actually reject a metacharacter payload.
+  const m = /const SAFE_BINARY = (\/.*\/);/.exec(src);
+  assert.ok(m, "SAFE_BINARY must be a literal regex");
+  const re = new RegExp(m[1].slice(1, m[1].lastIndexOf("/")));
+  for (const bad of ["x; rm -rf ~", "a b", "$(whoami)", "`id`", "a|b", "../x", ""]) {
+    assert.equal(re.test(bad), false, `SAFE_BINARY must reject ${JSON.stringify(bad)}`);
+  }
+  for (const ok of ["wicked-crew", "wicked-estate-mcp", "node", "a.b_c-1"]) {
+    assert.equal(re.test(ok), true, `SAFE_BINARY must accept ${JSON.stringify(ok)}`);
+  }
 });
