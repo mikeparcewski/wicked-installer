@@ -88,6 +88,8 @@ Pack authoring guide: wicked-garden's `docs/extending.md`.
 | `creative` | wicked-interactive + wicked-crew | Self-contained HTML/PDF/deck builder + the AI workflow console (Studio ships inside Crew) |
 | `full` | wicked-bus + wicked-estate + wicked-garden + wicked-interactive + wicked-crew | The complete wicked-\* experience |
 
+Required dependencies resolve automatically: wicked-garden requires **wicked-vault** (the evidence backend its gate re-derives against), so any selection containing garden also installs it.
+
 ---
 
 ## Products
@@ -100,6 +102,8 @@ Pack authoring guide: wicked-garden's `docs/extending.md`.
 | [wicked-interactive](https://github.com/mikeparcewski/wicked-interactive) | stable | Design and vibe canvas — build self-contained interactive HTML artifacts. Export as HTML, PDF, PowerPoint, or video. |
 | [wicked-studio](https://github.com/mikeparcewski/wicked-studio) | active | Browser console for wicked-crew — launch/steer governed runs, answer HITL gates, live event streams. Ships bundled inside wicked-crew. |
 | [wicked-crew](https://www.npmjs.com/package/wicked-crew) | active | Governed multi-agent execution — drives coding-agent CLIs through durable workflows with deny-dominates dual gates and evidence-re-derived "done". Includes the Studio console. |
+
+> **Dependency, not a product:** `wicked-vault` (npm) is in the registry only so dependency resolution can install it — it is wicked-garden's required evidence backend, not a standalone pick.
 
 > **Retired products** — do not install:
 > - `wicked-testing` (retired 2026-08, v0.11.0 final): QE capabilities moved to wicked-garden's `qe` domain; acceptance gate is now wicked-crew.

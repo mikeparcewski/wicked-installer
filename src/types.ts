@@ -14,7 +14,8 @@ export interface InstallAction {
   repo?: string;             // full git URL — for git-plugin
   dest?: string;             // install destination relative to home
   postInstallCmd?: string;   // command to run after main install step
-  crate?: string;            // crates.io crate name — for cargo
+  crate?: string;            // crates.io crate name — for cargo; when `crates` is present, names the product's primary (MCP) binary
+  crates?: string[];         // for cargo products that ship >1 crate (e.g. wicked-estate + wicked-estate-mcp); wins over `crate` for acquisition
   version?: string;          // exact version to pin — for cargo (omit for latest)
 }
 

@@ -335,9 +335,16 @@ function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boo
       return typeof install.package === "string" && commandExistsSafe(install.package);
     case "cargo": {
       // The crate may publish a differently-named binary (wicked-estate-mcp ⇒ wicked-estate).
-      const crate = install.crate ?? install.package;
-      if (typeof crate !== "string") return false;
-      return commandExistsSafe(crate) || commandExistsSafe(crate.replace(/-mcp$/, ""));
+      // A multi-crate product (install.crates) is installed only when EVERY crate's binary
+      // resolves — a partial install (index CLI without the MCP server, or vice versa) must
+      // read as "not installed" so a re-run repairs it. Corrupt entries yield false, never throw.
+      const single = install.crate ?? install.package;
+      const crates: unknown[] = Array.isArray(install.crates) && install.crates.length > 0
+        ? install.crates
+        : [single];
+      return crates.every(
+        (c) => typeof c === "string" && (commandExistsSafe(c) || commandExistsSafe(c.replace(/-mcp$/, ""))),
+      );
     }
     case "manual": {
       // Ships inside something else; installed exactly when that thing is.

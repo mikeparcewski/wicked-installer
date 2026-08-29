@@ -13,8 +13,9 @@
       "recommended": ["wicked-bus"],
       "install": {
         "type": "cargo",
+        "crates": ["wicked-estate", "wicked-estate-mcp"],
         "crate": "wicked-estate-mcp",
-        "mcpInstructions": "Add wicked-estate as an MCP server in your CLI config with command: wicked-estate-mcp (installed to ~/.cargo/bin — ensure it is on PATH)"
+        "mcpInstructions": "Index a repo first: wicked-estate index <path> --db ~/.wicked-estate/graph.db. Then add wicked-estate as an MCP server in your CLI config with command: wicked-estate-mcp (both binaries install to ~/.cargo/bin — ensure it is on PATH)"
       },
       "mcp": {
         "wicked-estate": {
@@ -32,7 +33,7 @@
     {
       "id": "wicked-bus",
       "displayName": "Wicked Bus",
-      "description": "Local-first SQLite event bus. At-least-once delivery, poll-based, no network transport. Decouples agents and tools without external infrastructure.",
+      "description": "Local-first SQLite event bus. At-least-once delivery, push-over-durable-poll, no network transport. Decouples agents and tools without external infrastructure.",
       "type": "npm-lib",
       "standalone": true,
       "opinionated": false,
@@ -75,6 +76,21 @@
       "note": "Retired. npm package deprecated. Use wicked-estate instead — it ships all memory/knowledge/search capabilities. ~/.wicked-brain on disk is a frozen archive; never delete it."
     },
     {
+      "id": "wicked-vault",
+      "displayName": "Wicked Vault",
+      "description": "Local-first evidence primitive — records claim-backing evidence with its acceptance criteria, re-derives integrity deterministically, and records independent third-party judgments. Internal infrastructure peer, not a marketed product: it is the honest-evidence backend wicked-garden's gate requires.",
+      "type": "npm-lib",
+      "standalone": false,
+      "opinionated": false,
+      "status": "stable",
+      "requires": [],
+      "install": {
+        "type": "npm-global",
+        "package": "wicked-vault"
+      },
+      "note": "Dependency, not a standalone product — installed automatically when wicked-garden is selected (garden's evidence gate blocks without it)."
+    },
+    {
       "id": "wicked-garden",
       "displayName": "Wicked Garden",
       "description": "Curated toolkit for what coding agents can't do alone: re-derives 'done' from evidence, sees injected edges, renames across files as a graph operation, multi-model review, 40-specialist QE domain, mem/search via wicked-estate. Opinionated bundle — all or nothing.",
@@ -82,13 +98,13 @@
       "standalone": false,
       "opinionated": true,
       "status": "active",
-      "requires": ["wicked-bus"],
-      "recommended": ["wicked-estate", "wicked-crew"],
+      "requires": ["wicked-vault"],
+      "recommended": ["wicked-bus", "wicked-estate", "wicked-crew"],
       "install": {
         "type": "npm-run",
         "package": "wicked-garden",
         "command": "install",
-        "mcpInstructions": "Run /wicked-garden:setup in Claude Code to complete configuration."
+        "mcpInstructions": "Run /wicked-garden-core setup in Claude Code to complete configuration (verifies peers; blocks only on wicked-vault, the one the evidence gate needs)."
       },
       "note": "Opinionated bundle — you get everything. Individual components cannot be disabled."
     },
