@@ -58,6 +58,7 @@ interface InstallAction {
   repo?: string;
   dest?: string;
   crate?: string;
+  crates?: string[];
   version?: string;
 }
 
@@ -757,15 +758,24 @@ function installProductBinaries(product: Product, options: Options, actions: Act
       break;
     }
     case "cargo": {
-      const crate = install.crate ?? install.package;
-      if (!crate) throw new Error(`${product.id}: install.crate required`);
+      // A product may ship more than one crate (install.crates), e.g. wicked-estate +
+      // wicked-estate-mcp — one without the other is a broken install.
+      const singleCrate = install.crate ?? install.package;
+      const crates = Array.isArray(install.crates) && install.crates.length > 0
+        ? install.crates
+        : singleCrate ? [singleCrate] : [];
+      if (crates.length === 0) throw new Error(`${product.id}: install.crate required`);
       if (!commandExists("cargo")) {
         throw new Error("cargo not found; install Rust from https://rustup.rs and retry");
       }
-      const args = ["install", crate];
-      if (install.version) args.push("--version", install.version);
+      // `--version` only pins a single crate; with several, pin per-crate via name@version.
+      const names = install.version && crates.length > 1
+        ? crates.map((c) => `${c}@${install.version}`)
+        : crates;
+      const args = ["install", ...names];
+      if (install.version && crates.length === 1) args.push("--version", install.version);
       run("cargo", args, options);
-      actions.push({ kind: "acquire", target: crate, result: options.dryRun ? "planned" : "ok", detail: "cargo install" });
+      actions.push({ kind: "acquire", target: crates.join(" "), result: options.dryRun ? "planned" : "ok", detail: "cargo install" });
       break;
     }
     case "github-binary": {
@@ -2012,8 +2022,11 @@ function purgeProductBinary(product: Product, options: Options, actions: Action[
       run("npm", ["rm", "-g", product.install.package], options);
       actions.push({ kind: "remove", target: product.install.package, result: options.dryRun ? "planned" : "ok", detail: "npm rm -g" });
     } else if (product.install.type === "cargo") {
-      const crate = product.install.crate ?? product.install.package;
-      if (crate) {
+      const single = product.install.crate ?? product.install.package;
+      const crates = Array.isArray(product.install.crates) && product.install.crates.length > 0
+        ? product.install.crates
+        : single ? [single] : [];
+      for (const crate of crates) {
         run("cargo", ["uninstall", crate], options);
         actions.push({ kind: "remove", target: crate, result: options.dryRun ? "planned" : "ok", detail: "cargo uninstall" });
       }

@@ -140,8 +140,14 @@ export async function installProduct(product: Product): Promise<InstallResult> {
       }
 
       case "cargo": {
-        const crate = install.crate ?? install.package;
-        if (!crate) throw new Error("install.crate required for cargo");
+        // A product may ship more than one crate (install.crates), e.g. wicked-estate
+        // (the indexing CLI) + wicked-estate-mcp (the MCP server) — one without the
+        // other is a broken install. Single-crate products keep using install.crate.
+        const singleCrate = install.crate ?? install.package;
+        const crates = Array.isArray(install.crates) && install.crates.length > 0
+          ? install.crates
+          : singleCrate ? [singleCrate] : [];
+        if (crates.length === 0) throw new Error("install.crate or install.crates required for cargo");
 
         // Fail with a helpful message if the Rust toolchain is missing.
         try {
@@ -149,18 +155,22 @@ export async function installProduct(product: Product): Promise<InstallResult> {
         } catch {
           return {
             productId: id, success: false, skipped: false,
-            message: `cargo not found — install the Rust toolchain (https://rustup.rs) then retry, or run: cargo install ${crate}`,
+            message: `cargo not found — install the Rust toolchain (https://rustup.rs) then retry, or run: cargo install ${crates.join(" ")}`,
           };
         }
 
-        const args = ["install", crate];
-        if (install.version) args.push("--version", install.version);
+        // `--version` only pins a single crate; with several, pin per-crate via name@version.
+        const names = install.version && crates.length > 1
+          ? crates.map((c) => `${c}@${install.version}`)
+          : crates;
+        const args = ["install", ...names];
+        if (install.version && crates.length === 1) args.push("--version", install.version);
         await execa("cargo", args, { stdio: "inherit" });
 
         const note = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
         return {
           productId: id, success: true, skipped: false,
-          message: `${displayName} installed via cargo install ${crate} (binary in ~/.cargo/bin)${note}`,
+          message: `${displayName} installed via cargo install ${crates.join(" ")} (binaries in ~/.cargo/bin)${note}`,
         };
       }
 

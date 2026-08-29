@@ -35,6 +35,7 @@ interface InstallAction {
   repo?: string;
   dest?: string;
   crate?: string;
+  crates?: string[];
   version?: string;
 }
 
@@ -355,13 +356,22 @@ function installProductBinaries(product: Product, options: Options): string[] {
       break;
     }
     case "cargo": {
-      const crate = install.crate ?? install.package;
-      if (!crate) throw new Error(`${product.id}: install.crate required`);
+      // A product may ship more than one crate (install.crates), e.g. wicked-estate +
+      // wicked-estate-mcp — one without the other is a broken install.
+      const singleCrate = install.crate ?? install.package;
+      const crates = Array.isArray(install.crates) && install.crates.length > 0
+        ? install.crates
+        : singleCrate ? [singleCrate] : [];
+      if (crates.length === 0) throw new Error(`${product.id}: install.crate required`);
       if (!commandExists("cargo")) {
         throw new Error("cargo not found; install Rust from https://rustup.rs and retry");
       }
-      const args = ["install", crate];
-      if (install.version) args.push("--version", install.version);
+      // `--version` only pins a single crate; with several, pin per-crate via name@version.
+      const names = install.version && crates.length > 1
+        ? crates.map((c) => `${c}@${install.version}`)
+        : crates;
+      const args = ["install", ...names];
+      if (install.version && crates.length === 1) args.push("--version", install.version);
       run("cargo", args, options);
       break;
     }

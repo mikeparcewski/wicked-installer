@@ -334,7 +334,17 @@ function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boo
       // The binary is conventionally the package name for every wicked-* product.
       return typeof install.package === "string" && commandExistsSafe(install.package);
     case "cargo": {
-      // The crate may publish a differently-named binary (wicked-estate-mcp ⇒ wicked-estate).
+      // A multi-crate product (install.crates) is installed only when EVERY crate's own
+      // binary resolves (each wicked-* crate's [[bin]] is named exactly like the crate) —
+      // a partial install (index CLI without the MCP server, or vice versa) must read as
+      // "not installed" so a re-run repairs it. No -mcp fallback here: it would let the
+      // CLI binary vouch for the missing MCP server. Corrupt entries yield false, never throw.
+      if (Array.isArray(install.crates) && install.crates.length > 0) {
+        const crates: unknown[] = install.crates;
+        return crates.every((c) => typeof c === "string" && commandExistsSafe(c));
+      }
+      // Single-crate: the crate may publish a differently-named binary
+      // (wicked-estate-mcp ⇒ wicked-estate), so keep the historical fallback.
       const crate = install.crate ?? install.package;
       if (typeof crate !== "string") return false;
       return commandExistsSafe(crate) || commandExistsSafe(crate.replace(/-mcp$/, ""));
