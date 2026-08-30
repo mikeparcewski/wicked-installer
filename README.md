@@ -105,9 +105,11 @@ Required dependencies resolve automatically: wicked-garden requires **wicked-vau
 
 > **Dependency, not a product:** `wicked-vault` (npm) is in the registry only so dependency resolution can install it — it is wicked-garden's required evidence backend, not a standalone pick.
 
+<!-- historical -->
 > **Retired products** — do not install:
 > - `wicked-testing` (retired 2026-08, v0.11.0 final): QE capabilities moved to wicked-garden's `qe` domain; acceptance gate is now wicked-crew.
 > - `wicked-brain` (retired 2026-08): memory + knowledge absorbed into wicked-estate. npm package deprecated.
+<!-- /historical -->
 
 ---
 

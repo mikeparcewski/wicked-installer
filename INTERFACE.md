@@ -98,7 +98,7 @@ install-<cli> [verb] [product ids...] [flags]
 verb := install | status | uninstall        (v1.1; default: install)
 ```
 
-**Verb detection rule:** if the FIRST positional argument is exactly `install`, `status`, or `uninstall`, it is the verb; otherwise the verb is `install` and all positionals are product ids. This preserves every existing codex invocation byte-for-byte (`install-codex wicked-testing --json` still works). No ambiguity exists because all registry product ids start with `wicked-`; registry product ids MUST never equal a verb name.
+**Verb detection rule:** if the FIRST positional argument is exactly `install`, `status`, or `uninstall`, it is the verb; otherwise the verb is `install` and all positionals are product ids. This preserves every existing codex invocation byte-for-byte (`install-codex wicked-testing --json` still works). No ambiguity exists because all registry product ids start with `wicked-`; registry product ids MUST never equal a verb name. <!-- historical: pre-retirement invocation kept as the byte-compat example -->
 
 v1 scripts implement only the implicit `install` verb. That is conforming.
 
@@ -113,7 +113,7 @@ Every value flag MUST accept both `--flag value` and `--flag=value` (slice from 
 | `--all` | Select every registry product whose `status !== "design"`. For `uninstall`: every product in the marker. |
 | `--<cli>-home <dir>` | Target config root. Default: `$<CLI>_HOME` (tilde-expanded) if set, else `~/.<cli>`. Multi-config-dir CLIs (claude): repeatable, each occurrence adds a target (§11). |
 | `--registry <file>` | Registry path. Default: `<script-dir>/../registry.json` if it exists (packaged copy next to `dist/`), else `<cwd>/registry.json`. |
-| `--source-root <dir>` | Root of local wicked-* checkouts, tried before npm pack. Default: `$WICKED_SOURCE_ROOT`, else auto-probe `<script-dir>/../..`, `<cwd>/..`, `<cwd>` — first candidate containing `wicked-installer/registry.json` or `wicked-testing/package.json`; final fallback `<cwd>`. |
+| `--source-root <dir>` | Root of local wicked-* checkouts, tried before npm pack. Default: `$WICKED_SOURCE_ROOT`, else auto-probe `<script-dir>/../..`, `<cwd>/..`, `<cwd>` — first candidate containing `wicked-installer/registry.json` or `wicked-testing/package.json`; final fallback `<cwd>`. <!-- historical: legacy checkout-root sentinel the probe still accepts --> |
 | `--skip-binaries` | Skip the acquisition step entirely (§5); asset copying still happens. A note is recorded per product. |
 | `--dry-run` | Print every command/copy/write that would happen; write nothing outside the OS temp dir. §13. |
 | `--json` | Emit the machine-readable report (§9) instead of human lines. Suppresses the script's own human logging. |
@@ -141,11 +141,11 @@ Load `registry.json`, require `products` to be an array (else `invalid registry:
 
 ```jsonc
 {
-  "id": "wicked-testing",
+  "id": "wicked-testing",              // historical
   "displayName": "Wicked Testing",
   "status": "stable" | "active" | "preview" | "design",
   "requires": ["wicked-bus"],          // hard deps, auto-installed
-  "recommended": ["wicked-brain"],     // informational ONLY — never auto-installed
+  "recommended": ["wicked-brain"],     // informational ONLY — never auto-installed // historical
   "install": { "type": "...", ... },   // acquisition spec, §5
   "mcp": { ... }                        // v1.1, optional, §8.3 — ignore if unsupported
 }
@@ -158,7 +158,7 @@ Load `registry.json`, require `products` to be an array (else `invalid registry:
 
 **Unknown-field tolerance is mandatory.** Your script MUST ignore registry fields it doesn't understand — this is how the v1.1 `mcp` block ships without touching codex/antigravity.
 
-**Product composition facts (current truth — do not resurrect):** `wicked-vault` is a standalone npm package again (wicked-testing, which had absorbed it, is retired 2026-08) and is wicked-garden's REQUIRED evidence peer — its registry row is **dependency-shaped** (`standalone: false`, installed via `requires`), never a marketed product entry. `wicked-loom` is absorbed into `wicked-garden` (no loom entries). `wicked-studio` ships inside `wicked-crew` (registry says `manual`/bundled — keep). `wicked-signals` is **archived** — removed from the ecosystem; no entry. There are no standalone `wicked-loom` / `wicked-signals` / `wicked-studio` product entries. The complete asset taxonomy is **skills + mcp + hooks + bins**; `agents/` and `commands/` are legacy dirs, already skills-only upstream and **copied by no conforming script** (§7.2).
+**Product composition facts (current truth — do not resurrect):** `wicked-vault` is a standalone npm package again (wicked-testing, which had absorbed it, is retired 2026-08) and is wicked-garden's REQUIRED evidence peer — its registry row is **dependency-shaped** (`standalone: false`, installed via `requires`), never a marketed product entry. `wicked-loom` is absorbed into `wicked-garden` (no loom entries). `wicked-studio` ships inside `wicked-crew` (registry says `manual`/bundled — keep). `wicked-signals` is **archived** — removed from the ecosystem; no entry. There are no standalone `wicked-loom` / `wicked-signals` / `wicked-studio` product entries. The complete asset taxonomy is **skills + mcp + hooks + bins**; `agents/` and `commands/` are legacy dirs, already skills-only upstream and **copied by no conforming script** (§7.2). <!-- historical -->
 
 ### 4.1 The registry `mcp` block (v1.1)
 
@@ -251,7 +251,7 @@ That is the whole rule. A team-owned script MAY *additionally* read other slugs 
 
 ### 7.2 Agents and commands are NOT installed by any conforming script
 
-The asset taxonomy this contract defines is **skills + mcp + hooks + bins** (§4). `agents/` and `commands/` are **not** in it. They are legacy directories from the pre-skills-only era; the products have since converted to skills-only (wicked-garden and wicked-testing ship no `agents/` or `commands/` dirs), and **no conforming install script — the codex reference included — copies them.** This is verified, not aspirational: the codex reference copies skills only (its asset counts are `{ skills }`), and the antigravity script does the same. There is no "grandfathered" script that still copies them.
+The asset taxonomy this contract defines is **skills + mcp + hooks + bins** (§4). `agents/` and `commands/` are **not** in it. They are legacy directories from the pre-skills-only era; the products have since converted to skills-only (wicked-garden and wicked-testing ship no `agents/` or `commands/` dirs), and **no conforming install script — the codex reference included — copies them.** This is verified, not aspirational: the codex reference copies skills only (its asset counts are `{ skills }`), and the antigravity script does the same. There is no "grandfathered" script that still copies them. <!-- historical -->
 
 - **Do not discover or copy `agents/` or `commands/`.** A script cloned from `install-codex.ts` inherits this for free — codex has no agents/commands copy path. Do not add one.
 - **`agents`/`commands` are legacy report/marker keys only.** If you emit them, they are always `0`; a conforming script never sets them nonzero. The codex reference omits them entirely — it emits only `assets.skills` (§9). They persist in the schema solely so a v1 parser that happens to read `assets.agents`/`assets.commands` doesn't crash.
@@ -290,7 +290,7 @@ v1 convergence is overwrite-copy (conforming). v1.1 scripts implement the follow
 - Marker entry version == staged package version (read from the staged `package.json` — the only version truth) AND all recorded `files[]` exist → **skip** (integrity-verified no-op) unless `--force`.
 - Versions differ → **upgrade**: stage new version, install it, then **stale-sweep** — delete every path in the old marker `files[]` not present in the new set (each deletion passes the ownership check of §12.3). Then replace the marker entry. This is what removes a skill dir the new version dropped.
 - `--force` → full reinstall even when current; additionally takes ownership in skill collisions (§8.6) and overwrites foreign MCP keys recording `prior` (§8.3).
-- Compat shim (claude only): when installing wicked-testing, also write `<configDir>/skills/.wicked-testing-version` with the installed semver (downstream `wg-check` / `check --require` consumers read it). Listed in `files[]`, removed on uninstall.
+- Compat shim (claude only): when installing wicked-testing, also write `<configDir>/skills/.wicked-testing-version` with the installed semver (downstream `wg-check` / `check --require` consumers read it). Listed in `files[]`, removed on uninstall. <!-- historical: legacy-install compat shim -->
 
 ### 8.2 Atomic write rule (all JSON the script owns or merges)
 
@@ -321,7 +321,7 @@ Target file (claude): for the default `~/.claude` home, `~/.claude.json` (top-le
 
 **Opt-in and per-CLI, same rule as §8.3.** A CLI wires hooks only after its hook config file and event model are stated here and verified against that CLI's runtime; until then it ignores the product's `hooks/` assets (recording a note) rather than guessing where they go. Claude's model — below — is `<configDir>/settings.json` with event-keyed arrays. No other CLI (codex, antigravity/gemini) has a specified hooks target yet, so none of them wire hooks today.
 
-- Hook scripts and runtime siblings are NOT scattered into the config dir. The product payload (its `hooks/` plus sibling dirs the hooks/skills reference — e.g. wicked-testing's `lib/`, `scenarios/`, `schemas/`; wicked-garden's `scripts/`) is copied to the owned root `<configDir>/wicked-installer/products/<productId>/` (replace-on-install; recorded as one `dir` record).
+- Hook scripts and runtime siblings are NOT scattered into the config dir. The product payload (its `hooks/` plus sibling dirs the hooks/skills reference — e.g. wicked-testing's `lib/`, `scenarios/`, `schemas/`; wicked-garden's `scripts/`) is copied to the owned root `<configDir>/wicked-installer/products/<productId>/` (replace-on-install; recorded as one `dir` record). <!-- historical -->
 - `${CLAUDE_PLUGIN_ROOT}` in every command string from the product's `hooks/hooks.json` is rewritten to that absolute payload root at merge time (the variable only exists for real plugin installs). This rewrite is also the **ownership key**: an entry is owned by product P iff its command contains `wicked-installer/products/<P>` (compare with normalized separators — marker stores forward slashes; live settings.json on Windows contains backslashes). Ownership is thus derivable from the entry itself and survives marker loss.
 - Converge = **remove all owned entries for P, then insert the current desired set** — structurally incapable of duplication on re-run. Preserve all foreign matcher groups and unknown settings.json keys; parse-failure, backup, and atomicity rules of §8.2/§8.3 apply.
 
@@ -350,7 +350,7 @@ With `--json`, print exactly one pretty-printed (2-space) JSON object to stdout:
   "<cli>Home": "/Users/me/.codex",       // key literally named codexHome / geminiHome / claudeHome ...
   "reports": [
     {
-      "productId": "wicked-testing",
+      "productId": "wicked-testing", // historical
       "displayName": "Wicked Testing",
       "success": true,
       "skipped": false,                   // true only for install.type manual|binary
@@ -402,7 +402,7 @@ Path: `<cliHome>/wicked-installer/<cli>-install.json`
   "installedAt": "2026-07-10T12:00:00.000Z",
   "codexHome": "/Users/me/.codex",
   "products": [
-    { "id": "wicked-testing", "success": true, "skipped": false,
+    { "id": "wicked-testing", "success": true, "skipped": false, // historical
       "assets": { "skills": 48 }, "notes": ["..."] }   // codex records only skills
   ]
 }
@@ -414,6 +414,7 @@ v1 semantics: records the LAST run only (whole-file overwrite — a known defect
 
 One marker **per config dir** the script writes into (uninstall bookkeeping must be local to the dir it describes). Path unchanged: `<configDir>/wicked-installer/<cli>-install.json`.
 
+<!-- historical: v1.1 marker example captured from a pre-retirement install — the shape v1 parsers must still read -->
 ```jsonc
 {
   "markerVersion": 2,
@@ -442,6 +443,7 @@ One marker **per config dir** the script writes into (uninstall bookkeeping must
   }
 }
 ```
+<!-- /historical -->
 
 Rules:
 - **The marker is a statement of what exists on disk, not of success.** Written on every non-dry run, including mixed-success and failed runs.
@@ -565,7 +567,7 @@ Flow: existing product/bundle picker → dependency resolution (resolver.ts unch
 
 **Shared-home de-duplication (§2.1).** At most one script owns a config root, so the picker never offers the same home twice and never runs two scripts into one dir in a single pass. The bundled scripts satisfy this by construction — `codex`→`~/.codex`, `claude`→its §11.1 chain, `antigravity`→`~/.gemini`; there is no `install-gemini.js`. A CLI team MUST NOT ship a second script targeting a home an existing script owns. If the picker ever discovers two scripts whose resolved default homes collide, it offers only the one whose slug is the config-root owner (the antigravity script for `~/.gemini`) and drops the other with a warning — the §2.1 invariant is enforced at the picker, not silently violated.
 
-`detector.ts` marker sets upgrade to the §11.2 table; its `DETECT_SPECS` carries no separate `gemini` entry — the Gemini home is detected under the `antigravity` slug alone (§2.1/§11.2), so the two-owners-one-home offer can never occur. Its `isProductInstalled` hardcoded `~/.claude` probes (including the Windows-impossible `wicked-testing:acceptance-testing` colon dir, detector.ts:79) are superseded by reading markers via each script's `status --json` where available.
+`detector.ts` marker sets upgrade to the §11.2 table; its `DETECT_SPECS` carries no separate `gemini` entry — the Gemini home is detected under the `antigravity` slug alone (§2.1/§11.2), so the two-owners-one-home offer can never occur. Its `isProductInstalled` hardcoded `~/.claude` probes (including the Windows-impossible `wicked-testing:acceptance-testing` colon dir, detector.ts:79) are superseded by reading markers via each script's `status --json` where available. <!-- historical -->
 
 ---
 
