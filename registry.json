@@ -4,7 +4,7 @@
     {
       "id": "wicked-estate",
       "displayName": "Wicked Estate",
-      "description": "MCP server: code graph + memory + knowledge in one binary. 23 tools across 3 domains. Stores injected edges that grep never sees. Absorbed wicked-brain (retired 2026-08): indexes codebase knowledge + memories, surfaced through wicked-garden's mem/search skill domains.",
+      "description": "MCP server: code graph + memory + knowledge in one binary. 29 tools across 3 domains. Stores injected edges that grep never sees. Absorbed wicked-brain (retired 2026-08): indexes codebase knowledge + memories, surfaced through wicked-garden's mem/search skill domains.",
       "type": "mcp-binary",
       "standalone": true,
       "opinionated": false,
@@ -111,7 +111,7 @@
     {
       "id": "wicked-interactive",
       "displayName": "Wicked Interactive",
-      "description": "Design and vibe canvas for creating self-contained, single-file interactive HTML artifacts. Presentation builder, artifact creator, and narrative content tool. Export as a self-contained HTML file that runs anywhere.",
+      "description": "Foundation-plane document & render engine: document storage, version lineage, and HTML/PDF/PPTX rendering. wicked-crew spawns and proxies it (no standalone UI); surfaced through studio.",
       "type": "npm-cli",
       "standalone": true,
       "opinionated": false,
@@ -176,7 +176,7 @@
     {
       "id": "creative",
       "displayName": "Creative Suite",
-      "description": "Wicked Interactive + Crew — the creative and operator surfaces. Build self-contained HTML artifacts and get live visibility into AI workflow sessions via the Studio console that ships inside Crew.",
+      "description": "Wicked Interactive + Crew — the document/render engine driven through Crew, with live visibility into AI workflow sessions via the Studio console that ships inside Crew.",
       "products": ["wicked-interactive", "wicked-crew"]
     },
     {
