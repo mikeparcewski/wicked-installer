@@ -85,7 +85,7 @@ Pack authoring guide: wicked-garden's `docs/extending.md`.
 | `quick-start` | wicked-bus + wicked-crew | Fastest path to a governed multi-agent session — daemon up, Studio console open, first run in under five minutes |
 | `garden` | wicked-bus + wicked-garden | Recommended starting point for Claude Code users — evidence-gated work, graph-aware refactoring, and the full 40-specialist QE domain |
 | `knowledge` | wicked-bus + wicked-estate | Persistent memory, knowledge, and code-graph layer — everything else queries it |
-| `creative` | wicked-interactive + wicked-crew | Self-contained HTML/PDF/deck builder + the AI workflow console (Studio ships inside Crew) |
+| `creative` | wicked-interactive + wicked-crew | The document & render engine (HTML/PDF/PPTX), driven through Crew + the AI workflow console (Studio ships inside Crew) |
 | `full` | wicked-bus + wicked-estate + wicked-garden + wicked-interactive + wicked-crew | The complete wicked-\* experience |
 
 Required dependencies resolve automatically: wicked-garden requires **wicked-vault** (the evidence backend its gate re-derives against), so any selection containing garden also installs it.
@@ -96,10 +96,10 @@ Required dependencies resolve automatically: wicked-garden requires **wicked-vau
 
 | Product | Status | What it does |
 |---|---|---|
-| [wicked-estate](https://github.com/mikeparcewski/wicked-estate) | stable | MCP server: code graph + memory + knowledge in one binary. 23 tools across 3 domains. 113 languages. |
+| [wicked-estate](https://github.com/mikeparcewski/wicked-estate) | stable | MCP server: code graph + memory + knowledge in one binary. 29 tools across 3 domains. 103 languages. |
 | [wicked-bus](https://www.npmjs.com/package/wicked-bus) | stable | Durable event fabric for agents — restart-durable at-least-once delivery with dead-lettering and replay. Zero infra (embedded SQLite), single-host. |
 | [wicked-garden](https://github.com/mikeparcewski/wicked-garden) | active | Curated toolkit for what coding agents can't do alone. Claude Code plugin. Includes the 40-specialist QE domain (acceptance testing, evidence-gated, no self-grading). |
-| [wicked-interactive](https://github.com/mikeparcewski/wicked-interactive) | stable | Design and vibe canvas — build self-contained interactive HTML artifacts. Export as HTML, PDF, PowerPoint, or video. |
+| [wicked-interactive](https://github.com/mikeparcewski/wicked-interactive) | stable | Foundation-plane document & render engine (HTML/PDF/PPTX + version lineage) that wicked-crew spawns and proxies — surfaced through studio, not visited directly. |
 | [wicked-studio](https://github.com/mikeparcewski/wicked-studio) | active | Browser console for wicked-crew — launch/steer governed runs, answer HITL gates, live event streams. Ships bundled inside wicked-crew. |
 | [wicked-crew](https://www.npmjs.com/package/wicked-crew) | active | Governed multi-agent execution — drives coding-agent CLIs through durable workflows with deny-dominates dual gates and evidence-re-derived "done". Includes the Studio console. |
 
