@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import type { DetectedCli, Product } from "./types.js";
 import { loadRegistry } from "./registry.js";
+import { claudePluginSpec, readRegistration, resolveClaudeConfigDirs } from "./claude-plugin.js";
 
 interface CliSpec {
   id: string;
@@ -294,9 +295,19 @@ export function isProductInstalled(productId: string, seen: ReadonlySet<string> 
       // Retired, and never a binary: it installed skills into Claude Code's skills dir.
       return existsSync(join(home, ".claude", "skills", "wicked-testing-acceptance-testing")) ||
              existsSync(join(home, ".claude", "skills", "wicked-testing:acceptance-testing"));
-    case "wicked-garden":
-      // A plugin, not a CLI — the manifest is the evidence.
-      return existsSync(join(home, ".claude", "plugins", "wicked-garden", ".claude-plugin", "plugin.json"));
+    case "wicked-garden": {
+      // A plugin, not a CLI — the evidence is its REGISTRATION with Claude Code (installed_plugins.json
+      // + the cache payload) in any active config dir, or failing that the bare `plugins/wicked-garden`
+      // copy the pre-registration installer wrote. The bare copy always went to ~/.claude, so that dir
+      // is checked even when CLAUDE_CONFIG_DIR points elsewhere; `status` labels it "copy only".
+      const garden = loadRegistry().products.find((p) => p.id === productId);
+      const spec = claudePluginSpec(garden ?? { id: productId, install: {} });
+      const dirs = new Set([...resolveClaudeConfigDirs().dirs, join(home, ".claude")]);
+      return [...dirs].some((dir) => {
+        const reg = readRegistration(dir, spec);
+        return reg.installed.length > 0 || reg.bareCopy !== undefined;
+      });
+    }
     case "wicked-brain":
       // Retired. `~/.wicked-brain` is a frozen archive, NOT an install — see the header.
       return commandExists("wicked-brain");

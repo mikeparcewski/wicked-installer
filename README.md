@@ -36,9 +36,60 @@ npx wicked-installer                 Interactive install
 npx wicked-installer list            List available products
 npx wicked-installer install <ids>   Install specific products (space-separated)
 npx wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)
-npx wicked-installer status          Show detected CLIs + installed products
+npx wicked-installer status          Show detected CLIs, installed products, and
+                                     wicked-garden's Claude Code registration
 npx wicked-installer --version
+
+Flags:
+  --dry-run              Print the exact plan (target dirs, commands) and run NOTHING
+                         that writes — no npm/npx/cargo/git, no downloads, no copies
+  --claude-home <dir>    Claude Code config dir to register wicked-garden into
+                         (repeatable; default: $CLAUDE_CONFIG_DIR, else ~/.claude)
+  --source-root <dir>    Register wicked-garden from the local checkout
+                         <dir>/wicked-garden instead of the published marketplace
+  --force                Passed through to the per-CLI install scripts (interactive)
 ```
+
+`install <ids>` resolves required dependencies first (garden pulls in wicked-vault),
+installs each product directly, and exits 1 if any of them failed. With `--dry-run`
+every product type prints its plan and nothing runs.
+
+---
+
+## wicked-garden is a registered Claude Code plugin
+
+Claude Code only loads plugins it has **registered** — a marketplace entry plus an
+install record whose payload lives in `<configDir>/plugins/cache/<marketplace>/<plugin>/<version>/`.
+That cache is also the only place wicked-crew's skills discovery reads. A bare copy
+under `~/.claude/plugins/wicked-garden/` (what `npx wicked-garden install` produces,
+always into `~/.claude` whatever `CLAUDE_CONFIG_DIR` says) is loaded by nothing.
+
+So when the `claude` CLI is present, `install wicked-garden` (and the interactive
+zero-CLI path) resolves the active config dir(s) exactly like the Claude install
+script does — `--claude-home` → `CLAUDE_CONFIG_DIR` (":"/","-separated, exclusive
+when set) → `~/.claude` — and for **each** of them runs Claude Code's own mechanism
+with `CLAUDE_CONFIG_DIR=<target>`:
+
+```
+claude plugin marketplace list --json                 # idempotent: add only when absent
+claude plugin marketplace add mikeparcewski/wicked-garden
+claude plugin list --json
+claude plugin install wicked-garden@wicked-garden     # or: claude plugin update wicked-garden@wicked-garden
+```
+
+then verifies from disk that `<target>/plugins/cache/wicked-garden/wicked-garden/<version>/`
+exists. A marketplace already registered from another source (say, a local checkout)
+is kept as-is. `--source-root <dir>` registers `<dir>/wicked-garden` as the marketplace
+instead of GitHub.
+
+When Claude Code is **not** detected the installer falls back to `npx wicked-garden
+install` and says so: *copied to ~/.claude/plugins/wicked-garden; not registered —
+Claude Code not detected*.
+
+`status` prints, per active config dir, the marketplace (and its source), the
+installed version/scope, the cached versions, and flags a bare copy as
+**copy only (unregistered)**. It reads the registration from disk and never
+invokes the `claude` CLI (even `claude plugin list` writes `<configDir>/.claude.json`).
 
 ---
 

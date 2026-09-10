@@ -1,16 +1,19 @@
 #!/usr/bin/env node
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import chalk from "chalk";
 import boxen from "boxen";
 import { detectClis, discoverCliScripts, detectCli } from "./detector.js";
 import { installProduct } from "./installer.js";
+import type { InstallOptions } from "./installer.js";
 import { promptSelectionMode, promptBundle, promptCustom, promptConfirm, promptClis } from "./ui.js";
 import type { CliOption, UserSelection } from "./ui.js";
 import { listProducts, getProduct } from "./registry.js";
-import type { InstallResult } from "./types.js";
+import type { InstallResult, Product } from "./types.js";
+import { cacheRoot, claudePluginSpec, describeOrigin, readRegistration, resolveClaudeConfigDirs } from "./claude-plugin.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const { version: VERSION } = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
@@ -18,6 +21,8 @@ const { version: VERSION } = JSON.parse(readFileSync(join(__dirname, "..", "pack
 interface DispatchFlags {
   dryRun: boolean;
   force: boolean;
+  sourceRoot?: string;    // --source-root <dir>: local checkout root (the shared per-CLI flag, INTERFACE.md §3.2)
+  claudeHomes: string[];  // --claude-home <dir> (repeatable): explicit Claude config dir(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +135,9 @@ function runCliScript(
   if (skipBinaries) args.push("--skip-binaries");
   if (flags.dryRun) args.push("--dry-run");
   if (flags.force) args.push("--force");
+  // --source-root is part of the shared flag surface (§3.2); --claude-home is the Claude script's own.
+  if (flags.sourceRoot) args.push("--source-root", flags.sourceRoot);
+  if (cli.cli === "claude") for (const home of flags.claudeHomes) args.push("--claude-home", home);
 
   // Never rely on the script's shebang (Windows): always launch via node.
   const res = spawnSync(process.execPath, args, {
@@ -271,31 +279,53 @@ function productIdsFromSelection(selection: UserSelection): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy direct-install path (used when the user selects zero CLIs)
+// Direct install (the `install <ids>` command, and the interactive path when
+// the user selects zero CLIs). Honours --dry-run for every product: the plan
+// is printed and nothing runs.
 // ---------------------------------------------------------------------------
 
-async function legacyInstall(selection: UserSelection): Promise<void> {
-  console.log(chalk.bold("\nInstalling (direct)...\n"));
-  const all = [...selection.addedDeps, ...selection.products]; // deps first
+function installOptionsFrom(flags: DispatchFlags): InstallOptions {
+  return {
+    dryRun: flags.dryRun,
+    sourceRoot: flags.sourceRoot,
+    claudeHomes: flags.claudeHomes,
+    log: (line) => console.log(chalk.dim(line)),
+  };
+}
+
+async function installDirectly(products: Product[], flags: DispatchFlags): Promise<InstallResult[]> {
+  const options = installOptionsFrom(flags);
   const results: InstallResult[] = [];
 
-  for (const product of all) {
-    process.stdout.write(`  ${chalk.cyan("→")} ${product.displayName}... `);
-    const result = await installProduct(product);
+  for (const product of products) {
+    console.log(`${chalk.cyan("→")} ${chalk.bold(product.displayName)}${flags.dryRun ? chalk.dim(" [dry-run]") : ""}`);
+    const result = await installProduct(product, options);
     results.push(result);
 
-    if (result.skipped) {
-      console.log(chalk.yellow("manual steps required"));
-    } else if (result.success) {
-      console.log(chalk.green("done"));
+    if (!result.success) {
+      console.log(chalk.red(`  failed — ${result.message}`));
+    } else if (result.planned) {
+      // The plan lines were already printed through `log`.
+    } else if (result.skipped) {
+      console.log(chalk.yellow("  manual steps required"));
+      if (product.install.instructions) console.log(chalk.dim(`  ${product.install.instructions}`));
     } else {
-      console.log(chalk.red("failed"));
+      console.log(chalk.green(`  done — ${result.message}`));
     }
   }
+  return results;
+}
+
+async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Promise<void> {
+  console.log(chalk.bold(flags.dryRun
+    ? "\nDry run (direct) — printing the plan; nothing will be installed or written.\n"
+    : "\nInstalling (direct)...\n"));
+  const all = [...selection.addedDeps, ...selection.products]; // deps first
+  const results = await installDirectly(all, flags);
 
   console.log(chalk.bold("\nSummary:"));
   for (const r of results) {
-    const icon = r.skipped ? chalk.yellow("?") : r.success ? chalk.green("✓") : chalk.red("✗");
+    const icon = r.skipped ? chalk.yellow("?") : !r.success ? chalk.red("✗") : r.planned ? chalk.cyan("·") : chalk.green("✓");
     console.log(`  ${icon} ${r.message}`);
   }
 
@@ -316,6 +346,8 @@ async function legacyInstall(selection: UserSelection): Promise<void> {
   if (failures.length > 0) {
     console.log(chalk.red(`\n${failures.length} installation(s) failed. Check output above for details.`));
     process.exit(1);
+  } else if (flags.dryRun) {
+    console.log(chalk.green("\nDry run complete — nothing was installed or written."));
   } else {
     console.log(chalk.green("\nDone! Start your coding agent to activate the installed tools."));
   }
@@ -374,7 +406,7 @@ async function runInteractive(flags: DispatchFlags): Promise<void> {
 
     if (selectedClis.length === 0) {
       // Zero CLIs selected (or none available) → legacy behavior.
-      await legacyInstall(selection);
+      await legacyInstall(selection, flags);
       return;
     }
 
@@ -406,7 +438,7 @@ async function runList(): Promise<void> {
   }
 }
 
-async function runInstallDirect(productIds: string[]): Promise<void> {
+async function runInstallDirect(productIds: string[], flags: DispatchFlags): Promise<void> {
   const { resolve } = await import("./resolver.js");
   const { selected, added, blocked } = resolve(productIds);
 
@@ -418,24 +450,71 @@ async function runInstallDirect(productIds: string[]): Promise<void> {
   if (added.length > 0) {
     console.log(chalk.cyan(`Adding required dependencies: ${added.map(p => p.displayName).join(", ")}\n`));
   }
+  if (flags.dryRun) {
+    console.log(chalk.cyan("Dry run — printing the plan; nothing will be installed or written.\n"));
+  }
 
-  const all = [...added, ...selected];
-  for (const product of all) {
-    process.stdout.write(`Installing ${product.displayName}... `);
-    const result = await installProduct(product);
-    if (result.skipped) {
-      console.log(chalk.yellow("manual steps required"));
-      if (product.install.instructions) console.log(chalk.dim(`  ${product.install.instructions}`));
-    } else if (result.success) {
-      console.log(chalk.green("done"));
-    } else {
-      console.log(chalk.red("failed"));
-      console.error(chalk.dim(`  ${result.message}`));
+  const results = await installDirectly([...added, ...selected], flags);
+  const failures = results.filter((r) => !r.success && !r.skipped);
+
+  if (flags.dryRun) {
+    if (failures.length > 0) {
+      console.log(chalk.red(`\nDry run finished with ${failures.length} problem(s); nothing was written.`));
+      process.exit(1);
+    }
+    console.log(chalk.green("\nDry run complete — nothing was installed or written."));
+    return;
+  }
+  if (failures.length > 0) {
+    console.log(chalk.red(`\n${failures.length} installation(s) failed. Check output above for details.`));
+    process.exit(1);
+  }
+}
+
+/**
+ * Per active Claude config dir: is wicked-garden REGISTERED with Claude Code (marketplace +
+ * install record + cache payload), or merely copied? Read from disk only — even
+ * `claude plugin list` writes <configDir>/.claude.json, so status never invokes the CLI.
+ */
+function renderPluginRegistration(flags: DispatchFlags): void {
+  const garden = getProduct("wicked-garden");
+  if (!garden || garden.type !== "claude-plugin") return;
+  const spec = claudePluginSpec(garden);
+  const { dirs, origin } = resolveClaudeConfigDirs({ homeFlags: flags.claudeHomes });
+
+  console.log(chalk.bold(`\nClaude Code plugin registration (${spec.pluginId}):`));
+  console.log(chalk.dim(`  config dir(s) from ${describeOrigin(origin)}; read from disk — the claude CLI is not invoked`));
+
+  for (const dir of dirs) {
+    const reg = readRegistration(dir, spec);
+    console.log(`  ${chalk.bold(dir)}${existsSync(dir) ? "" : chalk.dim("  (does not exist)")}`);
+    console.log(`    marketplace: ${reg.marketplace ? chalk.green(`${spec.marketplaceName} ← ${reg.marketplace.source}`) : chalk.dim("not registered")}`);
+    console.log(`    installed:   ${reg.installed.length > 0 ? chalk.green(reg.installed.map((i) => `${i.version} (${i.scope})`).join(", ")) : chalk.dim("not installed")}`);
+    console.log(`    cache:       ${reg.cacheVersions.length > 0 ? reg.cacheVersions.join(", ") : chalk.dim("none")}  ${chalk.dim(cacheRoot(dir, spec))}`);
+    if (reg.bareCopy) {
+      console.log(`    bare copy:   ${chalk.yellow(`${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it`)}`);
+    }
+    for (const w of reg.warnings) console.log(chalk.red(`    ! ${w}`));
+    const state = reg.installed.length > 0
+      ? chalk.green("✓ registered")
+      : reg.bareCopy
+        ? chalk.yellow("~ copy only (unregistered)")
+        : chalk.dim("  not installed");
+    console.log(`    state:       ${state}`);
+  }
+
+  // The pre-registration installer always copied into ~/.claude, which need not be an active
+  // config dir at all — surface that copy so nobody mistakes it for an install.
+  const defaultHome = join(homedir(), ".claude");
+  if (!dirs.includes(defaultHome)) {
+    const reg = readRegistration(defaultHome, spec);
+    if (reg.bareCopy) {
+      console.log(chalk.yellow(`  ${defaultHome} is not an active config dir but holds a bare copy at ${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it`));
     }
   }
 }
 
-async function runStatus(): Promise<void> {
+async function runStatus(flags: DispatchFlags): Promise<void> {
   const { isProductInstalled } = await import("./detector.js");
   const products = listProducts(true);
 
@@ -466,6 +545,8 @@ async function runStatus(): Promise<void> {
     const statusBadge = (p.status === "design" || p.status === "retired") ? chalk.gray(` [${p.status}]`) : "";
     console.log(`  ${statusIcon}  ${chalk.bold(p.id)}${statusBadge}`);
   }
+
+  renderPluginRegistration(flags);
 }
 
 function printHelp(): void {
@@ -477,13 +558,60 @@ function printHelp(): void {
     "  wicked-installer list            List available products",
     "  wicked-installer install <ids>   Install specific products (space-separated, direct)",
     "  wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)",
-    "  wicked-installer status          Show detected CLIs and installed products",
+    "  wicked-installer status          Show detected CLIs, installed products, and wicked-garden's Claude Code registration",
     "  wicked-installer --version       Show version",
     "",
-    "Flags (interactive):",
-    "  --dry-run                        Show what each CLI script would do, write nothing",
-    "  --force                          Pass --force through to per-CLI install scripts",
+    "Flags:",
+    "  --dry-run                        Print the exact plan (target dirs, commands); run nothing that writes",
+    "  --claude-home <dir>              Claude Code config dir to register wicked-garden into (repeatable;",
+    "                                   default: $CLAUDE_CONFIG_DIR, else ~/.claude)",
+    "  --source-root <dir>              Register wicked-garden from the local checkout <dir>/wicked-garden instead of GitHub",
+    "  --force                          Pass --force through to per-CLI install scripts (interactive path)",
   ].join("\n"));
+}
+
+interface ParsedArgs {
+  flags: DispatchFlags;
+  positional: string[];
+  error?: string;
+}
+
+/**
+ * Flags with values (`--source-root <dir>`, `--claude-home <dir>`) must not leak their value
+ * into the positional product ids; both `--flag value` and `--flag=value` are accepted.
+ * Unknown flags are tolerated here (`pack` has its own parser and gets the raw argv tail).
+ */
+function parseArgs(argv: string[]): ParsedArgs {
+  const flags: DispatchFlags = { dryRun: false, force: false, claudeHomes: [] };
+  const positional: string[] = [];
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const valueFor = (name: string): string | undefined => {
+      if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1) || undefined;
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("-")) return undefined;
+      i += 1;
+      return next;
+    };
+
+    if (arg === "--dry-run") {
+      flags.dryRun = true;
+    } else if (arg === "--force") {
+      flags.force = true;
+    } else if (arg === "--source-root" || arg.startsWith("--source-root=")) {
+      const value = valueFor("--source-root");
+      if (!value) return { flags, positional, error: "--source-root requires a directory" };
+      flags.sourceRoot = value;
+    } else if (arg === "--claude-home" || arg.startsWith("--claude-home=")) {
+      const value = valueFor("--claude-home");
+      if (!value) return { flags, positional, error: "--claude-home requires a directory" };
+      flags.claudeHomes.push(value);
+    } else if (!arg.startsWith("-")) {
+      positional.push(arg);
+    }
+  }
+  return { flags, positional };
 }
 
 async function main(): Promise<void> {
@@ -498,11 +626,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  const flags: DispatchFlags = {
-    dryRun: argv.includes("--dry-run"),
-    force: argv.includes("--force"),
-  };
-  const positional = argv.filter((a) => !a.startsWith("-"));
+  const { flags, positional, error } = parseArgs(argv);
+  if (error) {
+    console.error(chalk.red(error));
+    process.exit(1);
+  }
   const cmd = positional[0];
   const rest = positional.slice(1);
 
@@ -511,14 +639,14 @@ async function main(): Promise<void> {
       await runList();
       break;
     case "status":
-      await runStatus();
+      await runStatus(flags);
       break;
     case "install":
       if (rest.length === 0) {
         console.error(chalk.red("Specify at least one product id. Use 'list' to see options."));
         process.exit(1);
       }
-      await runInstallDirect(rest);
+      await runInstallDirect(rest, flags);
       break;
     case "pack": {
       // Third-party skill packs (the extension contract). Pass the RAW argv
