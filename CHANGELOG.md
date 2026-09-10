@@ -55,6 +55,13 @@ All notable changes to wicked-installer are documented here. The format follows
   is lstat'd, a symlink anywhere — a symlinked `wicked-installer/` parent included — is refused
   with a typed error, and only a genuinely absent component reads as absent; a dangling marker
   link no longer makes discovery report "Claude not present".
+- `--source-root` expands a leading `~` exactly like `--claude-home`. A local checkout's
+  `.claude-plugin/marketplace.json` must declare `name` equal to the marketplace wicked-garden is
+  installed from — a manifest naming anything else, no name, or invalid JSON is refused before any
+  `marketplace add` (the install and rollback commands are addressed by that name). A selected
+  `installed_plugins.json` entry that is not an object is reported as a malformed, unhealthy record
+  (`partially registered`) instead of being dropped as "not installed"; path-segment validation also
+  rejects DEL and C1 control characters.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is

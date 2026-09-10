@@ -252,7 +252,7 @@ test("--source-root without Claude Code fails rather than silently installing th
   const root = join(sb.tmp, "checkouts");
   mkdirSync(cfg);
   mkdirSync(join(root, "wicked-garden", ".claude-plugin"), { recursive: true });
-  writeFileSync(join(root, "wicked-garden", ".claude-plugin", "marketplace.json"), "{}");
+  writeFileSync(join(root, "wicked-garden", ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "wicked-garden" }));
   try {
     const r = run(sb, ["install", "wicked-garden", "--source-root", root], { configDir: cfg, claude: false });
     assert.equal(r.status, 1, r.stdout + r.stderr);

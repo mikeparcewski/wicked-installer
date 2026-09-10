@@ -23,6 +23,7 @@ const {
   resolveClaudeConfigDirs,
   resolveMarketplaceSource,
   localMarketplaceUnder,
+  expandHome,
   shellQuote,
 } = await import(join(root, "dist", "claude-plugin.js"));
 
@@ -214,6 +215,22 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
     assert.equal(padded.installed[0].version, " 1.0.0 ");
     assert.equal(registrationVerdict(padded).state, "partial");
     assert.match(registrationVerdict(padded).problems[0], /record version " 1\.0\.0 " is not a path segment/);
+    // DEL and C1 controls are control characters too — not just C0.
+    for (const bad of ["1.0.0\u007f", "1.0\u0085.0", "1.0.0\u009f"]) {
+      writeFileSync(join(nv.plugins, "installed_plugins.json"), JSON.stringify({
+        version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: nv.installPath, version: bad }] },
+      }));
+      const ctl = registrationVerdict(readRegistration(noVersion, spec));
+      assert.equal(ctl.state, "partial", JSON.stringify(bad));
+      assert.match(ctl.problems[0], /is not a path segment/, JSON.stringify(bad));
+    }
+    // A selected key whose value is malformed is an unhealthy record, never "not installed".
+    for (const raw of [[null], "1.0.0", 42, [{ scope: "user", installPath: nv.installPath, version: "1.0.0" }, null]]) {
+      writeFileSync(join(nv.plugins, "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "wicked-garden@wicked-garden": raw } }));
+      const mal = registrationVerdict(readRegistration(noVersion, spec));
+      assert.equal(mal.state, "partial", JSON.stringify(raw));
+      assert.ok(mal.problems.includes("install record is malformed (not an object) (unknown scope)"), JSON.stringify(mal));
+    }
     v = registrationVerdict(noVersionReg);
     assert.equal(v.state, "partial");
     assert.deepEqual(v.problems, ["install record has no version (user scope)"]);
@@ -583,11 +600,30 @@ test("resolveMarketplaceSource / localMarketplaceUnder: explicit roots must hold
     assert.throws(() => resolveMarketplaceSource(spec, d), /no \.claude-plugin\/marketplace\.json under/);
     assert.equal(localMarketplaceUnder(spec, d), undefined, "an implicit root without a manifest is simply not local");
     mkdirSync(join(d, "wicked-garden", ".claude-plugin"), { recursive: true });
-    writeFileSync(join(d, "wicked-garden", ".claude-plugin", "marketplace.json"), "{}");
+    writeFileSync(join(d, "wicked-garden", ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "wicked-garden" }));
     assert.equal(resolveMarketplaceSource(spec, d), join(d, "wicked-garden"));
     assert.equal(resolveMarketplaceSource(spec, join(d, "wicked-garden")), join(d, "wicked-garden"));
     assert.equal(localMarketplaceUnder(spec, d), join(d, "wicked-garden"));
+    // A manifest naming another marketplace (or none, or unparseable) is an error — the install and
+    // rollback commands are addressed to spec.marketplaceName, so it must never be registered.
+    const manifest = join(d, "wicked-garden", ".claude-plugin", "marketplace.json");
+    writeFileSync(manifest, JSON.stringify({ name: "other-market" }));
+    assert.throws(() => resolveMarketplaceSource(spec, d), /declares marketplace "other-market", expected "wicked-garden"/);
+    assert.throws(() => localMarketplaceUnder(spec, d), /declares marketplace "other-market"/);
+    writeFileSync(manifest, "{}");
+    assert.throws(() => resolveMarketplaceSource(spec, d), /declares marketplace \(no name\), expected "wicked-garden"/);
+    writeFileSync(manifest, "{ not json");
+    assert.throws(() => resolveMarketplaceSource(spec, d), /marketplace\.json: not valid JSON/);
   } finally {
     rm(d);
   }
+});
+
+test("expandHome: a leading ~ (alone or before a separator) becomes the home dir; nothing else changes", () => {
+  assert.equal(expandHome("~/checkouts", "/h"), "/h/checkouts");
+  assert.equal(expandHome("~\\checkouts", "/h"), "/h\\checkouts");
+  assert.equal(expandHome("~", "/h"), "/h");
+  assert.equal(expandHome("~user/x", "/h"), "~user/x");
+  assert.equal(expandHome("/abs/~/x", "/h"), "/abs/~/x");
+  assert.equal(expandHome("~/x", "/h$1"), "/h$1/x", "a $ in the home path is not a replacement token");
 });

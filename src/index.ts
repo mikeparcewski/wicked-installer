@@ -13,7 +13,7 @@ import { promptSelectionMode, promptBundle, promptCustom, promptConfirm, promptC
 import type { CliOption, UserSelection } from "./ui.js";
 import { listProducts, getProduct } from "./registry.js";
 import type { InstallResult, Product } from "./types.js";
-import { LEGACY_CLEANUP_ISSUE, cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, detectLegacyCopies, readRegistration, registrationVerdict, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
+import { LEGACY_CLEANUP_ISSUE, cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, detectLegacyCopies, expandHome, readRegistration, registrationVerdict, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
 import type { RegistrationState } from "./claude-plugin.js";
 
 /**
@@ -731,7 +731,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === "--source-root" || arg.startsWith("--source-root=")) {
       const value = valueFor("--source-root");
       if (!value) return { flags, positional, error: "--source-root requires a directory" };
-      flags.sourceRoot = value;
+      flags.sourceRoot = expandHome(value); // the same leading-~ expansion --claude-home gets
     } else if (arg === "--claude-home" || arg.startsWith("--claude-home=")) {
       const value = valueFor("--claude-home");
       if (!value) return { flags, positional, error: "--claude-home requires a directory" };

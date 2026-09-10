@@ -329,7 +329,7 @@ test("--dry-run with a valid --source-root but no Claude Code fails instead of p
   try {
     const root = join(sb.tmp, "checkouts");
     mkdirSync(join(root, "fake-plugin", ".claude-plugin"), { recursive: true });
-    writeFileSync(join(root, "fake-plugin", ".claude-plugin", "marketplace.json"), "{}");
+    writeFileSync(join(root, "fake-plugin", ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "fake-plugin" }));
     const before = snapshot(sb.home);
     const r = runDry(sb, ["fake-plugin", "--source-root", root]);
     assert.equal(r.status, 1, r.stdout);
@@ -405,5 +405,35 @@ test("the guard itself trips on a non-probe spawn and passes `claude --version` 
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--source-root expands a leading ~ like --claude-home does (a quoted or =-joined ~ reaches the installer unexpanded)", () => {
+  const sb = sandbox({ withClaude: false });
+  try {
+    // The checkout lives under the sandbox HOME; the flag names it through `~`.
+    const root = join(sb.home, "checkouts");
+    mkdirSync(join(root, "fake-plugin", ".claude-plugin"), { recursive: true });
+    writeFileSync(join(root, "fake-plugin", ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "fake-plugin" }));
+    const before = snapshot(sb.home);
+    for (const args of [["fake-plugin", "--source-root", "~/checkouts"], ["fake-plugin", "--source-root=~/checkouts"]]) {
+      const r = runDry(sb, args);
+      // An unexpanded ~ would be rejected as `<cwd>/~/checkouts` holding no manifest; the expanded
+      // root is valid, so the run reaches the (Claude-absent) no-fallback refusal instead.
+      assert.doesNotMatch(r.stdout + r.stderr, /no \.claude-plugin\/marketplace\.json under/, args.join(" "));
+      assert.match(r.stdout, /--source-root .* has no fallback/, args.join(" "));
+      assert.equal(r.status, 1);
+    }
+    // A manifest naming a different marketplace is refused up front, under the expanded path.
+    writeFileSync(join(root, "fake-plugin", ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "someone-elses-market" }));
+    const bad = runDry(sb, ["fake-plugin", "--source-root", "~/checkouts"]);
+    assert.equal(bad.status, 1);
+    assert.match(bad.stdout + bad.stderr, /declares marketplace "someone-elses-market", expected "fake-plugin"/);
+    assert.deepEqual(guardEntries(bad.guardLog), [], "no spawns");
+    // (the manifest rewrite above is the only change under HOME)
+    writeFileSync(join(root, "fake-plugin", ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "fake-plugin" }));
+    assert.deepEqual(snapshot(sb.home), before, "no writes");
+  } finally {
+    cleanup(sb);
   }
 });

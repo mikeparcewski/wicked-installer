@@ -76,7 +76,7 @@ export function describeOrigin(origin: ConfigDirOrigin): string {
 
 // Leading ~ only, followed by /, \, or end-of-string. Function replacement so a $ in the
 // home path cannot be interpreted as a replacement token.
-function expandHome(value: string, home: string): string {
+export function expandHome(value: string, home: string = homedir()): string {
   return value.replace(/^~(?=$|[/\\])/, () => home);
 }
 
@@ -285,6 +285,8 @@ export interface PayloadCheck {
 }
 
 export interface InstalledEntry {
+  /** The state file held something other than an object for this plugin — reported, never treated as absent. */
+  malformed?: true;
   version: string;
   scope: string;
   installPath: string;
@@ -444,11 +446,12 @@ export function detectLegacyCopies(configDir: string, spec: ClaudePluginSpec): s
 }
 
 /**
- * Exactly one path component: non-empty, no `/` or `\\`, no whitespace or control characters,
- * not `.`/`..`, no leading dot. Used for the recorded version and the marketplace/plugin names,
- * all of which become components of the expected payload path.
+ * Exactly one path component: non-empty, no `/` or `\\`, no whitespace or control characters
+ * (C0 `\u0000-\u001f`, DEL `\u007f`, C1 `\u0080-\u009f`), not `.`/`..`, no leading dot. Used for
+ * the recorded version and the marketplace/plugin names, all of which become components of the
+ * expected payload path.
  */
-const UNSAFE_SEGMENT_CHARS = /[\\/\s\u0000-\u001f]/;
+const UNSAFE_SEGMENT_CHARS = /[\\/\s\u0000-\u001f\u007f-\u009f]/;
 export function isSafeSegment(value: string): boolean {
   return value !== "" && value !== "." && value !== ".." && !value.startsWith(".") && !UNSAFE_SEGMENT_CHARS.test(value);
 }
@@ -537,7 +540,12 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
     const raw = map[spec.pluginId];
     const entries = Array.isArray(raw) ? raw : raw !== undefined ? [raw] : [];
     for (const e of entries) {
-      if (!isRecord(e)) continue;
+      if (!isRecord(e)) {
+        // A selected key whose value is not an object (`[null]`, a string, a number) is a record we
+        // cannot verify — it must surface as unhealthy, never be dropped as "not installed".
+        reg.installed.push({ version: "", scope: "unknown", installPath: "", payload: { ok: false, problem: "install record is malformed (not an object)" }, malformed: true });
+        continue;
+      }
       // A missing version stays EMPTY — never a placeholder that could pass a comparison — and the
       // string is kept RAW: `" 1.0.0 "` is not `1.0.0`, it is a version that fails the segment check.
       const version = typeof e.version === "string" ? e.version : "";
@@ -621,7 +629,7 @@ export function registrationVerdict(reg: PluginRegistration): RegistrationVerdic
   // Every selected record must carry a real version, whatever the other entries say: one that
   // does not is evidence we cannot verify, and a registration is only as good as its worst record.
   const versionless = reg.installed.filter((e) => !e.version);
-  for (const e of versionless) problems.push(`install record has no version (${e.scope} scope)`);
+  for (const e of versionless) problems.push(`${e.malformed ? e.payload.problem : "install record has no version"} (${e.scope} scope)`);
   // EVERY versioned record must verify — a healthy user-scope record does not excuse a
   // project/managed record whose payload is missing or mismatched.
   for (const e of reg.installed.filter((e) => e.version)) {
@@ -644,11 +652,33 @@ export function describeVerdict(verdict: RegistrationVerdict): string {
 // Marketplace source: published GitHub marketplace, or a local checkout
 // ---------------------------------------------------------------------------
 
-/** `<root>/<marketplace>` or `<root>` when it holds a marketplace manifest; else undefined. */
+/**
+ * `<root>/<marketplace>` or `<root>` when it holds a marketplace manifest; else undefined.
+ * The manifest must declare `name` === the marketplace this spec installs from: every
+ * following command (`plugin install <plugin>@<marketplace>`, the rollback `marketplace
+ * remove <marketplace>`) is addressed by that name, so a manifest naming anything else would
+ * register a marketplace we then neither install from nor roll back. Such a manifest — or an
+ * unparseable one — is an error, never a silent acceptance.
+ */
 export function localMarketplaceUnder(spec: ClaudePluginSpec, root: string): string | undefined {
   const base = resolve(root);
   for (const candidate of [join(base, spec.marketplaceName), base]) {
-    if (existsSync(join(candidate, ".claude-plugin", "marketplace.json"))) return candidate;
+    const manifest = join(candidate, ".claude-plugin", "marketplace.json");
+    if (!existsSync(manifest)) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(manifest, "utf8"));
+    } catch (err) {
+      throw new Error(`${manifest}: not valid JSON (${err instanceof Error ? err.message : String(err)})`);
+    }
+    const name = isRecord(parsed) && typeof parsed.name === "string" ? parsed.name : undefined;
+    if (name !== spec.marketplaceName) {
+      throw new Error(
+        `${manifest}: declares marketplace ${name === undefined ? "(no name)" : JSON.stringify(name)}, expected ${JSON.stringify(spec.marketplaceName)} — ` +
+          `${spec.pluginId} is installed from, and rolled back by, that name`,
+      );
+    }
+    return candidate;
   }
   return undefined;
 }
@@ -741,7 +771,7 @@ export function planForDir(dir: string, spec: ClaudePluginSpec, source: string):
   if (records.length > 0 && unhealthy.length === 0) {
     commands.push(command(["plugin", "update", spec.pluginId], `installed ${records.map((e) => `${e.version} (${e.scope})`).join(", ")}`));
   } else if (records.length > 0) {
-    const why = unhealthy.map((e) => `${e.scope} scope: ${e.version ? e.payload.problem : "no version"}`).join("; ");
+    const why = unhealthy.map((e) => `${e.scope} scope: ${e.version || e.malformed ? e.payload.problem : "no version"}`).join("; ");
     commands.push(command(["plugin", "install", spec.pluginId], `install record present but ${why}`));
   } else {
     commands.push(command(["plugin", "install", spec.pluginId], "not installed"));
