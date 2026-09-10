@@ -41,6 +41,7 @@ const FAKE_REGISTRY = {
     product("fake-gh", "mcp-binary", { type: "github-binary", githubRepo: "acme/fake-gh" }),
     product("fake-git", "npm-lib", { type: "git-plugin", repo: "https://example.invalid/acme/fake-git.git" }),
     product("fake-manual", "desktop-binary", { type: "manual", instructions: "download it from the fake site" }),
+    product("fake-plugin-nofallback", "claude-plugin", { type: "manual", instructions: "no npm package for this one", marketplace: "acme/fake-nofb", pluginId: "fake-nofb@fake-nofb" }),
     product("fake-binary", "desktop-binary", { type: "binary", instructions: "grab the fake binary" }),
     product(
       "fake-plugin",
@@ -432,6 +433,37 @@ test("--source-root expands a leading ~ like --claude-home does (a quoted or =-j
     assert.deepEqual(guardEntries(bad.guardLog), [], "no spawns");
     // (the manifest rewrite above is the only change under HOME)
     writeFileSync(join(root, "fake-plugin", ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "fake-plugin" }));
+    assert.deepEqual(snapshot(sb.home), before, "no writes");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--dry-run without Claude Code for a plugin with NO fallback command fails exactly like the live run (exit 1), still spawning and writing nothing", () => {
+  const sb = sandbox({ withClaude: false });
+  try {
+    const before = snapshot(sb.home);
+    const r = runDry(sb, ["fake-plugin-nofallback"]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, /fake-plugin-nofallback has no fallback install command — the live run fails here/);
+    assert.match(r.stdout, /would FAIL: Claude Code not detected/);
+    assert.doesNotMatch(r.stdout, /dry-run: npx/, "no fallback command is planned");
+    assert.deepEqual(guardEntries(r.guardLog), [], "no spawns");
+    assert.deepEqual(snapshot(sb.home), before, "no writes");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--dry-run routes manual and binary products through the planner: a `dry-run:` line, `planned`, still a skipped manual step", () => {
+  const sb = sandbox({ withClaude: false });
+  try {
+    const before = snapshot(sb.home);
+    const r = runDry(sb, ["fake-manual", "fake-binary"]);
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /dry-run: manual step, nothing to run: download it from the fake site/);
+    assert.match(r.stdout, /dry-run: manual step, nothing to run: grab the fake binary/);
+    assert.deepEqual(guardEntries(r.guardLog), [], "no spawns");
     assert.deepEqual(snapshot(sb.home), before, "no writes");
   } finally {
     cleanup(sb);

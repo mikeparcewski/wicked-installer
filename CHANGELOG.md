@@ -111,10 +111,11 @@ All notable changes to wicked-installer are documented here. The format follows
   "installed" means the same. Read from disk without following symlinks; `status` runs no `claude
   plugin` command (its CLI detection runs the read-only `claude --version` probe, which writes
   nothing).
-- `--claude-home <dir>` (repeatable) and `--source-root <dir>` on the direct `install` and
-  `status` paths (`--source-root <dir>` registers the local checkout `<dir>/wicked-garden` as the
-  marketplace instead of GitHub). Both are also passed through to the per-CLI install scripts on
-  the interactive path (`--claude-home` to the Claude script only).
+- `--claude-home <dir>` (repeatable) on the direct `install` and `status` paths, and
+  `--source-root <dir>` on the direct `install` path (registers the local checkout
+  `<dir>/wicked-garden` as the marketplace instead of GitHub; `status` is read-only and takes no
+  source). Both are also passed through to the per-CLI install scripts on the interactive path
+  (`--claude-home` to the Claude script only).
 - Registry: optional `install.marketplace` / `install.pluginId` fields for `claude-plugin`
   products (defaults `mikeparcewski/<id>` / `<id>@<id>`).
 - `wicked-garden` detection (`status` product list) now means *registered with Claude Code* in every

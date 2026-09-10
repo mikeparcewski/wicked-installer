@@ -139,6 +139,9 @@ test("probeClaude: no binary → undefined; a present binary whose --version fai
     assert.deepEqual(probeClaude("/cfg", { env: { WICKED_CLAUDE_BIN: ok }, spawner }), { bin: ok, version: "9.9.9 (Claude Code)" });
     assert.deepEqual(calls.at(-1), { bin: ok, args: ["--version"], dir: "/cfg", mode: "capture" }, "the probe is pinned to the config dir and captured");
     assert.throws(() => probeClaude("/cfg", { env: { WICKED_CLAUDE_BIN: broken }, spawner }), /--version failed \(exit 1\): boom — Claude Code is present but not working/);
+    // The override must be a regular file: a directory or a dangling path is "no usable binary" (absent), never a broken CLI.
+    assert.equal(probeClaude("/cfg", { env: { WICKED_CLAUDE_BIN: d }, spawner }), undefined, "a directory is not a binary");
+    assert.equal(probeClaude("/cfg", { env: { WICKED_CLAUDE_BIN: join(d, "missing") }, spawner }), undefined, "a dangling override is absent");
   } finally {
     rm(d);
   }

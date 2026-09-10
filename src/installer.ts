@@ -105,21 +105,15 @@ export async function installProduct(product: Product, options: InstallOptions =
       }
 
       case "manual": {
-        return {
-          productId: id,
-          success: true,
-          skipped: true,
-          message: install.instructions ?? `${displayName} requires manual installation.`,
-        };
+        const message = install.instructions ?? `${displayName} requires manual installation.`;
+        if (dryRun) return { ...plan([`manual step, nothing to run: ${message}`], `manual step — ${message}`), skipped: true };
+        return { productId: id, success: true, skipped: true, message };
       }
 
       case "binary": {
-        return {
-          productId: id,
-          success: true,
-          skipped: true,
-          message: install.instructions ?? `${displayName} requires binary download.`,
-        };
+        const message = install.instructions ?? `${displayName} requires binary download.`;
+        if (dryRun) return { ...plan([`manual step, nothing to run: ${message}`], `manual step — ${message}`), skipped: true };
+        return { productId: id, success: true, skipped: true, message };
       }
 
       case "github-binary": {
@@ -355,14 +349,14 @@ async function installClaudePlugin(
         registration: "manual",
       };
     }
-    const lines = ["Claude Code CLI not detected on PATH — would fall back to the bare copy:"];
-    if (fallbackCmd) lines.push(`${fallbackCmd}    (copies to ${bareCopy}; not registered — Claude Code would not load it)`);
-    else lines.push(`nothing to run: ${id} has no fallback install command`);
+    if (!fallbackCmd) {
+      // The live run fails here (below); the plan must say so and fail the same way, not report a valid plan.
+      const failed = plan([`Claude Code CLI not detected on PATH and ${id} has no fallback install command — the live run fails here`], `would FAIL: Claude Code not detected and ${id} has no fallback install command`);
+      return { ...failed, success: false };
+    }
     return plan(
-      lines,
-      fallbackCmd
-        ? `would run ${fallbackCmd} (copy only, not registered — Claude Code not detected)`
-        : "Claude Code not detected and no fallback install command",
+      ["Claude Code CLI not detected on PATH — would fall back to the bare copy:", `${fallbackCmd}    (copies to ${bareCopy}; not registered — Claude Code would not load it)`],
+      `would run ${fallbackCmd} (copy only, not registered — Claude Code not detected)`,
     );
   }
 

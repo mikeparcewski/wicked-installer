@@ -158,7 +158,15 @@ export function findOnPath(
 /** The Claude Code binary to drive: WICKED_CLAUDE_BIN (tests) or `claude` on PATH. */
 export function claudeBinary(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const override = env[CLAUDE_BIN_ENV];
-  if (override) return existsSync(override) ? resolve(override) : undefined;
+  if (override) {
+    // A regular file only (the seam accepts non-executable scripts, so no X_OK check); a
+    // directory or a dangling path is "no usable Claude binary", never a broken-CLI error.
+    try {
+      return statSync(override).isFile() ? resolve(override) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   return findOnPath("claude", env);
 }
 
