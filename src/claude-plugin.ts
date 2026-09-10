@@ -460,22 +460,25 @@ function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, i
   // `alias/1.0.0` would smuggle an intermediate component past the chain check.
   if (!isSafeSegment(recordVersion)) return { ok: false, problem: `record version ${JSON.stringify(recordVersion)} is not a path segment` };
   if (!installPath) return { ok: false, problem: "install record has no installPath" };
-  const dir = ownedDir(root, installPath);
-  if (!dir.ok) {
-    if (dir.missing) return { ok: false, problem: `payload dir missing: ${installPath}` };
-    return { ok: false, problem: dir.error, error: dir.error }; // symlink / escape / permission
-  }
   // Every component of the expected payload chain must be a real directory/file — no symlink anywhere.
   const expected = join(cacheRoot(configDir, spec), recordVersion);
   const chain = symlinkInChain(configDir, ["plugins", "cache", spec.marketplaceName, spec.pluginName, recordVersion, ".claude-plugin", "plugin.json"]);
   if (chain) return { ok: false, problem: chain, error: chain };
-  // The payload must be THE cache path Claude Code (and crew) read for the recorded version —
-  // the exact path, not an alias that merely resolves to it through a symlinked ancestor. A
-  // record pointing anywhere else, even at a valid-looking plugin, is not a registration.
-  if (resolve(installPath) !== resolve(expected)) {
-    return { ok: false, problem: `payload recorded at ${installPath} is not the expected cache path ${expected}` };
+  // The recorded path must BE the expected cache path, byte for byte, after trimming only
+  // trailing separators. No normalisation before the comparison: `<expected>/alias/..` or
+  // `<expected>/./` is not the expected path even where it resolves to it — and the walk that
+  // follows is therefore always over the expected, component-checked path, never over
+  // components supplied by the record.
+  const recorded = installPath.replace(/[\\/]+$/, "");
+  if (recorded !== expected) {
+    return { ok: false, problem: `record path ${installPath} is not the expected cache path ${expected}` };
   }
-  const manifest = readOwnedJson(root, join(installPath, ".claude-plugin", "plugin.json"));
+  const dir = ownedDir(root, recorded);
+  if (!dir.ok) {
+    if (dir.missing) return { ok: false, problem: `payload dir missing: ${recorded}` };
+    return { ok: false, problem: dir.error, error: dir.error }; // symlink / escape / permission
+  }
+  const manifest = readOwnedJson(root, join(recorded, ".claude-plugin", "plugin.json"));
   if (manifest.error) return { ok: false, problem: manifest.error, error: manifest.error };
   if (manifest.value === undefined) return { ok: false, problem: `payload has no .claude-plugin/plugin.json: ${installPath}` };
   const manifestVersion = isRecord(manifest.value) && typeof manifest.value.version === "string" ? manifest.value.version : undefined;

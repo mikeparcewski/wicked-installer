@@ -192,6 +192,8 @@ interface MarkerRaw {
   v2?: MarkerV2;
   legacy?: LegacyMarker;
   corrupt: boolean;
+  // Why the marker did not parse, when `corrupt` — surfaced in the fail-closed diagnostic.
+  reason?: string;
 }
 
 interface Target {
@@ -1499,16 +1501,26 @@ function readMarkerRaw(dir: string): MarkerRaw {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(p, "utf8"));
-  } catch {
-    return { corrupt: true };
+  } catch (err) {
+    return { corrupt: true, reason: err instanceof Error ? err.message : String(err) };
   }
   if (isMarkerV2(parsed)) return { v2: parsed, corrupt: false };
   return { legacy: parsed as LegacyMarker, corrupt: false };
 }
 
+/**
+ * An existing marker that does not parse is a stop, not a blank slate: overwriting it would
+ * destroy the ownership/uninstall records it holds, and this script never renames or rewrites
+ * a file it cannot read. The install fails closed and the bytes stay untouched.
+ */
+function corruptMarkerMessage(dir: string, reason?: string): string {
+  return `${markerPathFor(dir)}: install marker exists but is not valid JSON${reason ? ` (${reason})` : ""} — refusing to install: continuing would overwrite it and lose the ownership/uninstall records it holds. Fix or move the file, then re-run. Nothing was written.`;
+}
+
 function loadOrInitMarker(dir: string): MarkerV2 {
   const raw = readMarkerRaw(dir);
   if (raw.v2) return raw.v2;
+  if (raw.corrupt) throw new Error(corruptMarkerMessage(dir, raw.reason)); // backstop — runInstall checks first
   // Fresh v2. A pre-existing v1/legacy marker is upgraded, not dropped (§10.2): every product
   // entry it lists is carried forward as a v2 entry with no file manifest — the bookkeeping that
   // something was installed survives, and nothing is deleted on the strength of the upgrade.
@@ -1675,6 +1687,13 @@ function runInstall(options: Options, registry: Registry): number {
 
   if (!resolution.cliPresent && resolution.targets[0].origin === "fallback") {
     log(options, `Claude command/home not detected; creating ${resolution.primary} because Claude was selected.`);
+  }
+
+  // Fail closed on an unparseable marker BEFORE anything is staged, copied, deleted or written
+  // (also under --dry-run, §13.4): the diagnostic names the file and the cause; its bytes stay as they are.
+  for (const target of resolution.targets) {
+    const raw = readMarkerRaw(target.dir);
+    if (raw.corrupt) throw new Error(corruptMarkerMessage(target.dir, raw.reason));
   }
 
   for (const target of resolution.targets) ensureConfigDir(target.dir, options);

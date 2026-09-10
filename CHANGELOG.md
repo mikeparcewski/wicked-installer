@@ -41,14 +41,18 @@ All notable changes to wicked-installer are documented here. The format follows
   for the registration it never owned and leaves any legacy copy and its marker record in place,
   byte-identical (#20). A v1 (array) install marker is upgraded to v2 with every legacy product
   entry carried forward (no file manifest, noted as such) instead of being dropped, and legacy
-  detection recognises both marker shapes and runs before the script can upgrade the marker.
+  detection recognises both marker shapes and runs before the script can upgrade the marker. An
+  existing install marker that does not parse fails `install-claude.js` closed — exit 1 before any
+  staging, copying, deletion or marker write, also under `--dry-run`, with the file and parse error
+  named and its bytes left untouched (it used to be silently replaced by an empty v2 marker).
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is
   lstat'd, so a symlinked `plugins/`, `cache/`, `<marketplace>/`, `<plugin>/`, `<version>/`,
   `plugin.json` or state file makes the registration `unreadable` (error, exit 1) rather than
-  merely partial; the recorded `installPath` must be the exact expected cache path (an alias that
-  merely resolves to it is `partial`); the recorded version must be a single path segment (a value
+  merely partial; the recorded `installPath` must equal the expected cache path byte for byte, only trailing
+  separators forgiven — no normalisation before the comparison, so `<expected>/alias/..` or an alias
+  that merely resolves to it is `partial`; the recorded version must be a single path segment (a value
   such as `alias/1.0.0` is `partial`, never a path); any selected install record without a real version makes the
   dir `partial` ("install record has no version (<scope> scope)") regardless of other entries — never
   completed with a placeholder (the recorded string is kept raw — a padded `" 1.0.0 "` is not

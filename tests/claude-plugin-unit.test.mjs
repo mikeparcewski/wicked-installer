@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -412,7 +412,29 @@ test("readRegistration: symlinked registration files and escapes are refused and
     reg = readRegistration(aliased, spec);
     v = registrationVerdict(reg);
     assert.equal(v.state, "partial", JSON.stringify(reg));
-    assert.match(v.problems[0], /payload recorded at .*wicked-garden-alias.* is not the expected cache path/);
+    assert.match(v.problems[0], /record path .*wicked-garden-alias.* is not the expected cache path/);
+
+    // No normalisation before the comparison: `<expected>/alias/..` — with `alias` a symlink to a
+    // child dir — resolves to the expected path but is NOT it; neither is `<expected>/./`. Only
+    // trailing separators are forgiven.
+    const dotted = join(d, "dotted");
+    const dt = configDir(dotted, { marketplace: true, payload: true });
+    symlinkSync(join(dt.installPath, ".claude-plugin"), join(dt.installPath, "alias"));
+    const record = (installPath) => writeFileSync(join(dt.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath, version: "1.0.0" }] },
+    }));
+    record(`${dt.installPath}${sep}alias${sep}..`); // built by concatenation: path.join would normalise the `..` away
+    v = registrationVerdict(readRegistration(dotted, spec));
+    assert.notEqual(v.state, "registered", JSON.stringify(v));
+    assert.equal(v.state, "partial");
+    assert.match(v.problems[0], /record path .*[\\/]alias[\\/]\.\. is not the expected cache path/);
+    record(dt.installPath + "/./");
+    v = registrationVerdict(readRegistration(dotted, spec));
+    assert.equal(v.state, "partial", JSON.stringify(v));
+    assert.match(v.problems[0], /record path .* is not the expected cache path/);
+    record(dt.installPath + "/");
+    v = registrationVerdict(readRegistration(dotted, spec));
+    assert.equal(v.state, "registered", "a trailing separator is the only forgiven difference: " + JSON.stringify(v));
 
     // Ancestors too: a symlinked `plugins/` or `<marketplace>/` component — even one resolving
     // elsewhere INSIDE the config dir — makes the state unreadable.

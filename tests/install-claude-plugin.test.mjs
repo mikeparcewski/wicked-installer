@@ -160,6 +160,33 @@ test("install-claude.js handed wicked-garden: a manual step, nothing staged/copi
   }
 });
 
+test("install-claude.js fails closed on an unparseable marker: exit 1 before any write, marker bytes and config dir untouched", () => {
+  const sb = sandbox();
+  mkdirSync(join(sb.cfg, "wicked-installer"), { recursive: true });
+  writeFileSync(markerPath(sb.cfg), "{ this is not json");
+  writeFileSync(join(sb.cfg, "settings.json"), JSON.stringify({ theme: "dark" }));
+  const before = snapshot(sb.cfg);
+  try {
+    for (const extra of [[], ["--dry-run"]]) {
+      const r = runScript(sb, ["wicked-vault", "--claude-home", sb.cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json", ...extra]);
+      assert.equal(r.status, 1, `${extra.join(" ")}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`${escapeRe(markerPath(sb.cfg))}: install marker exists but is not valid JSON \\(.+\\) — refusing to install`));
+      assert.match(r.stderr, /Nothing was written/);
+      assert.equal(r.stdout.trim(), "", "no report: the run stopped before doing anything");
+      assert.deepEqual(snapshot(sb.cfg), before, `${extra.join(" ")}: marker bytes identical, no other writes in the config dir`);
+    }
+    // `status` names the corruption (exit 1) and `uninstall` skips the target — neither touches it.
+    const st = runScript(sb, ["status", "wicked-vault", "--claude-home", sb.cfg, "--json"]);
+    assert.equal(st.status, 1, st.stdout + st.stderr);
+    assert.ok(JSON.parse(st.stdout).reports[0].notes.some((n) => /corrupt marker/.test(n)));
+    const un = runScript(sb, ["uninstall", "wicked-vault", "--claude-home", sb.cfg, "--json"]);
+    assert.equal(un.status, 0, un.stdout + un.stderr);
+    assert.deepEqual(snapshot(sb.cfg), before, "status and uninstall leave the corrupt marker exactly as it was");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("install-claude.js status does not report plugins, even when a legacy marker entry exists", () => {
   const sb = sandbox();
   mkdirSync(sb.cfg);
