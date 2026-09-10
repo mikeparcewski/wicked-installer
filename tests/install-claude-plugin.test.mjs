@@ -19,7 +19,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -190,6 +190,54 @@ test("install-claude.js uninstall refuses marker paths that escape the config di
     const garden2 = JSON.parse(r2.stdout).reports.find((x) => x.productId === "wicked-garden");
     assert.match(garden2.message, /not installed$/);
     assert.ok(garden2.notes.some((n) => /recorded no legacy copy to remove.*claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden2.notes));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("install-claude.js refuses a symlinked settings.json / MCP state file — on uninstall (no read, no backup) and on install (no wiring)", { skip: process.platform === "win32" && "symlink creation needs privileges on Windows" }, () => {
+  const sb = sandbox();
+  const outside = join(sb.tmp, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "their-settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: "theirs" }] }] }, theme: "light" }));
+  writeFileSync(join(outside, "their-state.json"), JSON.stringify({ mcpServers: { theirs: { command: "x" } } }));
+  mkdirSync(sb.cfg);
+  symlinkSync(join(outside, "their-settings.json"), join(sb.cfg, "settings.json"));
+  symlinkSync(join(outside, "their-state.json"), join(sb.cfg, ".claude.json")); // the MCP state file for a non-default home
+  const before = { settings: readFileSync(join(outside, "their-settings.json"), "utf8"), state: readFileSync(join(outside, "their-state.json"), "utf8") };
+  try {
+    // Uninstall: a marker naming the allowed files — which are links — must not read/back up/replace them.
+    mkdirSync(join(sb.cfg, "wicked-installer"), { recursive: true });
+    writeFileSync(markerPath(sb.cfg), JSON.stringify({
+      markerVersion: 2, cli: "claude", configDir: sb.cfg, updatedAt: "2026-01-01T00:00:00.000Z",
+      products: {
+        "wicked-garden": {
+          installedAt: "2026-01-01T00:00:00.000Z", lastResult: "installed", notes: [],
+          files: [
+            { kind: "hooks-entry", file: "settings.json", event: "PreToolUse", ownerMatch: { commandContains: "wicked-installer/products/wicked-garden" } },
+            { kind: "json-key", file: ".claude.json", pointer: "/mcpServers/theirs", wroteHash: "0" },
+          ],
+        },
+      },
+    }));
+    const r = runScript(sb, ["uninstall", "wicked-garden", "--claude-home", sb.cfg, "--json"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const garden = JSON.parse(r.stdout).reports.find((x) => x.productId === "wicked-garden");
+    for (const a of garden.actions) assert.match(a.detail ?? "", /refused: is a symlink — refusing to follow it/, JSON.stringify(a));
+    assert.equal(garden.actions.length, 2);
+    assert.ok(!existsSync(join(sb.cfg, "backups")), "nothing was backed up");
+    assert.equal(readFileSync(join(outside, "their-settings.json"), "utf8"), before.settings, "link target untouched");
+    assert.equal(readFileSync(join(outside, "their-state.json"), "utf8"), before.state, "link target untouched");
+    assert.ok(lstatSync(join(sb.cfg, "settings.json")).isSymbolicLink(), "the link itself was not replaced");
+    assert.ok(lstatSync(join(sb.cfg, ".claude.json")).isSymbolicLink());
+
+    // Install: wicked-estate carries an `mcp` block — wiring into a symlinked state file is refused.
+    const i = runScript(sb, ["wicked-estate", "--claude-home", sb.cfg, "--skip-binaries", "--json"]);
+    assert.equal(i.status, 0, i.stdout + i.stderr);
+    const estate = JSON.parse(i.stdout).reports.find((x) => x.productId === "wicked-estate");
+    assert.ok(estate.actions.some((a) => a.kind === "write-json-key" && a.result === "failed" && /refused: is a symlink/.test(a.detail)), JSON.stringify(estate.actions));
+    assert.equal(readFileSync(join(outside, "their-state.json"), "utf8"), before.state, "link target untouched by install");
+    assert.ok(lstatSync(join(sb.cfg, ".claude.json")).isSymbolicLink());
   } finally {
     cleanup(sb);
   }

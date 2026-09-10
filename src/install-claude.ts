@@ -5,6 +5,7 @@ import {
   constants as fsConstants,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1204,6 +1205,14 @@ function wireMcp(
   const fileMarker = toMarkerPath(target.dir, file);
   let obj: Record<string, unknown> = {};
 
+  // A symlinked state file would have us read, back up and replace something else entirely.
+  const owned = ownedConfigFile(target, file);
+  if (!owned.ok) {
+    actions.push({ kind: "write-json-key", target: fileMarker, result: "failed", detail: `refused: ${owned.refused}` });
+    notes.push(`mcp wiring skipped: ${file} ${owned.refused}`);
+    return 0;
+  }
+
   if (existsSync(file)) {
     let text: string;
     try {
@@ -1349,8 +1358,14 @@ function wireHooks(
   const eventsRaw = hooksDef.hooks && typeof hooksDef.hooks === "object" ? hooksDef.hooks : hooksDef;
   const events = eventsRaw as Record<string, unknown>;
 
-  // 3. Merge into <target>/settings.json event arrays.
+  // 3. Merge into <target>/settings.json event arrays — only if it really is that file.
   const settingsFile = join(target.dir, "settings.json");
+  const ownedSettings = ownedConfigFile(target, settingsFile);
+  if (!ownedSettings.ok) {
+    actions.push({ kind: "merge-hook", target: toMarkerPath(target.dir, settingsFile), result: "failed", detail: `refused: ${ownedSettings.refused}` });
+    notes.push(`hooks wiring skipped: ${settingsFile} ${ownedSettings.refused}`);
+    return 0;
+  }
   let settings: Record<string, unknown> = {};
   if (existsSync(settingsFile)) {
     try {
@@ -1850,9 +1865,37 @@ function removableMarkerPath(configDir: string, markerPath: string, productId: s
   return { abs };
 }
 
-/** The only shared config files this script ever writes keys or hook entries into. */
-function isOwnedConfigFile(target: Target, abs: string): boolean {
-  return abs === target.mcpFile || abs === join(target.dir, "settings.json");
+/**
+ * The only shared config files this script ever reads, backs up and writes keys or hook
+ * entries into — and only when the path IS that file: absent or a regular file, never a
+ * symlink (a link would point the read/backup/replace at an unrelated file). settings.json
+ * must also resolve inside the config dir; the MCP state file is the documented exception
+ * (the default home keeps it at ~/.claude.json, beside the dir), so it is checked for
+ * link-ness only. Used by install (wireMcp/wireHooks) and uninstall (removeMarkerEntry) alike.
+ */
+function ownedConfigFile(target: Target, abs: string): { ok: true } | { ok: false; refused: string } {
+  const isMcp = abs === target.mcpFile;
+  const isSettings = abs === join(target.dir, "settings.json");
+  if (!isMcp && !isSettings) return { ok: false, refused: "not a config file this script writes" };
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch (err) {
+    if ((err as { code?: unknown }).code === "ENOENT") return { ok: true }; // absent: will be created
+    return { ok: false, refused: `cannot stat: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (st.isSymbolicLink()) return { ok: false, refused: "is a symlink — refusing to follow it" };
+  if (!st.isFile()) return { ok: false, refused: "not a regular file" };
+  if (isSettings) {
+    try {
+      const root = realpathSync(target.dir);
+      const real = realpathSync(abs);
+      if (real !== root && !real.startsWith(root + sep)) return { ok: false, refused: "resolves outside the config dir" };
+    } catch {
+      return { ok: false, refused: "cannot resolve the path" };
+    }
+  }
+  return { ok: true };
 }
 
 function removeMarkerEntry(
@@ -1865,11 +1908,13 @@ function removeMarkerEntry(
   // Config entries first (json-key, hooks-entry), then payload dirs/files.
   for (const f of entry.files) {
     if (f.kind !== "json-key" && f.kind !== "hooks-entry") continue; // dirs/files are handled below
-    // Never touch a config file this script did not write into, whatever the marker says.
+    // Never touch a config file this script did not write into — or one that is not really a
+    // file (a symlink would redirect the read/backup/replace) — whatever the marker says.
     const cfgAbs = fromMarkerPath(target.dir, f.file);
-    if (!isOwnedConfigFile(target, cfgAbs)) {
+    const owned = ownedConfigFile(target, cfgAbs);
+    if (!owned.ok) {
       const disp = f.kind === "json-key" ? `${f.file}${f.pointer}` : `${f.file}#${f.event}`;
-      actions.push({ kind: "remove", target: disp, result: "skipped", detail: "refused: not a config file this script writes" });
+      actions.push({ kind: "remove", target: disp, result: "skipped", detail: `refused: ${owned.refused}` });
       continue;
     }
     if (f.kind === "json-key") {

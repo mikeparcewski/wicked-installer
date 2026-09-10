@@ -38,7 +38,9 @@ All notable changes to wicked-installer are documented here. The format follows
   parent-traversing, outside the roots the script writes (`skills/`, `agents/`, `commands/`,
   `wicked-installer/products/<id>/`) or that realpath-resolve outside the config dir, and config
   entries in any file other than the MCP state file or `settings.json` — each reported as a
-  `skipped` action with a `refused: …` diagnostic.
+  `skipped` action with a `refused: …` diagnostic. Those two config files are also accepted
+  only when they really are files: a symlinked `settings.json` or MCP state file is refused (no
+  read, no backup, no replace) on uninstall and on install (`mcp`/hooks wiring) alike.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform, so a
   config dir with spaces, `$` or `&` reads back correctly; payload symlink/containment/permission
   failures make the registration `unreadable` (error, exit 1) rather than merely partial; an
