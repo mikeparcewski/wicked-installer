@@ -179,6 +179,21 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
     assert.equal(v.state, "partial");
     assert.match(v.problems[0], /payload plugin\.json version 1\.0\.1 does not match the install record \(1\.0\.0\)/);
 
+    // A record whose installPath is a valid-looking plugin ANYWHERE ELSE — even inside the config
+    // dir — is not a registration: Claude Code and crew read plugins/cache/<mkt>/<plugin>/<version>.
+    const elsewhere = join(d, "elsewhere");
+    const { plugins } = configDir(elsewhere, { marketplace: true });
+    const stray = join(plugins, "cache", "wicked-garden", "wicked-garden", "somewhere-else");
+    mkdirSync(join(stray, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(stray, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version: "1.0.0" }));
+    writeFileSync(join(plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2,
+      plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: stray, version: "1.0.0" }] },
+    }));
+    v = registrationVerdict(readRegistration(elsewhere, spec));
+    assert.equal(v.state, "partial");
+    assert.match(v.problems[0], /is not the expected cache path .*[\\/]cache[\\/]wicked-garden[\\/]wicked-garden[\\/]1\.0\.0$/);
+
     const good = join(d, "good");
     configDir(good, { marketplace: true, record: true, payload: true });
     v = registrationVerdict(readRegistration(good, spec));

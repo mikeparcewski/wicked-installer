@@ -377,10 +377,20 @@ export function cacheRoot(configDir: string, spec: ClaudePluginSpec): string {
   return join(configDir, "plugins", "cache", spec.marketplaceName, spec.pluginName);
 }
 
-function checkPayload(root: string, installPath: string, recordVersion: string): PayloadCheck {
+function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, installPath: string, recordVersion: string): PayloadCheck {
   if (!installPath) return { ok: false, problem: "install record has no installPath" };
   const dir = ownedDir(root, installPath);
   if (!dir.ok) return { ok: false, problem: dir.missing ? `payload dir missing: ${installPath}` : dir.error };
+  // The payload must be THE cache path Claude Code (and crew) read for the recorded version —
+  // a record pointing anywhere else, even at a valid-looking plugin, is not a registration.
+  const expected = join(cacheRoot(configDir, spec), recordVersion);
+  let atExpectedPath = false;
+  try {
+    atExpectedPath = realpathSync(installPath) === realpathSync(expected);
+  } catch {
+    atExpectedPath = false;
+  }
+  if (!atExpectedPath) return { ok: false, problem: `payload recorded at ${installPath} is not the expected cache path ${expected}` };
   const manifest = readOwnedJson(root, join(installPath, ".claude-plugin", "plugin.json"));
   if (manifest.error) return { ok: false, problem: manifest.error };
   if (manifest.value === undefined) return { ok: false, problem: `payload has no .claude-plugin/plugin.json: ${installPath}` };
@@ -434,7 +444,7 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
         version,
         scope: typeof e.scope === "string" ? e.scope : "user",
         installPath,
-        payload: checkPayload(root, installPath, version),
+        payload: checkPayload(root, configDir, spec, installPath, version),
       });
     }
     reg.installed.sort((a, b) => Number(b.scope === "user") - Number(a.scope === "user"));
@@ -494,7 +504,8 @@ export interface RegistrationVerdict {
 
 /**
  * REGISTERED requires all three: the marketplace entry, the install record, and the
- * record's payload dir holding a plugin.json whose version matches the record. A
+ * payload — at the expected cache path plugins/cache/<marketplace>/<plugin>/<version>/
+ * for the recorded version, holding a plugin.json whose version matches the record. A
  * record with anything missing is PARTIAL (what is missing is named); a bare
  * plugins/<plugin>/ copy with no record is COPY-ONLY; an I/O, permission, symlink or
  * containment problem makes the state UNREADABLE — reported as an error, never as

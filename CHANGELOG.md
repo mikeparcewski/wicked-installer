@@ -38,7 +38,8 @@ All notable changes to wicked-installer are documented here. The format follows
 - `status` prints, per active Claude config dir, wicked-garden's registration state — marketplace
   present (and its source), installed version/scope, cached versions, enable switch — with one
   verdict shared by install, status and detection: **registered** (marketplace entry + install
-  record + payload with a matching `plugin.json` version), **partially registered (…)** naming
+  record + the payload at the expected `plugins/cache/<marketplace>/<plugin>/<version>` path with a
+  matching `plugin.json` version), **partially registered (…)** naming
   what is missing, **copy only (unregistered)** for a bare `plugins/wicked-garden` copy, or
   **unreadable (…)** — exit 1 — when a state file is a symlink, resolves outside the config dir,
   or cannot be read. Read from disk without following symlinks; `status` runs no `claude plugin`
