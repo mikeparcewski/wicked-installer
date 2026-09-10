@@ -328,8 +328,10 @@ function errCode(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function isUnder(real: string, root: string): boolean {
-  return real === root || real.startsWith(root + sep);
+/** Containment by path prefix; a root that already ends with the separator (`/`, `C:\\`) is not doubled. */
+export function isUnder(real: string, root: string): boolean {
+  const prefix = root.endsWith(sep) ? root : root + sep;
+  return real === root || real.startsWith(prefix);
 }
 
 /** A directory that really belongs to the config dir: exists, is not a symlink, resolves under root. */

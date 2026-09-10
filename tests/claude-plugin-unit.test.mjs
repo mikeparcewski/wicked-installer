@@ -24,6 +24,7 @@ const {
   resolveMarketplaceSource,
   localMarketplaceUnder,
   expandHome,
+  isUnder,
   shellQuote,
 } = await import(join(root, "dist", "claude-plugin.js"));
 
@@ -667,4 +668,14 @@ test("planClaudePlugin: a dir whose state is unreadable fails THAT dir and the r
   } finally {
     rm(d);
   }
+});
+
+test("isUnder: containment by prefix, with a root that already ends in the separator (filesystem root) not doubled", () => {
+  const r = (p) => p.split("/").join(sep);
+  assert.equal(isUnder(r("/a/plugins"), r("/a")), true);
+  assert.equal(isUnder(r("/a"), r("/a")), true);
+  assert.equal(isUnder(r("/ab/plugins"), r("/a")), false, "a sibling sharing the prefix is not under the root");
+  assert.equal(isUnder(r("/plugins"), sep), true, "children of the filesystem root are under it");
+  assert.equal(isUnder(sep, sep), true);
+  assert.equal(isUnder(r("/a/plugins"), r("/a/")), true, "a root given with a trailing separator");
 });
