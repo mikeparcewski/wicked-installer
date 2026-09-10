@@ -40,7 +40,10 @@ All notable changes to wicked-installer are documented here. The format follows
   entries in any file other than the MCP state file or `settings.json` — each reported as a
   `skipped` action with a `refused: …` diagnostic. Those two config files are also accepted
   only when they really are files: a symlinked `settings.json` or MCP state file is refused (no
-  read, no backup, no replace) on uninstall and on install (`mcp`/hooks wiring) alike.
+  read, no backup, no replace) on uninstall and on install (`mcp`/hooks wiring) alike. The
+  selectors inside an entry are data too: a `hooks-entry` is honoured only with this product's own
+  owner key (`wicked-installer/products/<id>`) on a well-formed event, and a `json-key` only with an
+  `/mcpServers/<name>` pointer — so a hand-edited marker cannot delete a user's own hooks or keys.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform, so a
   config dir with spaces, `$` or `&` reads back correctly; payload symlink/containment/permission
   failures make the registration `unreadable` (error, exit 1) rather than merely partial; an

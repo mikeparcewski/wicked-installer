@@ -1912,9 +1912,25 @@ function removeMarkerEntry(
     // file (a symlink would redirect the read/backup/replace) — whatever the marker says.
     const cfgAbs = fromMarkerPath(target.dir, f.file);
     const owned = ownedConfigFile(target, cfgAbs);
+    const disp = f.kind === "json-key" ? `${f.file}${f.pointer}` : `${f.file}#${String(f.event)}`;
     if (!owned.ok) {
-      const disp = f.kind === "json-key" ? `${f.file}${f.pointer}` : `${f.file}#${f.event}`;
       actions.push({ kind: "remove", target: disp, result: "skipped", detail: `refused: ${owned.refused}` });
+      continue;
+    }
+    // The selector inside the entry is data too. A hook entry may only match THIS product's own
+    // owner key — exactly what wireHooks writes — on a well-formed event; an empty or foreign
+    // selector would match (and delete) unrelated user hooks. A json-key may only name an
+    // /mcpServers/<name> pointer — exactly what wireMcp writes.
+    if (f.kind === "hooks-entry") {
+      const expectedOwner = `wicked-installer/products/${productId}`;
+      const selector: unknown = f.ownerMatch?.commandContains;
+      const event: unknown = f.event;
+      if (selector !== expectedOwner || typeof event !== "string" || !/^[A-Za-z][A-Za-z0-9]*$/.test(event)) {
+        actions.push({ kind: "remove", target: disp, result: "skipped", detail: `refused: hook selector must be this product's owner key (${expectedOwner}) on a valid event` });
+        continue;
+      }
+    } else if (!/^\/mcpServers\/[^/]+$/.test(f.pointer)) {
+      actions.push({ kind: "remove", target: disp, result: "skipped", detail: "refused: json-key pointer must name /mcpServers/<name>" });
       continue;
     }
     if (f.kind === "json-key") {

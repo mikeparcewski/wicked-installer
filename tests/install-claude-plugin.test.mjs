@@ -146,7 +146,8 @@ test("install-claude.js uninstall refuses marker paths that escape the config di
   writeFileSync(join(outside, "keep.txt"), "must survive");
   mkdirSync(join(sb.cfg, "skills", "wicked-garden-core"), { recursive: true });
   writeFileSync(join(sb.cfg, "skills", "wicked-garden-core", "SKILL.md"), "---\nname: wicked-garden-core\n---\nwicked-garden\n");
-  writeFileSync(join(sb.cfg, "settings.json"), JSON.stringify({ theme: "dark" }));
+  const userSettings = { theme: "dark", permissions: { allow: ["Bash"] }, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "my-own-hook.sh" }] }] } };
+  writeFileSync(join(sb.cfg, "settings.json"), JSON.stringify(userSettings));
   mkdirSync(join(sb.cfg, "wicked-installer"), { recursive: true });
   writeFileSync(markerPath(sb.cfg), JSON.stringify({
     markerVersion: 2, cli: "claude", configDir: sb.cfg, updatedAt: "2026-01-01T00:00:00.000Z",
@@ -160,6 +161,9 @@ test("install-claude.js uninstall refuses marker paths that escape the config di
           { kind: "file", path: "settings.json" },                      // not a discovery root
           { kind: "dir", path: "wicked-installer/products/other-product" }, // another product's payload
           { kind: "json-key", file: "../outside/keep.txt", pointer: "/x", wroteHash: "0" }, // not a config file this script writes
+          { kind: "hooks-entry", file: "settings.json", event: "PreToolUse", ownerMatch: { commandContains: "" } },        // empty selector would match every hook
+          { kind: "hooks-entry", file: "settings.json", event: "PreToolUse", ownerMatch: { commandContains: "my-own-hook" } }, // foreign selector
+          { kind: "json-key", file: "settings.json", pointer: "/permissions", wroteHash: "0" }, // owned file, but not an /mcpServers pointer
         ],
       },
     },
@@ -175,9 +179,14 @@ test("install-claude.js uninstall refuses marker paths that escape the config di
     assert.match(byTarget["settings.json"].detail, /refused: outside the discovery roots this script writes/);
     assert.match(byTarget["wicked-installer/products/other-product"].detail, /refused: outside the discovery roots this script writes/);
     assert.match(byTarget["../outside/keep.txt/x"].detail, /refused: not a config file this script writes/);
+    const hookRefusals = garden.actions.filter((a) => a.target === "settings.json#PreToolUse");
+    assert.equal(hookRefusals.length, 2);
+    for (const a of hookRefusals) assert.match(a.detail, /refused: hook selector must be this product's owner key \(wicked-installer\/products\/wicked-garden\) on a valid event/);
+    assert.match(byTarget["settings.json/permissions"].detail, /refused: json-key pointer must name \/mcpServers\/<name>/);
     assert.ok(!existsSync(join(sb.cfg, "skills", "wicked-garden-core")), "the legitimate path was removed");
     assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "must survive", "nothing outside the config dir was touched");
-    assert.deepEqual(JSON.parse(readFileSync(join(sb.cfg, "settings.json"), "utf8")), { theme: "dark" }, "settings.json untouched");
+    assert.deepEqual(JSON.parse(readFileSync(join(sb.cfg, "settings.json"), "utf8")), userSettings, "settings.json untouched: the user's own hook and permissions survive");
+    assert.ok(!existsSync(join(sb.cfg, "backups")), "an all-refused settings.json is never backed up or rewritten");
     // The registration itself is Claude Code's — the report says so and names the command.
     assert.ok(garden.notes.some((n) => /removed only the legacy skills\/hooks copy.*claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden.notes));
 
