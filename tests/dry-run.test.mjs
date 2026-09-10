@@ -285,7 +285,7 @@ test("--dry-run reads the existing registration: no `marketplace add` when prese
     assert.match(r.stdout, /probe:\s+.*known_marketplaces\.json → marketplace fake-plugin: registered \(github:acme\/fake-plugin\)/);
     assert.match(r.stdout, /probe:\s+.*installed_plugins\.json → fake-plugin@fake-plugin: 1\.2\.3 \(user\)/);
     assert.doesNotMatch(r.stdout, /claude plugin marketplace add/, "an already-registered marketplace is not re-added");
-    assert.match(r.stdout, /dry-run:\s+CLAUDE_CONFIG_DIR=.* claude plugin update fake-plugin@fake-plugin\s+\(installed 1\.2\.3\)/);
+    assert.match(r.stdout, /dry-run:\s+CLAUDE_CONFIG_DIR=.* claude plugin update fake-plugin@fake-plugin\s+\(installed 1\.2\.3 \(user\)\)/);
     assert.doesNotMatch(r.stdout, /claude plugin install fake-plugin@fake-plugin/);
 
     // Payload gone ⇒ partial ⇒ the plan is `install` (repair), and says why.
@@ -293,7 +293,7 @@ test("--dry-run reads the existing registration: no `marketplace add` when prese
     before = snapshot(sb.home);
     r = runDry(sb, ["fake-plugin"]);
     assertDry(sb, r, before, { probes: true });
-    assert.match(r.stdout, /dry-run:\s+CLAUDE_CONFIG_DIR=.* claude plugin install fake-plugin@fake-plugin\s+\(install record present but payload dir missing/);
+    assert.match(r.stdout, /dry-run:\s+CLAUDE_CONFIG_DIR=.* claude plugin install fake-plugin@fake-plugin\s+\(install record present but user scope: payload dir missing/);
     assert.doesNotMatch(r.stdout, /claude plugin update/);
   } finally {
     cleanup(sb);

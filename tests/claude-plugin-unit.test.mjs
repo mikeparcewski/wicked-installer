@@ -206,6 +206,14 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
     }));
     const noVersionReg = readRegistration(noVersion, spec);
     assert.equal(noVersionReg.installed[0].version, "", "no synthesized version");
+    // The raw string is kept: a padded version is not silently normalised into a valid one.
+    writeFileSync(join(nv.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: nv.installPath, version: " 1.0.0 " }] },
+    }));
+    const padded = readRegistration(noVersion, spec);
+    assert.equal(padded.installed[0].version, " 1.0.0 ");
+    assert.equal(registrationVerdict(padded).state, "partial");
+    assert.match(registrationVerdict(padded).problems[0], /record version " 1\.0\.0 " is not a path segment/);
     v = registrationVerdict(noVersionReg);
     assert.equal(v.state, "partial");
     assert.deepEqual(v.problems, ["install record has no version (user scope)"]);
@@ -383,7 +391,7 @@ test("readRegistration: symlinked registration files and escapes are refused and
     v = registrationVerdict(readRegistration(nested, spec));
     assert.equal(v.state, "partial", JSON.stringify(v));
     assert.match(v.problems[0], /record version "alias\/1\.0\.0" is not a path segment/);
-    for (const bad of ["..", ".", ".hidden", "a\\b", "1.0.0/", "a b"]) {
+    for (const bad of ["..", ".", ".hidden", "a\\b", "1.0.0/", "a b", " 1.0.0 ", "1.0.0\t", "\n1.0.0"]) {
       writeFileSync(join(nv.plugins, "installed_plugins.json"), JSON.stringify({
         version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: nv.installPath, version: bad }] },
       }));
@@ -456,7 +464,25 @@ test("planForDir: commands follow the on-disk state exactly (add only when absen
     configDir(partial, { marketplace: true, record: true });
     plan = planForDir(partial, spec, "mikeparcewski/wicked-garden");
     assert.deepEqual(plan.commands.map((c) => c.args), [["plugin", "install", "wicked-garden@wicked-garden"]]);
-    assert.match(plan.commands[0].because, /install record present but payload dir missing/);
+    assert.match(plan.commands[0].because, /install record present but user scope: payload dir missing/);
+
+    // A healthy user-scope record plus a broken project-scope record: `update` cannot repair the
+    // project record, so the plan is `install`, naming the record that is wrong.
+    const mixed = join(d, "mixed");
+    const mx = configDir(mixed, { marketplace: true, payload: true });
+    writeFileSync(join(mx.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2,
+      plugins: { "wicked-garden@wicked-garden": [
+        { scope: "user", installPath: mx.installPath, version: "1.0.0" },
+        { scope: "project", projectPath: "/p", installPath: join(mx.plugins, "cache", "wicked-garden", "wicked-garden", "2.0.0"), version: "2.0.0" },
+        { scope: "managed", installPath: mx.installPath },
+      ] },
+    }));
+    plan = planForDir(mixed, spec, "mikeparcewski/wicked-garden");
+    assert.deepEqual(plan.commands.map((c) => c.args), [["plugin", "install", "wicked-garden@wicked-garden"]]);
+    assert.match(plan.commands[0].because, /project scope: payload dir missing/);
+    assert.match(plan.commands[0].because, /managed scope: no version/);
+    assert.match(plan.probes[1], /1\.0\.0 \(user\), 2\.0\.0 \(project\); payload dir missing.*\(no version\) \(managed\)/, "the probe lists every record");
 
     // A marketplace registered from ANOTHER source (a local checkout) is kept, not re-added.
     const local = join(d, "local");

@@ -115,7 +115,7 @@ test("a second install updates instead of re-adding the marketplace or re-instal
       [cfg, "plugin update wicked-garden@wicked-garden"],
     ], "marketplace add is idempotent; an installed plugin is updated, not re-installed");
     assert.match(r.stdout, /probe: .*known_marketplaces\.json → marketplace wicked-garden: registered \(github:mikeparcewski\/wicked-garden\)/);
-    assert.match(r.stdout, /claude plugin update wicked-garden@wicked-garden\s+\(installed 0\.0\.1-stub\)/);
+    assert.match(r.stdout, /claude plugin update wicked-garden@wicked-garden\s+\(installed 0\.0\.1-stub \(user\)\)/);
     assert.ok(existsSync(cacheDir(cfg, "0.0.2-stub")), "the update populated the new cache version");
     assert.match(r.stdout, /\(0\.0\.2-stub\)/);
   } finally {
@@ -134,7 +134,7 @@ test("a partial registration (record without payload) is repaired with `plugin i
     const r = run(sb, ["install", "wicked-garden"], { configDir: cfg });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.deepEqual(calls(sb).map(([, argv]) => argv), ["--version", "plugin install wicked-garden@wicked-garden"]);
-    assert.match(r.stdout, /claude plugin install wicked-garden@wicked-garden\s+\(install record present but payload dir missing/);
+    assert.match(r.stdout, /claude plugin install wicked-garden@wicked-garden\s+\(install record present but user scope: payload dir missing/);
     assert.ok(existsSync(cacheDir(cfg)), "repaired");
   } finally {
     cleanup(sb);

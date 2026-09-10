@@ -51,8 +51,10 @@ All notable changes to wicked-installer are documented here. The format follows
   merely resolves to it is `partial`); the recorded version must be a single path segment (a value
   such as `alias/1.0.0` is `partial`, never a path); any selected install record without a real version makes the
   dir `partial` ("install record has no version (<scope> scope)") regardless of other entries — never
-  completed with a placeholder; every selected install record must verify — a healthy user-scope
-  record does not excuse a project/managed record whose payload is missing or mismatched. The
+  completed with a placeholder (the recorded string is kept raw — a padded `" 1.0.0 "` is not
+  `1.0.0`); every selected install record must verify — a healthy user-scope record does not excuse
+  a project/managed record whose payload is missing or mismatched — and the repair plan chooses
+  `update` only when every record is complete, `install` otherwise. The
   dry-run plan applies the same launch-shape validation as the live spawn (a `.cmd`-shim `claude`
   with `%`/`!` in an argument fails the plan too), and on Windows a config dir or argument holding
   `%`/`!` is rendered structurally (argv + env) rather than as a `set "…" && claude …` line that

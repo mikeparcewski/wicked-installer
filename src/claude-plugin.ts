@@ -535,8 +535,9 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
     const entries = Array.isArray(raw) ? raw : raw !== undefined ? [raw] : [];
     for (const e of entries) {
       if (!isRecord(e)) continue;
-      // A missing/blank version stays EMPTY — never a placeholder that could pass a comparison.
-      const version = typeof e.version === "string" ? e.version.trim() : "";
+      // A missing version stays EMPTY — never a placeholder that could pass a comparison — and the
+      // string is kept RAW: `" 1.0.0 "` is not `1.0.0`, it is a version that fails the segment check.
+      const version = typeof e.version === "string" ? e.version : "";
       const installPath = typeof e.installPath === "string" ? e.installPath : "";
       const payload = checkPayload(root, configDir, spec, installPath, version);
       if (payload.error) reg.errors.push(payload.error);
@@ -719,22 +720,28 @@ export function planForDir(dir: string, spec: ClaudePluginSpec, source: string):
   if (registration.errors.length > 0) {
     throw new Error(`${dir}: registration state unreadable — ${registration.errors.join("; ")}`);
   }
-  const current = registration.installed[0];
-  const describeCurrent = (e: InstalledEntry): string =>
+  const records = registration.installed;
+  const describeRecord = (e: InstalledEntry): string =>
     `${e.version || "(no version)"} (${e.scope})${e.payload.ok ? "" : `; ${e.payload.problem}`}`;
   const probes = [
     `${join(dir, "plugins", "known_marketplaces.json")} → marketplace ${spec.marketplaceName}: ${registration.marketplace ? `registered (${registration.marketplace.source})` : "not registered"}`,
-    `${join(dir, "plugins", "installed_plugins.json")} → ${spec.pluginId}: ${current ? describeCurrent(current) : "not installed"}`,
+    `${join(dir, "plugins", "installed_plugins.json")} → ${spec.pluginId}: ${records.length > 0 ? records.map(describeRecord).join(", ") : "not installed"}`,
   ];
   const command = (args: string[], because: string): PlannedCommand => ({ args, render: renderClaudeCommand(dir, args), because });
   const commands: PlannedCommand[] = [];
   if (!registration.marketplace) {
     commands.push(command(["plugin", "marketplace", "add", source], "marketplace not registered"));
   }
-  if (current && current.payload.ok) {
-    commands.push(command(["plugin", "update", spec.pluginId], `installed ${current.version}`));
+  // `update` only when EVERY selected record is complete and healthy — an update cannot repair a
+  // project/managed record whose payload is missing, so anything less is an `install` (repair).
+  const unhealthy = records.filter((e) => !e.version || !e.payload.ok);
+  if (records.length > 0 && unhealthy.length === 0) {
+    commands.push(command(["plugin", "update", spec.pluginId], `installed ${records.map((e) => `${e.version} (${e.scope})`).join(", ")}`));
+  } else if (records.length > 0) {
+    const why = unhealthy.map((e) => `${e.scope} scope: ${e.version ? e.payload.problem : "no version"}`).join("; ");
+    commands.push(command(["plugin", "install", spec.pluginId], `install record present but ${why}`));
   } else {
-    commands.push(command(["plugin", "install", spec.pluginId], current ? `install record present but ${current.payload.problem}` : "not installed"));
+    commands.push(command(["plugin", "install", spec.pluginId], "not installed"));
   }
   return { dir, probes, commands, registration };
 }
