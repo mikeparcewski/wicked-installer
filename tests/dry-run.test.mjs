@@ -304,8 +304,9 @@ test("--dry-run fails fast on a --source-root with no marketplace manifest (and 
     const bogus = join(sb.tmp, "not-a-checkout");
     mkdirSync(bogus);
     const r = runDry(sb, ["fake-plugin", "--source-root", bogus]);
-    assert.equal(r.status, 1, `a bad --source-root must fail the dry run:\n${r.stdout}`);
-    assert.match(r.stdout, /no \.claude-plugin\/marketplace\.json under/);
+    assert.equal(r.status, 1, `a bad --source-root must fail the dry run:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /no \.claude-plugin\/marketplace\.json under/);
+    assert.doesNotMatch(r.stdout, /dry-run: npm install -g fake-global-pkg/, "the root is validated before the dependency is even planned");
     assert.deepEqual(guardEntries(r.guardLog), [], "the root is validated before anything is probed");
     assert.deepEqual(snapshot(sb.home), before, "still no writes");
   } finally {

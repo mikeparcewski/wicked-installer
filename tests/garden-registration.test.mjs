@@ -228,6 +228,24 @@ test("--source-root registers the local checkout <root>/wicked-garden as the mar
   }
 });
 
+test("an invalid --source-root is rejected before any dependency is installed", { skip }, () => {
+  const sb = sandbox();
+  const cfg = join(sb.tmp, "cfg");
+  const bogus = join(sb.tmp, "not-a-checkout");
+  mkdirSync(cfg);
+  mkdirSync(bogus);
+  try {
+    const r = run(sb, ["install", "wicked-garden", "--source-root", bogus], { configDir: cfg });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /no \.claude-plugin\/marketplace\.json under/);
+    assert.deepEqual(lines(sb.npmLog), [], "wicked-vault must NOT have been installed on an invalid invocation");
+    assert.ok(!existsSync(sb.stubLog), "claude never invoked");
+    assert.ok(!existsSync(join(cfg, "plugins")));
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("--source-root without Claude Code fails rather than silently installing the published package", { skip }, () => {
   const sb = sandbox();
   const cfg = join(sb.tmp, "cfg");

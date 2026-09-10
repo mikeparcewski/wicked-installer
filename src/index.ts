@@ -13,7 +13,20 @@ import { promptSelectionMode, promptBundle, promptCustom, promptConfirm, promptC
 import type { CliOption, UserSelection } from "./ui.js";
 import { listProducts, getProduct } from "./registry.js";
 import type { InstallResult, Product } from "./types.js";
-import { cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
+import { cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, readRegistration, registrationVerdict, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
+
+/**
+ * An explicit --source-root must hold a marketplace for every claude-plugin product being
+ * installed — checked BEFORE anything is installed, dependencies included, so a typo cannot
+ * leave a partial install (say, wicked-vault without wicked-garden) behind. Throws with the
+ * resolver's message.
+ */
+function validateSourceRoot(products: Product[], flags: DispatchFlags): void {
+  if (!flags.sourceRoot) return;
+  for (const p of products) {
+    if (p.type === "claude-plugin") resolveMarketplaceSource(claudePluginSpec(p), flags.sourceRoot);
+  }
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const { version: VERSION } = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
@@ -236,6 +249,14 @@ export async function dispatchToClis(
   const results: CliRunResult[] = [];
   const pluginIds = productIds.filter((id) => getProduct(id)?.type === "claude-plugin");
 
+  // Before any script runs or any binary is acquired.
+  try {
+    validateSourceRoot(productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined), flags);
+  } catch (err) {
+    console.log(chalk.red(`\n${err instanceof Error ? err.message : String(err)}`));
+    return 1;
+  }
+
   for (const [index, cli] of clis.entries()) {
     // Binaries are machine-scoped: acquire once (first script), skip thereafter.
     const skipBinaries = index > 0;
@@ -396,10 +417,16 @@ async function installDirectly(products: Product[], flags: DispatchFlags): Promi
 }
 
 async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Promise<void> {
+  const all = [...selection.addedDeps, ...selection.products]; // deps first
+  try {
+    validateSourceRoot(all, flags); // before the first dependency is installed
+  } catch (err) {
+    console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+    process.exit(1);
+  }
   console.log(chalk.bold(flags.dryRun
     ? "\nDry run (direct) — printing the plan; nothing will be installed or written.\n"
     : "\nInstalling (direct)...\n"));
-  const all = [...selection.addedDeps, ...selection.products]; // deps first
   const results = await installDirectly(all, flags);
 
   console.log(chalk.bold("\nSummary:"));
@@ -523,6 +550,12 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
 
   if (blocked.length > 0) {
     console.error(chalk.red(`Unknown products: ${blocked.join(", ")}`));
+    process.exit(1);
+  }
+  try {
+    validateSourceRoot([...added, ...selected], flags); // before the first dependency is installed
+  } catch (err) {
+    console.error(chalk.red(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
 

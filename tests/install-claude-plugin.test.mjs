@@ -283,6 +283,22 @@ test("dispatch --dry-run: plan only — nothing written, legacy removal reported
   }
 });
 
+test("dispatch: an invalid --source-root is rejected before the script runs or any dependency is acquired", { skip }, async () => {
+  const sb = sandbox();
+  const bogus = join(sb.tmp, "not-a-checkout");
+  mkdirSync(bogus);
+  try {
+    const { code, out } = await dispatch(sb, ["wicked-vault", "wicked-garden"], { sourceRoot: bogus });
+    assert.equal(code, 1, out);
+    assert.match(out, /no \.claude-plugin\/marketplace\.json under/);
+    assert.deepEqual(lines(sb.npmLog), [], "vault was not acquired");
+    assert.ok(!existsSync(sb.stubLog), "claude never invoked");
+    assert.ok(!existsSync(sb.cfg), "the script never ran, so no config dir was created");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("dispatch: with no legacy copy nothing is uninstalled, and a fresh config dir ends up registered", { skip }, async () => {
   const sb = sandbox();
   try {
