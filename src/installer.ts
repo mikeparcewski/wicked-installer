@@ -30,22 +30,6 @@ export interface InstallOptions {
   log?: (line: string) => void;
 }
 
-/**
- * Resolve every Claude config directory that should receive dropped-in files.
- * Honors CLAUDE_CONFIG_DIR (Claude Code's override, which may list multiple
- * paths separated by ":" or ",") and always includes the default ~/.claude,
- * so tooling lands in both the alt config and the default. De-duplicated.
- */
-function configDirs(): string[] {
-  const dirs = [join(homedir(), ".claude")];
-  const override = process.env.CLAUDE_CONFIG_DIR;
-  if (override) {
-    for (const p of override.split(/[:,]/).map((s) => s.trim()).filter(Boolean)) {
-      dirs.push(p);
-    }
-  }
-  return [...new Set(dirs)];
-}
 
 function findBinary(dir: string, productId: string, archiveName: string): string | undefined {
   const priority: string[] = [];
@@ -239,7 +223,10 @@ export async function installProduct(product: Product, options: InstallOptions =
         // picks those up by convention. Copying into plugins/<id> does nothing
         // without marketplace registration, so we deliberately do not do that.
         const ASSET_DIRS = ["skills", "agents", "commands"];
-        const targets = configDirs();
+        // The ACTIVE Claude config dirs, through the shared resolver (INTERFACE.md §11.1): --claude-home
+        // wins; else CLAUDE_CONFIG_DIR exclusively when set (set-but-empty is an error); else ~/.claude
+        // only. Never additive: with an override in force the default home is not a target.
+        const targets = resolveClaudeConfigDirs({ homeFlags: options.claudeHomes }).dirs;
 
         if (dryRun) {
           return plan(

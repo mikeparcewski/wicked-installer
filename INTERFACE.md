@@ -470,7 +470,7 @@ Precedence — first non-empty level wins as the FULL target set:
 
 Fan-out: skills, hooks, payload dirs, version stamps, and the marker are written **per config dir** (independent per-target success/failure, §7.4). The MCP file per target is defined in §8.3. Report: `claudeHome` = primary target; `configDirs` = full list (§9.2).
 
-This supersedes the additive `configDirs()` currently in `src/installer.ts:13-22` (Appendix A, J-6).
+This superseded the additive `configDirs()` that used to live in `src/installer.ts` (Appendix A, J-6); it has been removed — every path, the `git-plugin` install included, resolves its targets through the shared resolver.
 
 ### 11.2 Detection heuristics (script preflight AND central picker)
 

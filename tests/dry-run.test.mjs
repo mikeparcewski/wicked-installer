@@ -492,3 +492,45 @@ test("picker CLI detection is spawn-free: a `codex` on PATH is detected by files
     cleanup(sb);
   }
 });
+
+/** A live (non-dry) run of the direct install path — no spawn guard, real spawns of the PATH fakes. */
+function runLive(sb, args, { env: extraEnv = {}, unsetConfigDir = false } = {}) {
+  const env = { ...process.env, HOME: sb.home, USERPROFILE: sb.home, CLAUDE_CONFIG_DIR: sb.cfg, PATH: `${sb.bin}${WIN ? ";" : ":"}${dirname(process.execPath)}`, NODE_OPTIONS: "", ...extraEnv };
+  delete env.WICKED_CLAUDE_BIN;
+  if (unsetConfigDir) delete env.CLAUDE_CONFIG_DIR;
+  return spawnSync(process.execPath, [sb.cli, "install", ...args], { encoding: "utf8", env, timeout: 60_000 });
+}
+
+test("git-plugin targets are the ACTIVE config dirs only: with CLAUDE_CONFIG_DIR (or --claude-home) the default ~/.claude is never planned or written", { skip: WIN ? "POSIX fake git" : false }, () => {
+  const sb = sandbox({ withClaude: false });
+  try {
+    const defaultHome = join(sb.home, ".claude");
+    // Dry run: the plan names the active dir and nothing else.
+    const before = snapshot(sb.home);
+    const dry = runDry(sb, ["fake-git"]);
+    assertDry(sb, dry, before, { probes: false });
+    assert.match(dry.stdout, new RegExp(`dry-run: copy skills/, agents/, commands/ into ${escapeRe(sb.cfg)}\\s*$`, "m"), dry.stdout);
+    assert.ok(!dry.stdout.includes(defaultHome), "the default home is not a target while CLAUDE_CONFIG_DIR is set");
+    const other = join(sb.home, "other-cfg");
+    mkdirSync(other);
+    const dryFlag = runDry(sb, ["fake-git", "--claude-home", other], { unsetConfigDir: true });
+    assert.equal(dryFlag.status, 0, dryFlag.stdout);
+    assert.match(dryFlag.stdout, new RegExp(`copy skills/, agents/, commands/ into ${escapeRe(other)}\\s*$`, "m"));
+    assert.ok(!dryFlag.stdout.includes(defaultHome) && !dryFlag.stdout.includes(`into ${sb.cfg}`), "--claude-home wins over both the default home and the env");
+
+    // Live: a fake `git clone` materialises a skill; it lands ONLY in the active dir.
+    // The sandbox PATH holds only the fakes and node, so the fake reaches the system tools explicitly.
+    writeFileSync(join(sb.bin, "git"), '#!/bin/sh\nPATH=/bin:/usr/bin:$PATH\neval "dest=\\${$#}"\nmkdir -p "$dest/skills/fake-git-skill"\nprintf \'%s\\n\' "---" "name: fake-git-skill" "---" > "$dest/skills/fake-git-skill/SKILL.md"\nexit 0\n', { mode: 0o755 });
+    const live = runLive(sb, ["fake-git"]);
+    assert.equal(live.status, 0, live.stdout + live.stderr);
+    assert.ok(existsSync(join(sb.cfg, "skills", "fake-git-skill", "SKILL.md")), "the active dir received the skill");
+    assert.ok(!existsSync(defaultHome), "the default home was neither created nor written");
+    assert.match(live.stdout, new RegExp(`copied into ${escapeRe(sb.cfg)}\\s*$`, "m"));
+    const liveFlag = runLive(sb, ["fake-git", "--claude-home", other], { unsetConfigDir: true });
+    assert.equal(liveFlag.status, 0, liveFlag.stdout + liveFlag.stderr);
+    assert.ok(existsSync(join(other, "skills", "fake-git-skill", "SKILL.md")));
+    assert.ok(!existsSync(defaultHome), "still no default home");
+  } finally {
+    cleanup(sb);
+  }
+});

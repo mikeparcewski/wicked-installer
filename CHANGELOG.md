@@ -99,6 +99,9 @@ All notable changes to wicked-installer are documented here. The format follows
   backup/write failure — refused path or plain I/O error — is a named `failed` action carrying the
   diagnostic; C1 control characters are rejected like C0; the empty-marker-dir housekeeping reports
   a refusal instead of silently returning.
+- The `git-plugin` install path resolves its target config dirs through the shared resolver too
+  (`--claude-home` wins; `CLAUDE_CONFIG_DIR` exclusive when set; `~/.claude` only when unset) — the
+  legacy additive `configDirs()`, which always added `~/.claude`, is gone.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is
