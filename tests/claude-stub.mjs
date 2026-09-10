@@ -87,6 +87,19 @@ if (sub === "marketplace" && third === "add") {
   process.exit(0);
 }
 
+if (sub === "marketplace" && (third === "remove" || third === "rm")) {
+  const name = rest[0];
+  const known = readJson(marketplacesFile, {});
+  if (!name || !known[name]) {
+    process.stderr.write(`Marketplace not found: ${name ?? "(none)"}\n`);
+    process.exit(1);
+  }
+  delete known[name];
+  writeJson(marketplacesFile, known);
+  process.stdout.write(`✔ Successfully removed marketplace: ${name}\n`);
+  process.exit(0);
+}
+
 if (sub === "list") {
   if (failing("list")) { process.stderr.write("stub: plugin list failed\n"); process.exit(1); }
   const installed = readJson(installedFile, { version: 2, plugins: {} });

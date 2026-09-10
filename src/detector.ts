@@ -302,13 +302,13 @@ export function isProductInstalled(
              existsSync(join(home, ".claude", "skills", "wicked-testing:acceptance-testing"));
     case "wicked-garden": {
       // A plugin, not a CLI — "installed" means Claude Code can LOAD it: fully registered
-      // (marketplace entry + install record + cache payload, see registrationVerdict) in one of
-      // the active config dirs. A bare `plugins/wicked-garden` copy (what the pre-registration
-      // installer wrote) or a stale install record whose payload is gone is NOT installed —
-      // `status` explains which it is, and this answer agrees with that detail.
+      // (marketplace entry + install record + cache payload, see registrationVerdict) in EVERY
+      // active config dir — the same worst-across-dirs aggregate `status` prints. A bare
+      // `plugins/wicked-garden` copy (what the pre-registration installer wrote) or a stale
+      // install record whose payload is gone is NOT installed — `status` explains which it is.
       const garden = loadRegistry().products.find((p) => p.id === productId);
       const spec = claudePluginSpec(garden ?? { id: productId, install: {} });
-      return resolveClaudeConfigDirs({ homeFlags: claudeHomes }).dirs.some(
+      return resolveClaudeConfigDirs({ homeFlags: claudeHomes }).dirs.every(
         (dir) => registrationVerdict(readRegistration(dir, spec)).state === "registered",
       );
     }

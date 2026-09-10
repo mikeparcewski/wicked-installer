@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { execa } from "execa";
 import type { Product, InstallResult } from "./types.js";
-import { claudePluginSpec, planClaudePlugin, registerClaudePlugin, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
+import { LEGACY_CLEANUP_ISSUE, claudePluginSpec, detectLegacyCopies, planClaudePlugin, registerClaudePlugin, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
 
 const SKIP_BINARY_EXTS = /\.(md|txt|sha256|sha512|asc|json|toml|yaml|yml|xml|html|css|js|ts)$/i;
 
@@ -315,7 +315,12 @@ async function installClaudePlugin(
   const fallbackCmd = fallbackArgs ? `npx ${fallbackArgs.join(" ")}` : undefined;
   // What the fallback writes — always ~/.claude, whatever CLAUDE_CONFIG_DIR says.
   const bareCopy = join(homedir(), ".claude", "plugins", id);
-  const note = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
+  // Legacy, unregistered copies left by earlier installers (bare plugins/<id>, or a skills/hooks
+  // copy recorded by an earlier install-claude.js) are reported and LEFT IN PLACE — never removed here.
+  const legacy = [...new Set([...configDirs.dirs, join(homedir(), ".claude")].flatMap((dir) => detectLegacyCopies(dir, spec)))];
+  for (const path of legacy) log(`  legacy ${id} copy detected at ${path} — left in place; removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`);
+  const legacyNote = legacy.length > 0 ? `; ${legacy.length} legacy cop${legacy.length === 1 ? "y" : "ies"} left in place (see ${LEGACY_CLEANUP_ISSUE})` : "";
+  const note = (install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "") + legacyNote;
   // A local checkout can only be registered through Claude Code; the npx fallback would install
   // the PUBLISHED package instead of `source`, which is not what --source-root asked for.
   const noFallbackForSourceRoot = (): Error =>
@@ -326,7 +331,7 @@ async function installClaudePlugin(
   if (options.dryRun) {
     const planned = planClaudePlugin(spec, { configDirs, source });
     if (planned.claudeDetected) {
-      return { ...plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}`), registration: "planned" };
+      return { ...plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}${legacyNote}`), registration: "planned" };
     }
     if (options.sourceRoot) throw noFallbackForSourceRoot();
     if (options.noFallback) {

@@ -66,9 +66,8 @@ always into `~/.claude` whatever `CLAUDE_CONFIG_DIR` says) is loaded by nothing.
 
 So when the `claude` CLI is present, every garden install path — `install wicked-garden`,
 the interactive path with Claude Code selected (the picker hands `install-claude.js` the
-other products, then registers garden itself and only afterwards removes a legacy
-skills/hooks copy through the script's own `uninstall`), and the interactive zero-CLI
-path — resolves the active config dir(s) the same way: `--claude-home` flags,
+other products, then registers garden itself), and the interactive zero-CLI path —
+resolves the active config dir(s) the same way: `--claude-home` flags,
 else `CLAUDE_CONFIG_DIR` (a list split on `:` or `,`; on Windows on `;` or `,`;
 authoritative when **set** — a set-but-empty value is an error, not a fall-through),
 else `~/.claude`. For **each** dir it probes (`claude --version`, plus the on-disk
@@ -80,13 +79,22 @@ claude plugin marketplace add mikeparcewski/wicked-garden   # only when the mark
 claude plugin install wicked-garden@wicked-garden           # or `update` when a healthy install exists
 ```
 
-then re-derives from disk that the marketplace entry, the install record and the
-payload under `<target>/plugins/cache/wicked-garden/wicked-garden/<version>/` (with a
-matching `plugin.json` version) all exist. A marketplace already registered from another
-source (say, a local checkout) is kept as-is. `--source-root <dir>` registers
-`<dir>/wicked-garden` as the marketplace instead of GitHub. `--dry-run` prints the same
-probes (`probe:` lines) and exactly the commands a live run would execute (`dry-run:`
-lines); the only thing it spawns is `claude --version`.
+then re-derives from disk that the marketplace entry, the install record (with a real
+version) and the payload under `<target>/plugins/cache/wicked-garden/wicked-garden/<version>/`
+(with a matching `plugin.json` version) all exist. If the run added the marketplace and the
+install then fails, the add is rolled back (`claude plugin marketplace remove wicked-garden`);
+with several config dirs each is registered in order and reported — a failure in a later dir
+leaves earlier dirs registered. A marketplace already registered from another source (say,
+a local checkout) is kept as-is. `--source-root <dir>` registers `<dir>/wicked-garden` as the
+marketplace instead of GitHub. `--dry-run` prints the same probes (`probe:` lines) and exactly
+the commands a live run would execute (`dry-run:` lines); the only thing it spawns is
+`claude --version`.
+
+**Legacy copies are left in place.** A bare `~/.claude/plugins/wicked-garden/` (from
+`npx wicked-garden install`) or a skills/hooks copy an earlier `install-claude.js` recorded
+in its marker is detected and reported — *legacy wicked-garden copy detected at <path> — left
+in place; removal will ship separately* — never removed by this version. Their removal is
+tracked in [issue #20](https://github.com/mikeparcewski/wicked-installer/issues/20).
 
 State is read from `plugins/known_marketplaces.json` / `plugins/installed_plugins.json`
 (what `claude plugin marketplace list --json` / `claude plugin list --json` print) rather
@@ -108,15 +116,17 @@ nothing) and imports nothing outside `node:` builtins.
 
 `status` prints, per active config dir, the marketplace (and its source), the
 installed version/scope, the cached versions, the enable switch, and a verdict:
-**registered** only when the marketplace entry, the install record and a payload whose
-`plugin.json` version matches the record all exist; **partially registered (…)** naming
-what is missing when a record survives without its marketplace or payload; **copy only
-(unregistered)** for a bare `plugins/wicked-garden` copy; **unreadable (…)** — an error,
-exit 1 — when a state file is a symlink, resolves outside the config dir, or cannot be
-read. The product list's "installed" for wicked-garden means *registered* — a bare,
-partial or unreadable install is not something Claude Code can load. `status` runs no
-`claude plugin …` command; its CLI detection runs the read-only `claude --version`
-probe (verified to write nothing) and nothing else.
+**registered** only when the marketplace entry, the install record (every selected record
+carrying a real version) and a payload whose `plugin.json` version matches the record all
+exist; **partially registered (…)** naming what is missing; **copy only (unregistered)**
+for a bare `plugins/wicked-garden` copy; **not installed**; **unreadable (…)** when a
+state file — or any path component below the config dir — is a symlink, resolves outside
+the config dir, or cannot be read. The **overall** line is the worst state across the
+active dirs (unreadable > not installed > copy only > partial > registered) and `status`
+exits 1 unless wicked-garden is registered in every active dir; the product list's
+"installed" for wicked-garden means exactly that. `status` runs no `claude plugin …`
+command; its CLI detection runs the read-only `claude --version` probe (verified to write
+nothing) and nothing else.
 
 ---
 

@@ -5,12 +5,10 @@ import {
   constants as fsConstants,
   cpSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -32,8 +30,9 @@ import { createHash, randomBytes } from "node:crypto";
 // Self-contained by design: no imports from other src/ modules, node: builtins only
 // (INTERFACE.md §15). Claude Code PLUGINS (type "claude-plugin", e.g. wicked-garden) are
 // not installed by this script at all: the central picker registers them through Claude
-// Code's own plugin CLI (src/claude-plugin.ts) after dispatching this script WITHOUT them,
-// then removes a legacy skills/hooks copy through this script's `uninstall` verb — §12.1/§14.
+// Code's own plugin CLI (src/claude-plugin.ts) after dispatching this script WITHOUT them —
+// see §12.1/§14. Legacy copies an earlier run of this script left behind are reported by the
+// picker and left in place (their removal is tracked separately).
 // Cross-platform: path.join everywhere, where/which gated on platform, .cmd spawn
 // rule for npm/npx, atomic tmp+rename with Windows retry, no unix-only shell tricks.
 // ---------------------------------------------------------------------------
@@ -1205,14 +1204,6 @@ function wireMcp(
   const fileMarker = toMarkerPath(target.dir, file);
   let obj: Record<string, unknown> = {};
 
-  // A symlinked state file would have us read, back up and replace something else entirely.
-  const owned = ownedConfigFile(target, file);
-  if (!owned.ok) {
-    actions.push({ kind: "write-json-key", target: fileMarker, result: "failed", detail: `refused: ${owned.refused}` });
-    notes.push(`mcp wiring skipped: ${file} ${owned.refused}`);
-    return 0;
-  }
-
   if (existsSync(file)) {
     let text: string;
     try {
@@ -1358,14 +1349,8 @@ function wireHooks(
   const eventsRaw = hooksDef.hooks && typeof hooksDef.hooks === "object" ? hooksDef.hooks : hooksDef;
   const events = eventsRaw as Record<string, unknown>;
 
-  // 3. Merge into <target>/settings.json event arrays — only if it really is that file.
+  // 3. Merge into <target>/settings.json event arrays.
   const settingsFile = join(target.dir, "settings.json");
-  const ownedSettings = ownedConfigFile(target, settingsFile);
-  if (!ownedSettings.ok) {
-    actions.push({ kind: "merge-hook", target: toMarkerPath(target.dir, settingsFile), result: "failed", detail: `refused: ${ownedSettings.refused}` });
-    notes.push(`hooks wiring skipped: ${settingsFile} ${ownedSettings.refused}`);
-    return 0;
-  }
   let settings: Record<string, unknown> = {};
   if (existsSync(settingsFile)) {
     try {
@@ -1726,6 +1711,10 @@ function runStatus(options: Options, registry: Registry): number {
   if (options.all) selected = [...idsPresent];
   else if (options.productIds.length) selected = options.productIds;
   else selected = [...idsPresent];
+  // Claude Code plugins are not this script's (§12.1): their registration is reported by the
+  // central installer's `status`, and a marker entry for one can only be a legacy copy an
+  // earlier run left behind — so they are not reported here at all.
+  selected = selected.filter((id) => byId.get(id)?.type !== "claude-plugin");
 
   let hadParseError = false;
   const reports: InstallReport[] = [];
@@ -1785,11 +1774,6 @@ function runStatus(options: Options, registry: Registry): number {
       let state: string = "current";
       if (entry.lastResult === "partial") state = "partial";
       if (missing.length || modifiedExternally) state = "stale";
-      // A marker entry for a Claude Code plugin can only be a LEGACY skills/hooks copy from
-      // an earlier install; the registration itself is reported by the central installer.
-      if (byId.get(id)?.type === "claude-plugin") {
-        notes.push(`${target.dir}: legacy skills/hooks copy (this script no longer installs plugins; registration state: \`npx wicked-installer status\`)`);
-      }
       notes.push(`${target.dir}: ${state} (version ${entry.version ?? "unknown"})`);
       if (modifiedExternally) notes.push(`${target.dir}: modified-externally (json-key drift)`);
     }
@@ -1834,105 +1818,14 @@ function tryRemoveEmptyDir(dir: string): void {
   }
 }
 
-/**
- * A marker is data on disk — it may have been hand-edited or corrupted — so a recorded
- * dir/file path is removable only when it is relative, has no `..` segment, sits under a
- * discovery root this script writes (skills/, agents/, commands/,
- * wicked-installer/products/<productId>/), and — when it exists — still realpath-resolves
- * inside the config dir (no symlink escape). Anything else is refused with a diagnostic
- * rather than removed recursively.
- */
-function removableMarkerPath(configDir: string, markerPath: string, productId: string): { abs: string } | { refused: string } {
-  const norm = normalizeSlash(markerPath).replace(/^\.\//, "");
-  const segments = norm.split("/").filter(Boolean);
-  if (segments.length === 0) return { refused: "empty path" };
-  if (isAbsolute(markerPath) || /^[A-Za-z]:/.test(norm) || norm.startsWith("~") || segments.some((s) => s === "..")) {
-    return { refused: "absolute, home-relative or parent-traversing path" };
-  }
-  const owned =
-    segments[0] === "skills" || segments[0] === "agents" || segments[0] === "commands" ||
-    (segments[0] === "wicked-installer" && segments[1] === "products" && segments[2] === productId);
-  if (!owned) return { refused: "outside the discovery roots this script writes" };
-  const abs = resolve(configDir, ...segments);
-  if (!existsSync(abs)) return { abs }; // absent — the caller reports it as skipped
-  try {
-    const root = realpathSync(configDir);
-    const real = realpathSync(abs);
-    if (real !== root && !real.startsWith(root + sep)) return { refused: "resolves outside the config dir" };
-  } catch {
-    return { refused: "cannot resolve the path" };
-  }
-  return { abs };
-}
-
-/**
- * The only shared config files this script ever reads, backs up and writes keys or hook
- * entries into — and only when the path IS that file: absent or a regular file, never a
- * symlink (a link would point the read/backup/replace at an unrelated file). settings.json
- * must also resolve inside the config dir; the MCP state file is the documented exception
- * (the default home keeps it at ~/.claude.json, beside the dir), so it is checked for
- * link-ness only. Used by install (wireMcp/wireHooks) and uninstall (removeMarkerEntry) alike.
- */
-function ownedConfigFile(target: Target, abs: string): { ok: true } | { ok: false; refused: string } {
-  const isMcp = abs === target.mcpFile;
-  const isSettings = abs === join(target.dir, "settings.json");
-  if (!isMcp && !isSettings) return { ok: false, refused: "not a config file this script writes" };
-  let st;
-  try {
-    st = lstatSync(abs);
-  } catch (err) {
-    if ((err as { code?: unknown }).code === "ENOENT") return { ok: true }; // absent: will be created
-    return { ok: false, refused: `cannot stat: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  if (st.isSymbolicLink()) return { ok: false, refused: "is a symlink — refusing to follow it" };
-  if (!st.isFile()) return { ok: false, refused: "not a regular file" };
-  if (isSettings) {
-    try {
-      const root = realpathSync(target.dir);
-      const real = realpathSync(abs);
-      if (real !== root && !real.startsWith(root + sep)) return { ok: false, refused: "resolves outside the config dir" };
-    } catch {
-      return { ok: false, refused: "cannot resolve the path" };
-    }
-  }
-  return { ok: true };
-}
-
 function removeMarkerEntry(
   entry: MarkerProduct,
   target: Target,
   options: Options,
   actions: Action[],
-  productId: string,
 ): void {
   // Config entries first (json-key, hooks-entry), then payload dirs/files.
   for (const f of entry.files) {
-    if (f.kind !== "json-key" && f.kind !== "hooks-entry") continue; // dirs/files are handled below
-    // Never touch a config file this script did not write into — or one that is not really a
-    // file (a symlink would redirect the read/backup/replace) — whatever the marker says.
-    const cfgAbs = fromMarkerPath(target.dir, f.file);
-    const owned = ownedConfigFile(target, cfgAbs);
-    const disp = f.kind === "json-key" ? `${f.file}${f.pointer}` : `${f.file}#${String(f.event)}`;
-    if (!owned.ok) {
-      actions.push({ kind: "remove", target: disp, result: "skipped", detail: `refused: ${owned.refused}` });
-      continue;
-    }
-    // The selector inside the entry is data too. A hook entry may only match THIS product's own
-    // owner key — exactly what wireHooks writes — on a well-formed event; an empty or foreign
-    // selector would match (and delete) unrelated user hooks. A json-key may only name an
-    // /mcpServers/<name> pointer — exactly what wireMcp writes.
-    if (f.kind === "hooks-entry") {
-      const expectedOwner = `wicked-installer/products/${productId}`;
-      const selector: unknown = f.ownerMatch?.commandContains;
-      const event: unknown = f.event;
-      if (selector !== expectedOwner || typeof event !== "string" || !/^[A-Za-z][A-Za-z0-9]*$/.test(event)) {
-        actions.push({ kind: "remove", target: disp, result: "skipped", detail: `refused: hook selector must be this product's owner key (${expectedOwner}) on a valid event` });
-        continue;
-      }
-    } else if (!/^\/mcpServers\/[^/]+$/.test(f.pointer)) {
-      actions.push({ kind: "remove", target: disp, result: "skipped", detail: "refused: json-key pointer must name /mcpServers/<name>" });
-      continue;
-    }
     if (f.kind === "json-key") {
       const abs = fromMarkerPath(target.dir, f.file);
       const disp = `${f.file}${f.pointer}`;
@@ -2000,12 +1893,7 @@ function removeMarkerEntry(
 
   for (const f of entry.files) {
     if (f.kind !== "dir" && f.kind !== "file") continue;
-    const checked = removableMarkerPath(target.dir, f.path, productId);
-    if ("refused" in checked) {
-      actions.push({ kind: "remove", target: f.path, result: "skipped", detail: `refused: ${checked.refused}` });
-      continue;
-    }
-    const abs = checked.abs;
+    const abs = fromMarkerPath(target.dir, f.path);
     if (isSharedDiscoveryDir(target.dir, abs)) {
       actions.push({ kind: "remove", target: f.path, result: "skipped", detail: "shared discovery dir preserved" });
       continue;
@@ -2113,7 +2001,7 @@ function runUninstall(options: Options, registry: Registry): number {
         notes.push(`${target.dir}: not installed`);
         continue;
       }
-      removeMarkerEntry(entry, target, options, actions, id);
+      removeMarkerEntry(entry, target, options, actions);
       if (m.v2) delete m.v2.products[id];
       anyRemoved = true;
     }

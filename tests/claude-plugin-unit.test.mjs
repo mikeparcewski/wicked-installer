@@ -206,7 +206,22 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
     assert.equal(noVersionReg.installed[0].version, "", "no synthesized version");
     v = registrationVerdict(noVersionReg);
     assert.equal(v.state, "partial");
-    assert.deepEqual(v.problems, ["install record has no version"]);
+    assert.deepEqual(v.problems, ["install record has no version (user scope)"]);
+
+    // Two scopes: a healthy user-scope record does not excuse a project-scope record without a
+    // version — the dir is partial regardless of the other entries.
+    const twoScopes = join(d, "two-scopes");
+    const ts = configDir(twoScopes, { marketplace: true, payload: true });
+    writeFileSync(join(ts.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2,
+      plugins: { "wicked-garden@wicked-garden": [
+        { scope: "user", installPath: ts.installPath, version: "1.0.0" },
+        { scope: "project", projectPath: "/some/project", installPath: ts.installPath },
+      ] },
+    }));
+    v = registrationVerdict(readRegistration(twoScopes, spec));
+    assert.equal(v.state, "partial");
+    assert.deepEqual(v.problems, ["install record has no version (project scope)"]);
 
     const good = join(d, "good");
     configDir(good, { marketplace: true, record: true, payload: true });
@@ -234,9 +249,18 @@ test("shellQuote / renderClaudeCommand: printed commands are quoted for the plat
     renderClaudeCommand("/home/u/.claude", ["plugin", "marketplace", "add", "/src/my checkout/wicked-garden"], "linux"),
     "CLAUDE_CONFIG_DIR=/home/u/.claude claude plugin marketplace add '/src/my checkout/wicked-garden'",
   );
+  // cmd.exe has no `VAR=value cmd` form: `set "VAR=value" && …`, args quoted per the .cmd rules.
+  assert.equal(
+    renderClaudeCommand("C:\\Users\\me\\cfg with space", ["plugin", "marketplace", "add", "C:\\src\\my checkout\\wicked-garden"], "win32"),
+    'set "CLAUDE_CONFIG_DIR=C:\\Users\\me\\cfg with space" && claude plugin marketplace add "C:\\src\\my checkout\\wicked-garden"',
+  );
+  assert.equal(
+    renderClaudeCommand("C:\\cfg", ["plugin", "install", "wicked-garden@wicked-garden"], "win32"),
+    'set "CLAUDE_CONFIG_DIR=C:\\cfg" && claude plugin install wicked-garden@wicked-garden',
+  );
 });
 
-test("readRegistration: symlinked registration files and escapes are refused and reported as errors (unreadable), not as 'not installed'", { skip: WIN && "symlink creation needs privileges on Windows" }, () => {
+test("readRegistration: symlinked registration files and escapes are refused and reported as errors (unreadable), not as 'not installed'", { skip: WIN && "symlink creation needs privileges on Windows" }, async () => {
   const d = tmp();
   try {
     // A symlinked installed_plugins.json — even one pointing at a valid file inside the dir.
@@ -275,6 +299,28 @@ test("readRegistration: symlinked registration files and escapes are refused and
     assert.equal(v.state, "unreadable", JSON.stringify(reg));
     assert.match(v.problems[0], /is a symlink — refusing to follow it/);
     assert.equal(reg.installed[0].payload.ok, false);
+
+    // Ancestors too: a symlinked `plugins/` or `<marketplace>/` component — even one resolving
+    // elsewhere INSIDE the config dir — makes the state unreadable.
+    const linkedPlugins = join(d, "linked-plugins");
+    mkdirSync(join(linkedPlugins, "real-plugins"), { recursive: true });
+    configDir(join(linkedPlugins, "staging"), { marketplace: true, record: true, payload: true }); // a fully valid tree …
+    symlinkSync(join(linkedPlugins, "staging", "plugins"), join(linkedPlugins, "plugins"));       // … reached through a link
+    reg = readRegistration(linkedPlugins, spec);
+    assert.equal(registrationVerdict(reg).state, "unreadable", JSON.stringify(reg));
+    assert.match(reg.errors[0], /[\\/]plugins: is a symlink — refusing to follow it/);
+
+    const linkedMarketplace = join(d, "linked-marketplace");
+    configDir(linkedMarketplace, { marketplace: true, record: true, payload: true });
+    const mktDir = join(linkedMarketplace, "plugins", "cache", "wicked-garden");
+    const moved = join(linkedMarketplace, "plugins", "cache", "elsewhere-inside-root");
+    // move the real marketplace dir aside and link its old name to it
+    const { renameSync } = await import("node:fs");
+    renameSync(mktDir, moved);
+    symlinkSync(moved, mktDir);
+    reg = readRegistration(linkedMarketplace, spec);
+    assert.equal(registrationVerdict(reg).state, "unreadable", JSON.stringify(reg));
+    assert.ok(reg.errors.some((e) => /cache[\\/]wicked-garden: is a symlink — refusing to follow it/.test(e)), JSON.stringify(reg.errors));
   } finally {
     rm(d);
   }

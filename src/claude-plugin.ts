@@ -43,6 +43,9 @@ export const DEFAULT_MARKETPLACE_OWNER = "mikeparcewski";
 /** Env override for the Claude Code binary (tests point it at a spawn-recording fake). */
 export const CLAUDE_BIN_ENV = "WICKED_CLAUDE_BIN";
 
+/** Legacy (unregistered) garden copies are detected and reported, never removed — their removal is tracked here. */
+export const LEGACY_CLEANUP_ISSUE = "https://github.com/mikeparcewski/wicked-installer/issues/20";
+
 export function claudePluginSpec(product: { id: string; install: { marketplace?: string; pluginId?: string } }): ClaudePluginSpec {
   const pluginId = product.install.pluginId ?? `${product.id}@${product.id}`;
   const at = pluginId.indexOf("@");
@@ -337,6 +340,27 @@ function ownedDir(root: string, path: string): { ok: true } | { ok: false; missi
   return { ok: true };
 }
 
+/**
+ * lstat EVERY path component below the config dir: a symlink anywhere in the chain — even one
+ * resolving elsewhere inside the dir — means the state cannot be trusted (unreadable). Returns
+ * the first offending component's error, or undefined when the chain is clean; a missing
+ * component ends the walk without error (absence is a state, not a failure).
+ */
+function symlinkInChain(configDir: string, segments: string[]): string | undefined {
+  let current = configDir;
+  for (const seg of segments) {
+    current = join(current, seg);
+    let st;
+    try {
+      st = lstatSync(current);
+    } catch (err) {
+      return errCode(err) === "ENOENT" ? undefined : `${current}: ${errCode(err)}`;
+    }
+    if (st.isSymbolicLink()) return `${current}: is a symlink — refusing to follow it`;
+  }
+  return undefined;
+}
+
 /** Read a JSON file without following symlinks, and only when it really lives under the config dir. */
 function readOwnedJson(root: string, path: string): { value?: unknown; error?: string } {
   let st;
@@ -380,6 +404,34 @@ export function cacheRoot(configDir: string, spec: ClaudePluginSpec): string {
   return join(configDir, "plugins", "cache", spec.marketplaceName, spec.pluginName);
 }
 
+/**
+ * Legacy, unregistered copies of the plugin that earlier installers left in a config dir: the
+ * bare `plugins/<plugin>/` copy (`npx wicked-garden install`) and a skills/hooks copy recorded
+ * by an earlier install-claude.js run in its marker. Detected and REPORTED only — never removed
+ * here (see LEGACY_CLEANUP_ISSUE). Read-only, never follows symlinks.
+ */
+export function detectLegacyCopies(configDir: string, spec: ClaudePluginSpec): string[] {
+  const found: string[] = [];
+  const reg = readRegistration(configDir, spec);
+  if (reg.bareCopy) found.push(reg.bareCopy.path);
+  let root: string;
+  try {
+    root = realpathSync(configDir);
+  } catch {
+    return found;
+  }
+  const markerPath = join(configDir, "wicked-installer", "claude-install.json");
+  if (symlinkInChain(configDir, ["wicked-installer", "claude-install.json"])) return found;
+  const marker = readOwnedJson(root, markerPath);
+  if (isRecord(marker.value) && isRecord(marker.value.products)) {
+    const entry = marker.value.products[spec.pluginName];
+    if (isRecord(entry) && Array.isArray(entry.files) && entry.files.length > 0) {
+      found.push(`${markerPath} (install-claude.js marker: ${entry.files.length} recorded path(s))`);
+    }
+  }
+  return found;
+}
+
 function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, installPath: string, recordVersion: string): PayloadCheck {
   // Never synthesize evidence: a record without a real version cannot be verified against a payload.
   if (!recordVersion) return { ok: false, problem: "install record has no version" };
@@ -399,6 +451,9 @@ function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, i
     atExpectedPath = false;
   }
   if (!atExpectedPath) return { ok: false, problem: `payload recorded at ${installPath} is not the expected cache path ${expected}` };
+  // Every component of the payload chain must be a real directory/file — no symlink anywhere.
+  const chain = symlinkInChain(configDir, ["plugins", "cache", spec.marketplaceName, spec.pluginName, recordVersion, ".claude-plugin", "plugin.json"]);
+  if (chain) return { ok: false, problem: chain, error: chain };
   const manifest = readOwnedJson(root, join(installPath, ".claude-plugin", "plugin.json"));
   if (manifest.error) return { ok: false, problem: manifest.error, error: manifest.error };
   if (manifest.value === undefined) return { ok: false, problem: `payload has no .claude-plugin/plugin.json: ${installPath}` };
@@ -420,13 +475,19 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
     return reg; // no config dir ⇒ nothing registered
   }
   const pluginsDir = join(configDir, "plugins");
+  const pluginsChain = symlinkInChain(configDir, ["plugins"]);
+  if (pluginsChain) {
+    reg.errors.push(pluginsChain);
+    return reg;
+  }
   const plugins = ownedDir(root, pluginsDir);
   if (!plugins.ok) {
     if (plugins.error) reg.errors.push(plugins.error);
     return reg; // no plugins dir ⇒ nothing registered
   }
 
-  const known = readOwnedJson(root, join(pluginsDir, "known_marketplaces.json"));
+  const knownChain = symlinkInChain(configDir, ["plugins", "known_marketplaces.json"]);
+  const known = knownChain ? { error: knownChain } : readOwnedJson(root, join(pluginsDir, "known_marketplaces.json"));
   if (known.error) reg.errors.push(known.error);
   else if (isRecord(known.value) && isRecord(known.value[spec.marketplaceName])) {
     const entry = known.value[spec.marketplaceName] as Record<string, unknown>;
@@ -436,7 +497,8 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
     };
   }
 
-  const installed = readOwnedJson(root, join(pluginsDir, "installed_plugins.json"));
+  const installedChain = symlinkInChain(configDir, ["plugins", "installed_plugins.json"]);
+  const installed = installedChain ? { error: installedChain } : readOwnedJson(root, join(pluginsDir, "installed_plugins.json"));
   if (installed.error) reg.errors.push(installed.error);
   else if (isRecord(installed.value)) {
     // v2 nests the map under `plugins` and holds one entry per scope in an array; the
@@ -456,13 +518,15 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
     reg.installed.sort((a, b) => Number(b.scope === "user") - Number(a.scope === "user"));
   }
 
-  const cache = ownedDir(root, cacheRoot(configDir, spec));
+  const cacheChain = symlinkInChain(configDir, ["plugins", "cache", spec.marketplaceName, spec.pluginName]);
+  const cache = cacheChain ? { ok: false as const, error: cacheChain } : ownedDir(root, cacheRoot(configDir, spec));
   if (cache.ok) {
     try {
-      reg.cacheVersions = readdirSync(cacheRoot(configDir, spec), { withFileTypes: true })
-        .filter((d) => d.isDirectory() && !d.isSymbolicLink())
-        .map((d) => d.name)
-        .sort();
+      for (const d of readdirSync(cacheRoot(configDir, spec), { withFileTypes: true })) {
+        if (d.isSymbolicLink()) reg.errors.push(`${join(cacheRoot(configDir, spec), d.name)}: is a symlink — refusing to follow it`);
+        else if (d.isDirectory()) reg.cacheVersions.push(d.name);
+      }
+      reg.cacheVersions.sort();
     } catch (err) {
       reg.errors.push(`${cacheRoot(configDir, spec)}: ${errCode(err)}`);
     }
@@ -471,7 +535,8 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
   }
 
   const bareDir = join(pluginsDir, spec.pluginName);
-  const bare = ownedDir(root, bareDir);
+  const bareChain = symlinkInChain(configDir, ["plugins", spec.pluginName, ".claude-plugin", "plugin.json"]);
+  const bare = bareChain ? { ok: false as const, error: bareChain } : ownedDir(root, bareDir);
   if (bare.ok) {
     const manifest = readOwnedJson(root, join(bareDir, ".claude-plugin", "plugin.json"));
     if (manifest.error) reg.errors.push(manifest.error);
@@ -522,8 +587,13 @@ export function registrationVerdict(reg: PluginRegistration): RegistrationVerdic
   if (reg.installed.length === 0) return { state: reg.bareCopy ? "copy-only" : "absent", problems: [] };
   const problems: string[] = [];
   if (!reg.marketplace) problems.push("marketplace entry missing from known_marketplaces.json");
-  if (!reg.installed.some((e) => e.payload.ok)) {
-    for (const e of reg.installed) problems.push(e.payload.problem ?? "payload problem");
+  // Every selected record must carry a real version, whatever the other entries say: one that
+  // does not is evidence we cannot verify, and a registration is only as good as its worst record.
+  const versionless = reg.installed.filter((e) => !e.version);
+  for (const e of versionless) problems.push(`install record has no version (${e.scope} scope)`);
+  const versioned = reg.installed.filter((e) => e.version);
+  if (versioned.length > 0 && !versioned.some((e) => e.payload.ok)) {
+    for (const e of versioned) problems.push(e.payload.problem ?? "payload problem");
   }
   return { state: problems.length > 0 ? "partial" : "registered", problems };
 }
@@ -575,8 +645,12 @@ export function shellQuote(token: string, platform: NodeJS.Platform = process.pl
   return `'${token.replace(/'/g, "'\\''")}'`;
 }
 
-/** `CLAUDE_CONFIG_DIR=<dir> claude <args…>`, every token quoted for the platform's shell. */
+/**
+ * The command as the user would type it, with CLAUDE_CONFIG_DIR pinned: POSIX
+ * `CLAUDE_CONFIG_DIR='<dir>' claude …`; cmd.exe `set "CLAUDE_CONFIG_DIR=<dir>" && claude …`.
+ */
 export function renderClaudeCommand(configDir: string, args: string[], platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") return `set "CLAUDE_CONFIG_DIR=${configDir}" && claude ${args.map((a) => winQuote(a)).join(" ")}`;
   return [`CLAUDE_CONFIG_DIR=${shellQuote(configDir, platform)}`, "claude", ...args.map((a) => shellQuote(a, platform))].join(" ");
 }
 
@@ -663,6 +737,9 @@ export function planClaudePlugin(spec: ClaudePluginSpec, opts: PlanOptions): Pla
     lines.push(dir);
     for (const p of plan.probes) lines.push(`probe:   ${p}`);
     for (const c of plan.commands) lines.push(`  ${c.render}    (${c.because})`);
+    if (plan.commands.some((c) => c.args[1] === "marketplace" && c.args[2] === "add")) {
+      lines.push(`  if the install then fails: ${renderClaudeCommand(dir, ["plugin", "marketplace", "remove", spec.marketplaceName])}    (rolls back this run's marketplace add)`);
+    }
     lines.push(`  → payload ${cacheRoot(dir, spec)}/<version>`);
     if (plan.registration.bareCopy) lines.push(`  note: bare copy at ${plan.registration.bareCopy.path} is loaded by nothing (copy only, unregistered)`);
   }
@@ -678,9 +755,13 @@ export type RegisterResult =
   | { claudeDetected: true; version: string; versions: Record<string, string>; ran: Record<string, string[]> };
 
 /**
- * The live run: probe, then per config dir execute exactly the planned commands with
- * CLAUDE_CONFIG_DIR pinned, then re-derive the registration from disk — Claude Code
- * exiting 0 is a claim; a `registered` verdict is the evidence. Throws on any failure.
+ * The live run: probe, then per config dir — in order, each reported — execute exactly the
+ * planned commands with CLAUDE_CONFIG_DIR pinned and re-derive the registration from disk
+ * (Claude Code exiting 0 is a claim; a `registered` verdict is the evidence). If THIS run
+ * added the marketplace and the install/update then fails, the add is rolled back with
+ * `claude plugin marketplace remove`, so a failed run leaves no half-registration behind.
+ * Every dir is attempted; the run fails if any dir failed (dirs registered before a later
+ * failure stay registered — reported, not undone).
  */
 export function registerClaudePlugin(spec: ClaudePluginSpec, opts: RegisterOptions): RegisterResult {
   const spawner = opts.spawner ?? spawnClaude;
@@ -693,29 +774,59 @@ export function registerClaudePlugin(spec: ClaudePluginSpec, opts: RegisterOptio
 
   const versions: Record<string, string> = {};
   const ran: Record<string, string[]> = {};
+  const failures: string[] = [];
   for (const dir of dirs) {
-    const plan = planForDir(dir, spec, opts.source);
+    const executed: string[] = [];
+    let addedMarketplace = false;
     opts.log(`  ${dir}`);
-    for (const p of plan.probes) opts.log(`    probe: ${p}`);
-    for (const c of plan.commands) {
-      opts.log(`    ${c.render}    (${c.because})`);
-      const res = spawner(probe.bin, c.args, dir, "inherit");
-      if (res.status !== 0) {
-        const detail = res.stderr.trim() || res.stdout.trim();
-        throw new Error(`${c.render} failed (exit ${res.status ?? "?"})${detail ? `: ${detail}` : ""}`);
+    try {
+      const plan = planForDir(dir, spec, opts.source);
+      for (const p of plan.probes) opts.log(`    probe: ${p}`);
+      for (const c of plan.commands) {
+        opts.log(`    ${c.render}    (${c.because})`);
+        const res = spawner(probe.bin, c.args, dir, "inherit");
+        if (res.status !== 0) {
+          const detail = res.stderr.trim() || res.stdout.trim();
+          throw new Error(`${c.render} failed (exit ${res.status ?? "?"})${detail ? `: ${detail}` : ""}`);
+        }
+        executed.push(c.render);
+        if (c.args[1] === "marketplace" && c.args[2] === "add") addedMarketplace = true;
       }
-    }
-    ran[dir] = plan.commands.map((c) => c.render);
+      ran[dir] = executed;
 
-    const reg = readRegistration(dir, spec);
-    const verdict = registrationVerdict(reg);
-    if (verdict.state !== "registered") {
-      throw new Error(`${spec.pluginId}: claude reported success but the registration in ${dir} is ${describeVerdict(verdict)} — Claude Code would not load it`);
+      const reg = readRegistration(dir, spec);
+      const verdict = registrationVerdict(reg);
+      if (verdict.state !== "registered") {
+        throw new Error(`${spec.pluginId}: claude reported success but the registration in ${dir} is ${describeVerdict(verdict)} — Claude Code would not load it`);
+      }
+      const { version, installPath } = reg.installed[0];
+      versions[dir] = version;
+      opts.log(`    registered ${spec.pluginId} ${version} → ${installPath}`);
+    } catch (err) {
+      let message = err instanceof Error ? err.message : String(err);
+      if (addedMarketplace) {
+        const rollback = ["plugin", "marketplace", "remove", spec.marketplaceName];
+        const rendered = renderClaudeCommand(dir, rollback);
+        opts.log(`    rolling back this run's marketplace add: ${rendered}`);
+        const res = spawner(probe.bin, rollback, dir, "capture");
+        if (res.status === 0) {
+          message += ` — rolled back this run's marketplace add: ${rendered}`;
+        } else {
+          const detail = res.stderr.trim() || res.stdout.trim();
+          message += ` — rollback FAILED (exit ${res.status ?? "?"}${detail ? `: ${detail}` : ""}): ${rendered}`;
+        }
+        ran[dir] = [...executed, rendered];
+      }
+      opts.log(`    failed: ${message}`);
+      failures.push(`${dir}: ${message}`);
     }
-    const { version, installPath } = reg.installed[0];
-    versions[dir] = version;
-    opts.log(`    registered ${spec.pluginId} ${version} → ${installPath}`);
   }
 
+  if (failures.length > 0) {
+    const kept = Object.keys(versions);
+    throw new Error(
+      failures.join("; ") + (kept.length > 0 ? ` (registered in ${kept.join(", ")} — left registered)` : ""),
+    );
+  }
   return { claudeDetected: true, version: probe.version, versions, ran };
 }
