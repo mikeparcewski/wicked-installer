@@ -36,7 +36,9 @@ All notable changes to wicked-installer are documented here. The format follows
   direct path's fallback when **no** Claude Code CLI exists, and the output says so ("copied to …;
   not registered — Claude Code not detected"); on the interactive Claude path (Claude Code was the
   chosen target) it is a manual step instead and nothing is copied. A present-but-broken Claude Code
-  is an error, and on any failure nothing else is touched. `install-claude.js uninstall
+  is an error. Per-product results stay independent (a garden failure never uninstalls estate or
+  bus; the run exits non-zero if any product failed), and with several config dirs a failure in a
+  later dir leaves earlier dirs registered — reported, not undone. `install-claude.js uninstall
   wicked-garden` removes nothing — it names `claude plugin uninstall wicked-garden@wicked-garden`
   for the registration it never owned and leaves any legacy copy and its marker record in place,
   byte-identical (#20). A v1 (array) install marker is upgraded to v2 with every legacy product

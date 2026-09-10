@@ -5,6 +5,7 @@ import {
   constants as fsConstants,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1497,7 +1498,20 @@ function isMarkerV2(value: unknown): value is MarkerV2 {
 
 function readMarkerRaw(dir: string): MarkerRaw {
   const p = markerPathFor(dir);
-  if (!existsSync(p)) return { corrupt: false };
+  // lstat, not existsSync: existsSync follows symlinks and reports a dangling one as absent, and
+  // an "absent" marker is initialised and atomically replaced — which would rewrite the link. A
+  // marker path that is a symlink (dangling or not) or not a regular file is refused as corrupt,
+  // so install fails closed and nothing at that path is ever followed or replaced.
+  let st;
+  try {
+    st = lstatSync(p);
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (code === "ENOENT") return { corrupt: false };
+    return { corrupt: true, reason: `cannot stat: ${typeof code === "string" ? code : err instanceof Error ? err.message : String(err)}` };
+  }
+  if (st.isSymbolicLink()) return { corrupt: true, reason: "is a symlink — refusing to follow it" };
+  if (!st.isFile()) return { corrupt: true, reason: "not a regular file" };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(p, "utf8"));

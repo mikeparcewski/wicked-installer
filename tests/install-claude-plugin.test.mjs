@@ -20,7 +20,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -198,6 +198,27 @@ test("install-claude.js fails closed on an unparseable marker: exit 1 before any
     const un = runScript(sb, ["uninstall", "wicked-vault", "--claude-home", sb.cfg, "--json"]);
     assert.equal(un.status, 0, un.stdout + un.stderr);
     assert.deepEqual(snapshot(sb.cfg), before, "status and uninstall leave the corrupt marker exactly as it was");
+
+    // A marker PATH that is a symlink — dangling, or pointing at perfectly valid JSON — is never
+    // followed and never replaced: existsSync would call a dangling link "absent" and let install
+    // initialise a marker over it. lstat-based detection refuses both as corrupt.
+    if (POSIX) {
+      for (const [name, target] of [["dangling", join(sb.tmp, "nowhere.json")], ["valid-target", join(sb.tmp, "valid-marker.json")]]) {
+        const cfg = join(sb.tmp, `cfg-link-${name}`);
+        mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+        writeFileSync(join(cfg, "settings.json"), "{}");
+        if (name === "valid-target") writeFileSync(target, JSON.stringify({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "x", products: {} }));
+        symlinkSync(target, markerPath(cfg));
+        const snap = snapshot(cfg);
+        const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+        assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+        assert.match(r.stderr, /install marker exists but is not valid JSON \(is a symlink — refusing to follow it\)/);
+        assert.equal(r.stdout.trim(), "");
+        assert.deepEqual(snapshot(cfg), snap, `${name}: the link (and its target) are untouched`);
+        assert.ok(lstatSync(markerPath(cfg)).isSymbolicLink(), `${name}: still a symlink, not replaced by a file`);
+        if (name === "valid-target") assert.equal(readFileSync(target, "utf8"), JSON.stringify({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "x", products: {} }));
+      }
+    }
   } finally {
     cleanup(sb);
   }
