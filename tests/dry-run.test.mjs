@@ -221,6 +221,24 @@ test("--claude-home wins over CLAUDE_CONFIG_DIR, is repeatable, and its values a
   }
 });
 
+test("--dry-run renders a config dir with spaces, `$` and `&` quoted for the shell (and probes it correctly)", () => {
+  const sb = sandbox();
+  try {
+    const weird = join(sb.home, "cfg with space$and&amp");
+    mkdirSync(weird);
+    writeFileSync(join(weird, "settings.json"), "{}");
+    const before = snapshot(sb.home);
+    const r = runDry(sb, ["fake-plugin"], { env: { CLAUDE_CONFIG_DIR: weird } });
+    assertDry(sb, r, before, { probes: true });
+    const quoted = WIN ? `"${weird}"` : `'${weird}'`;
+    assert.ok(r.stdout.includes(`CLAUDE_CONFIG_DIR=${quoted} claude plugin install fake-plugin@fake-plugin`), r.stdout);
+    assert.ok(!r.stdout.includes(`CLAUDE_CONFIG_DIR=${weird} claude`), "the raw, unquoted form is never printed");
+    assert.match(r.stdout, /probe:\s+.*cfg with space\$and&amp[\\/]plugins[\\/]known_marketplaces\.json → marketplace fake-plugin: not registered/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("an UNSET CLAUDE_CONFIG_DIR means ~/.claude; a set-but-empty one is an error, not a silent fall-through", () => {
   const sb = sandbox();
   try {

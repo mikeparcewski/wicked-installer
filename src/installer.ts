@@ -320,7 +320,7 @@ async function installClaudePlugin(
   if (options.dryRun) {
     const planned = planClaudePlugin(spec, { configDirs, source });
     if (planned.claudeDetected) {
-      return plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}`);
+      return { ...plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}`), registration: "planned" };
     }
     if (options.sourceRoot) throw noFallbackForSourceRoot();
     const lines = ["Claude Code CLI not detected on PATH — would fall back to the bare copy:"];
@@ -338,7 +338,7 @@ async function installClaudePlugin(
   if (outcome.claudeDetected) {
     const where = Object.entries(outcome.versions).map(([dir, version]) => `${dir} (${version})`).join(", ");
     return {
-      productId: id, success: true, skipped: false,
+      productId: id, success: true, skipped: false, registration: "registered",
       message: `${displayName} registered with Claude Code as ${spec.pluginId} in ${where}${note}`,
     };
   }
@@ -354,7 +354,7 @@ async function installClaudePlugin(
   log(`  Claude Code CLI not detected on PATH; falling back to ${fallbackCmd}`);
   await execa("npx", fallbackArgs, { stdio: "inherit" });
   return {
-    productId: id, success: true, skipped: false,
+    productId: id, success: true, skipped: false, registration: "fallback",
     message: `${displayName} copied to ${bareCopy} via ${fallbackCmd}; not registered — Claude Code not detected${note}`,
   };
 }

@@ -274,7 +274,10 @@ export function probeClaude(configDir: string, opts: { env?: NodeJS.ProcessEnv; 
 
 export interface PayloadCheck {
   ok: boolean;
+  /** What is missing or mismatched — a `partial` registration. */
   problem?: string;
+  /** An I/O, permission, symlink or containment failure — the state is UNREADABLE, not partial. */
+  error?: string;
   manifestVersion?: string;
 }
 
@@ -378,9 +381,14 @@ export function cacheRoot(configDir: string, spec: ClaudePluginSpec): string {
 }
 
 function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, installPath: string, recordVersion: string): PayloadCheck {
+  // Never synthesize evidence: a record without a real version cannot be verified against a payload.
+  if (!recordVersion) return { ok: false, problem: "install record has no version" };
   if (!installPath) return { ok: false, problem: "install record has no installPath" };
   const dir = ownedDir(root, installPath);
-  if (!dir.ok) return { ok: false, problem: dir.missing ? `payload dir missing: ${installPath}` : dir.error };
+  if (!dir.ok) {
+    if (dir.missing) return { ok: false, problem: `payload dir missing: ${installPath}` };
+    return { ok: false, problem: dir.error, error: dir.error }; // symlink / escape / permission
+  }
   // The payload must be THE cache path Claude Code (and crew) read for the recorded version —
   // a record pointing anywhere else, even at a valid-looking plugin, is not a registration.
   const expected = join(cacheRoot(configDir, spec), recordVersion);
@@ -392,7 +400,7 @@ function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, i
   }
   if (!atExpectedPath) return { ok: false, problem: `payload recorded at ${installPath} is not the expected cache path ${expected}` };
   const manifest = readOwnedJson(root, join(installPath, ".claude-plugin", "plugin.json"));
-  if (manifest.error) return { ok: false, problem: manifest.error };
+  if (manifest.error) return { ok: false, problem: manifest.error, error: manifest.error };
   if (manifest.value === undefined) return { ok: false, problem: `payload has no .claude-plugin/plugin.json: ${installPath}` };
   const manifestVersion = isRecord(manifest.value) && typeof manifest.value.version === "string" ? manifest.value.version : undefined;
   if (manifestVersion !== recordVersion) {
@@ -438,14 +446,12 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
     const entries = Array.isArray(raw) ? raw : raw !== undefined ? [raw] : [];
     for (const e of entries) {
       if (!isRecord(e)) continue;
-      const version = typeof e.version === "string" ? e.version : "unknown";
+      // A missing/blank version stays EMPTY — never a placeholder that could pass a comparison.
+      const version = typeof e.version === "string" ? e.version.trim() : "";
       const installPath = typeof e.installPath === "string" ? e.installPath : "";
-      reg.installed.push({
-        version,
-        scope: typeof e.scope === "string" ? e.scope : "user",
-        installPath,
-        payload: checkPayload(root, configDir, spec, installPath, version),
-      });
+      const payload = checkPayload(root, configDir, spec, installPath, version);
+      if (payload.error) reg.errors.push(payload.error);
+      reg.installed.push({ version, scope: typeof e.scope === "string" ? e.scope : "user", installPath, payload });
     }
     reg.installed.sort((a, b) => Number(b.scope === "user") - Number(a.scope === "user"));
   }
@@ -562,6 +568,18 @@ export function resolveMarketplaceSource(spec: ClaudePluginSpec, sourceRoot?: st
 // The plan — shared by the dry run (printed) and the live run (executed)
 // ---------------------------------------------------------------------------
 
+/** Quote one token for the platform's shell so a printed command is copy-pasteable and honest about spaces, `$`, `&`, quotes. */
+export function shellQuote(token: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") return winQuote(token);
+  if (token !== "" && /^[A-Za-z0-9_@%+=:,./-]+$/.test(token)) return token;
+  return `'${token.replace(/'/g, "'\\''")}'`;
+}
+
+/** `CLAUDE_CONFIG_DIR=<dir> claude <args…>`, every token quoted for the platform's shell. */
+export function renderClaudeCommand(configDir: string, args: string[], platform: NodeJS.Platform = process.platform): string {
+  return [`CLAUDE_CONFIG_DIR=${shellQuote(configDir, platform)}`, "claude", ...args.map((a) => shellQuote(a, platform))].join(" ");
+}
+
 export interface PlannedCommand {
   args: string[];
   /** The command as the user would type it, CLAUDE_CONFIG_DIR included. */
@@ -591,23 +609,21 @@ export function planForDir(dir: string, spec: ClaudePluginSpec, source: string):
     throw new Error(`${dir}: registration state unreadable — ${registration.errors.join("; ")}`);
   }
   const current = registration.installed[0];
+  const describeCurrent = (e: InstalledEntry): string =>
+    `${e.version || "(no version)"} (${e.scope})${e.payload.ok ? "" : `; ${e.payload.problem}`}`;
   const probes = [
     `${join(dir, "plugins", "known_marketplaces.json")} → marketplace ${spec.marketplaceName}: ${registration.marketplace ? `registered (${registration.marketplace.source})` : "not registered"}`,
-    `${join(dir, "plugins", "installed_plugins.json")} → ${spec.pluginId}: ${current ? `${current.version} (${current.scope})${current.payload.ok ? "" : `; ${current.payload.problem}`}` : "not installed"}`,
+    `${join(dir, "plugins", "installed_plugins.json")} → ${spec.pluginId}: ${current ? describeCurrent(current) : "not installed"}`,
   ];
-  const prefix = `CLAUDE_CONFIG_DIR=${dir} claude`;
+  const command = (args: string[], because: string): PlannedCommand => ({ args, render: renderClaudeCommand(dir, args), because });
   const commands: PlannedCommand[] = [];
   if (!registration.marketplace) {
-    commands.push({ args: ["plugin", "marketplace", "add", source], render: `${prefix} plugin marketplace add ${source}`, because: "marketplace not registered" });
+    commands.push(command(["plugin", "marketplace", "add", source], "marketplace not registered"));
   }
   if (current && current.payload.ok) {
-    commands.push({ args: ["plugin", "update", spec.pluginId], render: `${prefix} plugin update ${spec.pluginId}`, because: `installed ${current.version}` });
+    commands.push(command(["plugin", "update", spec.pluginId], `installed ${current.version}`));
   } else {
-    commands.push({
-      args: ["plugin", "install", spec.pluginId],
-      render: `${prefix} plugin install ${spec.pluginId}`,
-      because: current ? `install record present but ${current.payload.problem}` : "not installed",
-    });
+    commands.push(command(["plugin", "install", spec.pluginId], current ? `install record present but ${current.payload.problem}` : "not installed"));
   }
   return { dir, probes, commands, registration };
 }

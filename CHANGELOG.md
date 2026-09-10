@@ -22,12 +22,25 @@ All notable changes to wicked-installer are documented here. The format follows
   wicked-garden@wicked-garden` (or `claude plugin update` for a healthy existing install) — and
   re-derives from disk that marketplace entry, install record and matching payload under
   `<target>/plugins/cache/wicked-garden/wicked-garden/<version>` all exist, the location Claude
-  Code loads and wicked-crew reads. The Claude script no longer stages garden, copies its skills
-  into `<configDir>/skills/` or wires its hooks into `settings.json`; a skills/hooks copy recorded
-  by an earlier install is removed on upgrade. The former `npx wicked-garden install` bare copy
-  (always into `~/.claude/plugins/wicked-garden`, loaded by nothing) is now only the direct path's
-  fallback when **no** Claude Code CLI exists, and the output says so ("copied to …; not
-  registered — Claude Code not detected"); a present-but-broken Claude Code is an error.
+  Code loads and wicked-crew reads. On the interactive path the picker hands `install-claude.js`
+  the products *without* garden (the script never installs a plugin — handed one directly it
+  reports a manual step and writes nothing; it stays `node:`-only per INTERFACE.md §15), registers
+  garden itself, and only after that succeeds removes a legacy skills/hooks copy an earlier script
+  install recorded, through the script's own marker-driven `uninstall`. The former `npx
+  wicked-garden install` bare copy (always into `~/.claude/plugins/wicked-garden`, loaded by
+  nothing) is now only the fallback when **no** Claude Code CLI exists, and the output says so
+  ("copied to …; not registered — Claude Code not detected"); a present-but-broken Claude Code is
+  an error, and on any failure nothing else is touched.
+- `install-claude.js uninstall` refuses marker-recorded paths that are absolute, home-relative,
+  parent-traversing, outside the roots the script writes (`skills/`, `agents/`, `commands/`,
+  `wicked-installer/products/<id>/`) or that realpath-resolve outside the config dir, and config
+  entries in any file other than the MCP state file or `settings.json` — each reported as a
+  `skipped` action with a `refused: …` diagnostic.
+- Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform, so a
+  config dir with spaces, `$` or `&` reads back correctly; payload symlink/containment/permission
+  failures make the registration `unreadable` (error, exit 1) rather than merely partial; an
+  install record without a version is `partial` ("install record has no version") — never
+  completed with a placeholder.
 - `CLAUDE_CONFIG_DIR` that is set but names no directory ("", blanks, a bare `:`/`,`) is an error
   (exit 1, nothing written) instead of a silent fall-through to `~/.claude` — in the installer and
   in `install-claude.js`.

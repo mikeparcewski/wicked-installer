@@ -65,8 +65,10 @@ under `~/.claude/plugins/wicked-garden/` (what `npx wicked-garden install` produ
 always into `~/.claude` whatever `CLAUDE_CONFIG_DIR` says) is loaded by nothing.
 
 So when the `claude` CLI is present, every garden install path — `install wicked-garden`,
-the interactive path with Claude Code selected (`install-claude.js`), and the interactive
-zero-CLI path — resolves the active config dir(s) the same way: `--claude-home` flags,
+the interactive path with Claude Code selected (the picker hands `install-claude.js` the
+other products, then registers garden itself and only afterwards removes a legacy
+skills/hooks copy through the script's own `uninstall`), and the interactive zero-CLI
+path — resolves the active config dir(s) the same way: `--claude-home` flags,
 else `CLAUDE_CONFIG_DIR` (a list split on `:` or `,`; on Windows on `;` or `,`;
 authoritative when **set** — a set-but-empty value is an error, not a fall-through),
 else `~/.claude`. For **each** dir it probes (`claude --version`, plus the on-disk
@@ -92,12 +94,14 @@ than by running those commands, because they initialise `<configDir>/.claude.jso
 side effect. Nothing is written into `skills/`, `settings.json` or `.claude.json` for
 garden — those writes remain only for products that need them (wicked-estate's MCP block).
 
-When **no** Claude Code CLI is present the direct path falls back to `npx wicked-garden
+When **no** Claude Code CLI is present the installer falls back to `npx wicked-garden
 install` and says so: *copied to ~/.claude/plugins/wicked-garden; not registered —
-Claude Code not detected* (the interactive Claude script instead reports a manual step
-and copies nothing). A Claude Code that is present but fails `claude --version` is an
-**error**, never a fallback. `--source-root` never falls back either: the bare copy
-would install the published package, not your checkout.
+Claude Code not detected*. A Claude Code that is present but fails `claude --version` is
+an **error**, never a fallback — and on any failure nothing else is touched (a legacy copy
+is removed only after registration succeeded). `--source-root` never falls back either:
+the bare copy would install the published package, not your checkout. `install-claude.js`
+itself never installs a plugin (handed one directly, it reports a manual step and writes
+nothing) and imports nothing outside `node:` builtins.
 
 `status` prints, per active config dir, the marketplace (and its source), the
 installed version/scope, the cached versions, the enable switch, and a verdict:

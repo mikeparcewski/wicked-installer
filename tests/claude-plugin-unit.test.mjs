@@ -17,9 +17,11 @@ const {
   probeClaude,
   readRegistration,
   registrationVerdict,
+  renderClaudeCommand,
   resolveClaudeConfigDirs,
   resolveMarketplaceSource,
   localMarketplaceUnder,
+  shellQuote,
 } = await import(join(root, "dist", "claude-plugin.js"));
 
 const spec = claudePluginSpec({
@@ -194,6 +196,18 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
     assert.equal(v.state, "partial");
     assert.match(v.problems[0], /is not the expected cache path .*[\\/]cache[\\/]wicked-garden[\\/]wicked-garden[\\/]1\.0\.0$/);
 
+    // A record without a version is never completed with a placeholder: it is partial, named as such.
+    const noVersion = join(d, "no-version");
+    const nv = configDir(noVersion, { marketplace: true, payload: true });
+    writeFileSync(join(nv.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: nv.installPath }] },
+    }));
+    const noVersionReg = readRegistration(noVersion, spec);
+    assert.equal(noVersionReg.installed[0].version, "", "no synthesized version");
+    v = registrationVerdict(noVersionReg);
+    assert.equal(v.state, "partial");
+    assert.deepEqual(v.problems, ["install record has no version"]);
+
     const good = join(d, "good");
     configDir(good, { marketplace: true, record: true, payload: true });
     v = registrationVerdict(readRegistration(good, spec));
@@ -203,6 +217,23 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
   } finally {
     rm(d);
   }
+});
+
+test("shellQuote / renderClaudeCommand: printed commands are quoted for the platform's shell", () => {
+  assert.equal(shellQuote("/plain/path-1.2", "linux"), "/plain/path-1.2");
+  assert.equal(shellQuote("/cfg with space", "linux"), "'/cfg with space'");
+  assert.equal(shellQuote("a$b&c", "linux"), "'a$b&c'");
+  assert.equal(shellQuote("it's", "linux"), "'it'\\''s'");
+  assert.equal(shellQuote("", "linux"), "''");
+  assert.equal(shellQuote("C:\\cfg with space", "win32"), '"C:\\cfg with space"');
+  assert.equal(
+    renderClaudeCommand("/home/u/cfg with space$and&amp", ["plugin", "install", "wicked-garden@wicked-garden"], "linux"),
+    "CLAUDE_CONFIG_DIR='/home/u/cfg with space$and&amp' claude plugin install wicked-garden@wicked-garden",
+  );
+  assert.equal(
+    renderClaudeCommand("/home/u/.claude", ["plugin", "marketplace", "add", "/src/my checkout/wicked-garden"], "linux"),
+    "CLAUDE_CONFIG_DIR=/home/u/.claude claude plugin marketplace add '/src/my checkout/wicked-garden'",
+  );
 });
 
 test("readRegistration: symlinked registration files and escapes are refused and reported as errors (unreadable), not as 'not installed'", { skip: WIN && "symlink creation needs privileges on Windows" }, () => {
@@ -231,7 +262,8 @@ test("readRegistration: symlinked registration files and escapes are refused and
     assert.ok(reg.errors.some((e) => /is a symlink — refusing to follow it/.test(e)), JSON.stringify(reg.errors));
     assert.equal(registrationVerdict(reg).state, "unreadable");
 
-    // A record whose installPath is a symlink is a payload problem, not a registration.
+    // A record whose installPath is a symlink is an I/O-class failure: UNREADABLE (an error), not
+    // merely partial — the state cannot be trusted, and status must exit non-zero.
     const linkedPayload = join(d, "linked-payload");
     const cfg = configDir(linkedPayload, { marketplace: true, record: true });
     mkdirSync(join(outside, "payload", ".claude-plugin"), { recursive: true });
@@ -240,8 +272,9 @@ test("readRegistration: symlinked registration files and escapes are refused and
     symlinkSync(join(outside, "payload"), cfg.installPath);
     reg = readRegistration(linkedPayload, spec);
     v = registrationVerdict(reg);
-    assert.equal(v.state, "partial", JSON.stringify(reg));
+    assert.equal(v.state, "unreadable", JSON.stringify(reg));
     assert.match(v.problems[0], /is a symlink — refusing to follow it/);
+    assert.equal(reg.installed[0].payload.ok, false);
   } finally {
     rm(d);
   }

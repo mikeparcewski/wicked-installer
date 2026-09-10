@@ -163,20 +163,93 @@ function runCliScript(
   };
 }
 
+/** A per-CLI result for a script that was not run (nothing left for it once plugins were split off). */
+function presentWithoutScript(cli: CliOption, flags: DispatchFlags): CliRunResult {
+  return {
+    cli: cli.cli,
+    displayName: cli.displayName,
+    status: 0,
+    present: true,
+    parsed: true,
+    home: cli.cli === "claude" ? resolveClaudeConfigDirs({ homeFlags: flags.claudeHomes }).dirs[0] : undefined,
+    entries: [],
+    rawTail: "",
+  };
+}
+
+/** Run one verb of a per-CLI script for one product and return that product's report entry. */
+function scriptVerb(cli: CliOption, verb: "status" | "uninstall", id: string, flags: DispatchFlags, dryRun: boolean): ScriptReportEntry | undefined {
+  const args = [cli.scriptPath, verb, id, "--json"];
+  for (const home of flags.claudeHomes) args.push("--claude-home", home);
+  if (dryRun) args.push("--dry-run");
+  const res = spawnSync(process.execPath, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const report = parseTailJson(res.stdout ?? "");
+  return Array.isArray(report?.reports)
+    ? (report!.reports as ScriptReportEntry[]).find((e) => e.productId === id)
+    : undefined;
+}
+
+/**
+ * An earlier install-claude.js copied the plugin's skills/hooks into the config dir(s) and
+ * recorded every path in its marker. Now that the plugin is registered, remove exactly that —
+ * through the script's own marker-driven `uninstall` verb (exact, containment-checked removal),
+ * never by guessing paths — and only after the read-only `status` verb confirms a marker entry.
+ */
+function removeLegacyScriptCopy(cli: CliOption, product: Product, flags: DispatchFlags): string | undefined {
+  const status = scriptVerb(cli, "status", product.id, flags, false); // read-only; exit 2 (no config dir) ⇒ no entry
+  if (!status || !/: installed$/.test(status.message ?? "")) return undefined;
+  const removed = scriptVerb(cli, "uninstall", product.id, flags, flags.dryRun);
+  if (!removed) return "a legacy skills/hooks copy is recorded but the script's uninstall produced no report — run `install-claude.js uninstall " + product.id + "` by hand";
+  if (flags.dryRun) return "would remove the legacy skills/hooks copy recorded by an earlier install (install-claude.js uninstall --dry-run)";
+  return `${removed.success ? "removed" : "could not fully remove"} the legacy skills/hooks copy recorded by an earlier install (install-claude.js uninstall)`;
+}
+
+/**
+ * Claude Code PLUGINS (wicked-garden) are REGISTERED through Claude Code's plugin CLI by the
+ * shared mechanism (installer.ts → claude-plugin.ts) — never copied by install-claude.js, which
+ * stays self-contained (INTERFACE.md §15) and is handed the product list WITHOUT them. Runs
+ * after the script, so required binaries are already acquired; a legacy copy is removed only
+ * once registration has succeeded (or, under --dry-run, would succeed) — on failure nothing
+ * else is touched.
+ */
+async function registerPluginViaClaude(cli: CliOption, id: string, flags: DispatchFlags): Promise<ScriptReportEntry> {
+  const product = getProduct(id);
+  if (!product) return { productId: id, success: false, skipped: false, message: `${id}: unknown product` };
+  console.log(`\n${chalk.cyan("→")} ${chalk.bold(product.displayName)} — registered Claude Code plugin${flags.dryRun ? chalk.dim(" [dry-run]") : ""}`);
+  const result = await installProduct(product, installOptionsFrom(flags));
+  let message = result.message;
+  if (result.success && (result.registration === "registered" || result.registration === "planned")) {
+    const cleanup = removeLegacyScriptCopy(cli, product, flags);
+    if (cleanup) {
+      console.log(chalk.dim(`  ${cleanup}`));
+      message += `; ${cleanup}`;
+    }
+  }
+  return { productId: id, displayName: product.displayName, success: result.success, skipped: result.skipped, message };
+}
+
 export async function dispatchToClis(
   clis: CliOption[],
   productIds: string[],
   flags: DispatchFlags,
 ): Promise<number> {
   const results: CliRunResult[] = [];
+  const pluginIds = productIds.filter((id) => getProduct(id)?.type === "claude-plugin");
 
-  clis.forEach((cli, index) => {
+  for (const [index, cli] of clis.entries()) {
     // Binaries are machine-scoped: acquire once (first script), skip thereafter.
     const skipBinaries = index > 0;
     const suffix = skipBinaries ? chalk.dim(" (binaries already acquired)") : "";
     console.log(`\n${chalk.cyan("→")} Installing into ${chalk.bold(cli.displayName)}${suffix}${flags.dryRun ? chalk.dim(" [dry-run]") : ""}...`);
-    results.push(runCliScript(cli, productIds, flags, skipBinaries));
-  });
+    // The Claude script never receives plugin products — they are registered below. Other
+    // CLIs have no plugin registry, so they still receive them (as skills).
+    const forScript = cli.cli === "claude" ? productIds.filter((id) => !pluginIds.includes(id)) : productIds;
+    const result = forScript.length > 0 ? runCliScript(cli, forScript, flags, skipBinaries) : presentWithoutScript(cli, flags);
+    if (cli.cli === "claude") {
+      for (const id of pluginIds) result.entries.push(await registerPluginViaClaude(cli, id, flags));
+    }
+    results.push(result);
+  }
 
   const hadFailure = renderSummary(results, productIds);
 
@@ -251,6 +324,12 @@ export function renderSummary(results: CliRunResult[], productIds: string[]): bo
       notes.push(`${chalk.red(r.displayName + ":")} could not parse report output` + (r.rawTail ? `\n${chalk.dim("    " + r.rawTail.replace(/\n/g, "\n    "))}` : ""));
     } else if (r.home) {
       notes.push(`${chalk.dim(r.displayName + " home:")} ${r.home}`);
+    }
+    // A registered plugin's outcome is a sentence, not a copy count — surface it.
+    for (const e of r.entries) {
+      if (getProduct(e.productId)?.type === "claude-plugin" && e.message) {
+        notes.push(`${chalk.dim((e.displayName ?? e.productId) + ":")} ${e.message}`);
+      }
     }
   }
   if (notes.length > 0) {
