@@ -338,7 +338,9 @@ async function installClaudePlugin(
       if (planned.failures.length > 0) throw new Error(planned.failures.join("; "));
       return { ...result, registration: "planned" };
     }
-    if (options.sourceRoot) throw noFallbackForSourceRoot();
+    // The picker's Claude-target path (noFallback) is a manual step whether or not --source-root was
+    // given — nothing would be copied either way. The source-root refusal below is for the DIRECT
+    // path, whose alternative would be the PUBLISHED package rather than the checkout named.
     if (options.noFallback) {
       return {
         ...plan(
@@ -349,6 +351,7 @@ async function installClaudePlugin(
         registration: "manual",
       };
     }
+    if (options.sourceRoot) throw noFallbackForSourceRoot();
     if (!fallbackCmd) {
       // The live run fails here (below); the plan must say so and fail the same way, not report a valid plan.
       const failed = plan([`Claude Code CLI not detected on PATH and ${id} has no fallback install command — the live run fails here`], `would FAIL: Claude Code not detected and ${id} has no fallback install command`);
@@ -369,14 +372,15 @@ async function installClaudePlugin(
     };
   }
 
-  // Only reached when NO claude binary resolves at all (PATH / WICKED_CLAUDE_BIN).
-  if (options.sourceRoot) throw noFallbackForSourceRoot();
+  // Only reached when NO claude binary resolves at all (PATH / WICKED_CLAUDE_BIN). Same order as
+  // the dry run: the picker's Claude-target path is a manual step even with --source-root.
   if (options.noFallback) {
     return {
       productId: id, success: true, skipped: true, registration: "manual",
       message: `${displayName}: Claude Code CLI not detected — manual step: install Claude Code, then re-run to register ${spec.pluginId}; nothing was copied (a bare copy is loaded by nothing)`,
     };
   }
+  if (options.sourceRoot) throw noFallbackForSourceRoot();
   if (!fallbackArgs || !fallbackCmd) {
     return {
       productId: id, success: false, skipped: false,

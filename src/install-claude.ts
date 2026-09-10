@@ -636,7 +636,7 @@ function makeTarget(dir: string, origin: Target["origin"]): Target {
 function resolveTargets(options: Options): Resolution {
   // 1. Explicit flags win as the full set (trusted; created if absent).
   if (options.homeFlags.length > 0) {
-    const targets = options.homeFlags.map((d) => makeTarget(d, "flag"));
+    const targets = [...new Set(options.homeFlags.map((d) => resolve(d)))].map((d) => makeTarget(d, "flag"));
     return { targets, primary: targets[0].dir, cliPresent: true };
   }
 
@@ -645,7 +645,7 @@ function resolveTargets(options: Options): Resolution {
   //    would write into a dir the user explicitly steered Claude Code away from.
   if ("CLAUDE_CONFIG_DIR" in process.env) {
     const env = process.env.CLAUDE_CONFIG_DIR ?? "";
-    const dirs = splitConfigDirValue(env).map((d) => resolve(expandHome(d)));
+    const dirs = [...new Set(splitConfigDirValue(env).map((d) => resolve(expandHome(d))))]; // `cfg:cfg` is one target, as in the central resolver
     if (dirs.length === 0) {
       throw new Error(`CLAUDE_CONFIG_DIR is set but names no directory (value: ${JSON.stringify(env)}) — unset it to use ~/.claude, or point it at a config dir`);
     }
@@ -2056,10 +2056,6 @@ function runInstall(options: Options, registry: Registry): number {
   const products = resolveProducts(registry, options.productIds, options.all);
   const resolution = resolveTargets(options);
 
-  if (!resolution.cliPresent && resolution.targets[0].origin === "fallback") {
-    log(options, `Claude command/home not detected; creating ${resolution.primary} because Claude was selected.`);
-  }
-
   // Fail closed on an unparseable marker BEFORE anything is staged, copied, deleted or written
   // (also under --dry-run, §13.4): the diagnostic names the file and the cause; its bytes stay as they are.
   for (const target of resolution.targets) {
@@ -2073,6 +2069,10 @@ function runInstall(options: Options, registry: Registry): number {
   if (products.every((p) => p.type === "claude-plugin")) {
     emitReport(options, "install", resolution, products.map(pluginManagedCentrally));
     return 0;
+  }
+
+  if (!resolution.cliPresent && resolution.targets[0].origin === "fallback") {
+    log(options, `Claude command/home not detected; creating ${resolution.primary} because Claude was selected.`);
   }
 
   for (const target of resolution.targets) ensureConfigDir(target.dir, options);

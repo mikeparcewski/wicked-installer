@@ -513,6 +513,18 @@ test("dispatch: Claude selected but no `claude` CLI at all → a manual step, ne
     assert.equal(dry.code, 0, dry.out);
     assert.match(dry.out, /would be a manual step: install Claude Code, then re-run to register wicked-garden@wicked-garden; nothing would be copied/);
     assert.doesNotMatch(dry.out, /npx wicked-garden install/);
+
+    // With a valid --source-root the picker's Claude path is STILL the manual step (nothing to copy
+    // either way); the source-root refusal belongs to the direct path, whose alternative is the published package.
+    mkdirSync(join(sb.srcRoot, "wicked-garden", ".claude-plugin"), { recursive: true });
+    writeFileSync(join(sb.srcRoot, "wicked-garden", ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "wicked-garden" }));
+    for (const dryRun of [false, true]) {
+      const withRoot = await dispatch(sb, ["wicked-garden"], { dryRun, sourceRoot: sb.srcRoot }, { claude: false });
+      assert.equal(withRoot.code, 0, withRoot.out);
+      assert.match(withRoot.out, /manual step: install Claude Code, then re-run to register wicked-garden@wicked-garden/, `dryRun=${dryRun}`);
+      assert.doesNotMatch(withRoot.out, /has no fallback/, `dryRun=${dryRun}: not the direct-path refusal`);
+      assert.deepEqual(lines(sb.npmLog), [], "still nothing copied");
+    }
   } finally {
     cleanup(sb);
   }
@@ -884,6 +896,24 @@ test("install-claude.js destination links: a symlinked skill destination dir is 
     assert.ok(refusal && /refused: .*is a symlink/.test(refusal.detail), JSON.stringify(repC.actions));
     assert.ok(lstatSync(join(c, "settings.json")).isSymbolicLink(), "still a link");
     assert.deepEqual(snapshot(external), externalBefore, "(c) external byte-identical");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("install-claude.js collapses a repeated --claude-home (and CLAUDE_CONFIG_DIR a:a) to ONE target, like the central resolver", () => {
+  const sb = sandbox();
+  try {
+    const cfg = sb.cfg;
+    mkdirSync(cfg, { recursive: true });
+    const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--claude-home", `${cfg}/`, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const report = JSON.parse(r.stdout);
+    assert.deepEqual(report.configDirs, [cfg], "one target, not two");
+    assert.ok(!report.reports.some((x) => x.notes.some((n) => /fanned out/.test(n))), "no fan-out note for a single dir");
+    const env = runScript(sb, ["status", "--json"], { env: { CLAUDE_CONFIG_DIR: `${cfg}:${cfg}` } });
+    assert.equal(env.status, 0, env.stdout + env.stderr);
+    assert.deepEqual(JSON.parse(env.stdout).configDirs, [cfg]);
   } finally {
     cleanup(sb);
   }

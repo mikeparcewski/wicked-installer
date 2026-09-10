@@ -52,7 +52,9 @@ Flags:
 
 `install <ids>` resolves required dependencies first (garden pulls in wicked-vault),
 installs each product directly, and exits 1 if any of them failed. With `--dry-run`
-every product type prints its plan and nothing runs.
+every product type prints its plan and nothing is installed or written — the only process
+a dry run may start is the read-only `claude --version` probe the Claude plugin plan is
+derived from.
 
 ---
 
