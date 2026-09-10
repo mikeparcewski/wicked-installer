@@ -94,9 +94,12 @@ than by running those commands, because they initialise `<configDir>/.claude.jso
 side effect. Nothing is written into `skills/`, `settings.json` or `.claude.json` for
 garden — those writes remain only for products that need them (wicked-estate's MCP block).
 
-When **no** Claude Code CLI is present the installer falls back to `npx wicked-garden
-install` and says so: *copied to ~/.claude/plugins/wicked-garden; not registered —
-Claude Code not detected*. A Claude Code that is present but fails `claude --version` is
+When **no** Claude Code CLI is present the direct path (`install wicked-garden`) falls
+back to `npx wicked-garden install` and says so: *copied to ~/.claude/plugins/wicked-garden;
+not registered — Claude Code not detected*. On the interactive path, where you chose Claude
+Code as the target, garden is instead reported as a **manual step** and nothing is copied —
+a copy Claude Code never loads is not an install of what you selected. A Claude Code that is
+present but fails `claude --version` is
 an **error**, never a fallback — and on any failure nothing else is touched (a legacy copy
 is removed only after registration succeeded). `--source-root` never falls back either:
 the bare copy would install the published package, not your checkout. `install-claude.js`

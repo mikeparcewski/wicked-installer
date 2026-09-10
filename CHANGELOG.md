@@ -28,9 +28,12 @@ All notable changes to wicked-installer are documented here. The format follows
   garden itself, and only after that succeeds removes a legacy skills/hooks copy an earlier script
   install recorded, through the script's own marker-driven `uninstall`. The former `npx
   wicked-garden install` bare copy (always into `~/.claude/plugins/wicked-garden`, loaded by
-  nothing) is now only the fallback when **no** Claude Code CLI exists, and the output says so
-  ("copied to …; not registered — Claude Code not detected"); a present-but-broken Claude Code is
-  an error, and on any failure nothing else is touched.
+  nothing) is now only the direct path's fallback when **no** Claude Code CLI exists, and the output
+  says so ("copied to …; not registered — Claude Code not detected"); on the interactive Claude
+  path (Claude Code was the chosen target) it is a manual step instead and nothing is copied. A
+  present-but-broken Claude Code is an error, and on any failure nothing else is touched.
+  `install-claude.js uninstall wicked-garden` names `claude plugin uninstall wicked-garden@wicked-garden`
+  for the registration it never owned.
 - `install-claude.js uninstall` refuses marker-recorded paths that are absolute, home-relative,
   parent-traversing, outside the roots the script writes (`skills/`, `agents/`, `commands/`,
   `wicked-installer/products/<id>/`) or that realpath-resolve outside the config dir, and config

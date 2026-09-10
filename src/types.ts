@@ -56,7 +56,7 @@ export interface InstallResult {
   planned?: boolean;         // --dry-run: the plan was printed and nothing ran
   // claude-plugin products: how the install ended — registered with Claude Code, planned (dry-run,
   // Claude Code present), or the bare-copy fallback (no Claude Code CLI). Absent for other products.
-  registration?: "registered" | "planned" | "fallback";
+  registration?: "registered" | "planned" | "fallback" | "manual";
 }
 
 export interface DetectedCli {

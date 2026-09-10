@@ -2057,6 +2057,17 @@ function runUninstall(options: Options, registry: Registry): number {
       anyRemoved = true;
     }
 
+    // A Claude Code plugin's registration belongs to Claude Code; this script only ever removes a
+    // legacy skills/hooks copy it recorded itself — say so, and name the command that does the rest.
+    const uninstalling = byId.get(id);
+    if (uninstalling?.type === "claude-plugin") {
+      const pluginId = uninstalling.install.pluginId ?? `${id}@${id}`;
+      notes.push(
+        `Claude Code plugin: this script ${anyRemoved ? "removed only the legacy skills/hooks copy it had recorded" : "recorded no legacy copy to remove"}; ` +
+          `the plugin registration is Claude Code's — remove it with \`claude plugin uninstall ${pluginId}\` (with CLAUDE_CONFIG_DIR set to the config dir), check with \`npx wicked-installer status\``,
+      );
+    }
+
     if (options.purgeBinaries) {
       const product = byId.get(id);
       if (product) purgeProductBinary(product, options, actions, notes);

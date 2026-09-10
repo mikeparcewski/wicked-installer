@@ -14,6 +14,12 @@ export interface InstallOptions {
   sourceRoot?: string;
   /** Explicit Claude config dir(s) (`--claude-home`); otherwise CLAUDE_CONFIG_DIR, then ~/.claude. */
   claudeHomes?: string[];
+  /**
+   * Claude Code was chosen as the TARGET (the interactive Claude path): when no `claude` CLI
+   * resolves, report a manual step and copy nothing instead of the bare-copy fallback — a copy
+   * Claude Code never loads is not an install of the thing the user selected.
+   */
+  noFallback?: boolean;
   /** Sink for progress and `dry-run:` plan lines (default: console.log). */
   log?: (line: string) => void;
 }
@@ -323,6 +329,16 @@ async function installClaudePlugin(
       return { ...plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}`), registration: "planned" };
     }
     if (options.sourceRoot) throw noFallbackForSourceRoot();
+    if (options.noFallback) {
+      return {
+        ...plan(
+          [`Claude Code CLI not detected on PATH — Claude Code is the selected target, so this would be a manual step: install Claude Code, then re-run to register ${spec.pluginId}; nothing would be copied`],
+          "Claude Code CLI not detected — manual step, nothing copied",
+        ),
+        skipped: true,
+        registration: "manual",
+      };
+    }
     const lines = ["Claude Code CLI not detected on PATH — would fall back to the bare copy:"];
     if (fallbackCmd) lines.push(`${fallbackCmd}    (copies to ${bareCopy}; not registered — Claude Code would not load it)`);
     else lines.push(`nothing to run: ${id} has no fallback install command`);
@@ -345,6 +361,12 @@ async function installClaudePlugin(
 
   // Only reached when NO claude binary resolves at all (PATH / WICKED_CLAUDE_BIN).
   if (options.sourceRoot) throw noFallbackForSourceRoot();
+  if (options.noFallback) {
+    return {
+      productId: id, success: true, skipped: true, registration: "manual",
+      message: `${displayName}: Claude Code CLI not detected — manual step: install Claude Code, then re-run to register ${spec.pluginId}; nothing was copied (a bare copy is loaded by nothing)`,
+    };
+  }
   if (!fallbackArgs || !fallbackCmd) {
     return {
       productId: id, success: false, skipped: false,

@@ -229,7 +229,8 @@ async function registerPluginViaClaude(cli: CliOption, id: string, flags: Dispat
   const product = getProduct(id);
   if (!product) return { productId: id, success: false, skipped: false, message: `${id}: unknown product` };
   console.log(`\n${chalk.cyan("→")} ${chalk.bold(product.displayName)} — registered Claude Code plugin${flags.dryRun ? chalk.dim(" [dry-run]") : ""}`);
-  const result = await installProduct(product, installOptionsFrom(flags));
+  // Claude Code is the chosen target here: no `claude` CLI ⇒ a manual step, never the bare copy.
+  const result = await installProduct(product, { ...installOptionsFrom(flags), noFallback: true });
   let message = result.message;
   if (result.success && (result.registration === "registered" || result.registration === "planned")) {
     const cleanup = removeLegacyScriptCopy(cli, product, flags);

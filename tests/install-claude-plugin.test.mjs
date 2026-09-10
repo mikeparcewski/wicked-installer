@@ -178,6 +178,18 @@ test("install-claude.js uninstall refuses marker paths that escape the config di
     assert.ok(!existsSync(join(sb.cfg, "skills", "wicked-garden-core")), "the legitimate path was removed");
     assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "must survive", "nothing outside the config dir was touched");
     assert.deepEqual(JSON.parse(readFileSync(join(sb.cfg, "settings.json"), "utf8")), { theme: "dark" }, "settings.json untouched");
+    // The registration itself is Claude Code's — the report says so and names the command.
+    assert.ok(garden.notes.some((n) => /removed only the legacy skills\/hooks copy.*claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden.notes));
+
+    // With no legacy copy recorded the note still points at Claude Code's own uninstall.
+    const fresh = join(sb.tmp, "cfg-fresh");
+    mkdirSync(fresh);
+    writeFileSync(join(fresh, "settings.json"), "{}");
+    const r2 = runScript(sb, ["uninstall", "wicked-garden", "--claude-home", fresh, "--json"]);
+    assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+    const garden2 = JSON.parse(r2.stdout).reports.find((x) => x.productId === "wicked-garden");
+    assert.match(garden2.message, /not installed$/);
+    assert.ok(garden2.notes.some((n) => /recorded no legacy copy to remove.*claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden2.notes));
   } finally {
     cleanup(sb);
   }
@@ -278,6 +290,29 @@ test("dispatch --dry-run: plan only — nothing written, legacy removal reported
     assert.match(out, /would remove the legacy skills\/hooks copy recorded by an earlier install \(install-claude\.js uninstall --dry-run\)/);
     assert.deepEqual(stubCalls(sb).map(([, a]) => a), ["--version"], "a dry run spawns only the probe");
     assert.deepEqual(lines(sb.npmLog), []);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("dispatch: Claude selected but no `claude` CLI at all → a manual step, never the bare-copy fallback", { skip }, async () => {
+  // A config home can make Claude Code selectable while the binary is absent (home-only detection).
+  const sb = sandbox();
+  mkdirSync(sb.cfg);
+  writeFileSync(join(sb.cfg, "settings.json"), "{}");
+  try {
+    const { code, out } = await dispatch(sb, ["wicked-garden"], {}, { claude: false });
+    assert.equal(code, 0, out);
+    assert.match(out, /Claude Code CLI not detected — manual step: install Claude Code, then re-run to register wicked-garden@wicked-garden; nothing was copied/);
+    assert.match(out, /Wicked Garden\s+manual/, "the grid shows a manual step, not ok");
+    assert.deepEqual(lines(sb.npmLog), [], "npx wicked-garden install was NOT run");
+    assert.ok(!existsSync(join(sb.home, ".claude", "plugins", "wicked-garden")), "no bare copy");
+    assert.ok(!existsSync(sb.stubLog));
+
+    const dry = await dispatch(sb, ["wicked-garden"], { dryRun: true }, { claude: false });
+    assert.equal(dry.code, 0, dry.out);
+    assert.match(dry.out, /would be a manual step: install Claude Code, then re-run to register wicked-garden@wicked-garden; nothing would be copied/);
+    assert.doesNotMatch(dry.out, /npx wicked-garden install/);
   } finally {
     cleanup(sb);
   }
