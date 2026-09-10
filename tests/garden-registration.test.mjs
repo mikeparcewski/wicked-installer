@@ -199,7 +199,8 @@ test("a set-but-empty CLAUDE_CONFIG_DIR is an error (exit 1, nothing registered)
     for (const bad of ["", " ", ":", ","]) {
       const r = run(sb, ["install", "wicked-garden"], { configDir: bad });
       assert.equal(r.status, 1, `CLAUDE_CONFIG_DIR=${JSON.stringify(bad)}:\n${r.stdout}`);
-      assert.match(r.stdout, /CLAUDE_CONFIG_DIR is set but names no directory/);
+      assert.match(r.stdout + r.stderr, /CLAUDE_CONFIG_DIR is set but names no directory/);
+      assert.deepEqual(lines(sb.npmLog), [], "the dependency (wicked-vault) is NOT installed before the config dir is validated");
     }
     assert.ok(!existsSync(join(sb.home, ".claude")), "~/.claude was never touched");
     assert.ok(!existsSync(sb.stubLog), "claude was never invoked");

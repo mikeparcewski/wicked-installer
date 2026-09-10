@@ -339,7 +339,10 @@ async function installClaudePlugin(
   if (options.dryRun) {
     const planned = planClaudePlugin(spec, { configDirs, source });
     if (planned.claudeDetected) {
-      return { ...plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}${legacyNote}`), registration: "planned" };
+      const result = plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}${legacyNote}`);
+      // Live policy, mirrored: a refused dir fails the product once every dir has been described.
+      if (planned.failures.length > 0) throw new Error(planned.failures.join("; "));
+      return { ...result, registration: "planned" };
     }
     if (options.sourceRoot) throw noFallbackForSourceRoot();
     if (options.noFallback) {

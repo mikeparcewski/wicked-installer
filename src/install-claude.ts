@@ -1712,8 +1712,19 @@ function purgeStaleArtifacts(
 // Install marker read / init / flush
 // ---------------------------------------------------------------------------
 
+const isPlainObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+
+/** A v2 marker: `markerVersion: 2` with a `products` map whose values are objects (what every consumer indexes). */
 function isMarkerV2(value: unknown): value is MarkerV2 {
-  return !!value && typeof value === "object" && (value as { markerVersion?: unknown }).markerVersion === 2;
+  if (!isPlainObject(value) || value.markerVersion !== 2) return false;
+  return isPlainObject(value.products) && Object.values(value.products).every(isPlainObject);
+}
+
+/** A v1 marker: an object whose optional `products` is an array of objects carrying a string `id`. */
+function isLegacyMarker(value: unknown): value is LegacyMarker {
+  if (!isPlainObject(value) || value.markerVersion !== undefined) return false;
+  if (value.products === undefined) return true;
+  return Array.isArray(value.products) && value.products.every((p) => isPlainObject(p) && typeof p.id === "string");
 }
 
 function readMarkerRaw(dir: string): MarkerRaw {
@@ -1738,7 +1749,11 @@ function readMarkerRaw(dir: string): MarkerRaw {
     return { corrupt: true, reason: err instanceof Error ? err.message : String(err) };
   }
   if (isMarkerV2(parsed)) return { v2: parsed, corrupt: false };
-  return { legacy: parsed as LegacyMarker, corrupt: false };
+  // Any other valid JSON must be a v1 marker of the shape consumers index; anything else
+  // (`{"products": {}}`, an array, a string, a `markerVersion: 2` without a products map …)
+  // would crash a consumer instead of failing closed — so it is unusable, like invalid JSON.
+  if (isLegacyMarker(parsed)) return { legacy: parsed, corrupt: false };
+  return { corrupt: true, reason: "unrecognised marker shape (neither a v2 marker with a products map nor a v1 marker with a products array)" };
 }
 
 /**
@@ -1927,6 +1942,14 @@ function runInstall(options: Options, registry: Registry): number {
   for (const target of resolution.targets) {
     const raw = readMarkerRaw(target.dir);
     if (raw.corrupt) throw new Error(corruptMarkerMessage(target.dir, raw.reason));
+  }
+
+  // Only Claude Code plugins selected (after dependency expansion): this script owns none of that
+  // work (§12.1), so it must not create the config dir, initialise or upgrade the marker, or flush
+  // it — a manual-step report per product and nothing written.
+  if (products.every((p) => p.type === "claude-plugin")) {
+    emitReport(options, "install", resolution, products.map(pluginManagedCentrally));
+    return 0;
   }
 
   for (const target of resolution.targets) ensureConfigDir(target.dir, options);

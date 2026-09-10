@@ -67,6 +67,13 @@ All notable changes to wicked-installer are documented here. The format follows
   unique name is used; the copy is exclusive) and every directory and file `copyTree` creates under
   the config dir (a link anywhere is refused; symlinks in a product's source tree are never copied
   into the config dir and are reported instead).
+- Fail-closed hardening from review: valid JSON of an unrecognised marker shape (`{"products": {}}`,
+  an array, a `markerVersion: 2` without a products map …) is unusable like invalid JSON, never
+  something a consumer crashes on; a selection that is plugins-only after dependency expansion
+  creates no config dir and initialises/upgrades no marker; the picker resolves the Claude config
+  dirs (a set-but-empty `CLAUDE_CONFIG_DIR` is an error) before the first dependency is installed;
+  `--dry-run` describes every active config dir even when an earlier one is refused, failing the
+  product afterwards exactly like the live run.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is

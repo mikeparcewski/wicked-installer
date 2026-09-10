@@ -794,6 +794,12 @@ export interface PlanOutcome {
   /** `probe: …` lines and the commands that would run, ready to print. */
   lines: string[];
   plans: DirPlan[];
+  /**
+   * Per-dir refusals (`<dir>: <reason>`), mirroring the live run's per-dir error policy: an
+   * unreadable state or a command the spawn layer would refuse fails THAT dir, the remaining
+   * dirs are still planned, and the caller fails the product if any dir failed.
+   */
+  failures: string[];
 }
 
 /**
@@ -804,19 +810,29 @@ export interface PlanOutcome {
 export function planClaudePlugin(spec: ClaudePluginSpec, opts: PlanOptions): PlanOutcome {
   const { dirs, origin } = opts.configDirs;
   const probe = probeClaude(dirs[0], opts);
-  if (!probe) return { claudeDetected: false, lines: [], plans: [] };
+  if (!probe) return { claudeDetected: false, lines: [], plans: [], failures: [] };
   const lines: string[] = [
     `probe: ${probe.bin} --version → ${probe.version}`,
     `Claude Code detected; would register ${spec.pluginId} in ${dirs.length} config dir(s) from ${describeOrigin(origin)}:`,
   ];
   const plans: DirPlan[] = [];
+  const failures: string[] = [];
   for (const dir of dirs) {
-    const plan = planForDir(dir, spec, opts.source);
-    // The live run would refuse these at spawn time (a .cmd-shim claude with %/! in an
-    // argument); the plan must fail the same way, or dry and live would diverge.
-    for (const c of plan.commands) prepareClaudeSpawn(probe.bin, c.args, opts.platform);
-    plans.push(plan);
     lines.push(dir);
+    let plan: DirPlan;
+    try {
+      plan = planForDir(dir, spec, opts.source);
+      // The live run would refuse these at spawn time (a .cmd-shim claude with %/! in an
+      // argument); the plan must fail the same way, or dry and live would diverge.
+      for (const c of plan.commands) prepareClaudeSpawn(probe.bin, c.args, opts.platform);
+    } catch (err) {
+      // Same policy as registerClaudePlugin: this dir fails, the rest are still described.
+      const message = err instanceof Error ? err.message : String(err);
+      lines.push(`  refused: ${message}`);
+      failures.push(`${dir}: ${message}`);
+      continue;
+    }
+    plans.push(plan);
     for (const p of plan.probes) lines.push(`probe:   ${p}`);
     for (const c of plan.commands) lines.push(`  ${c.render}    (${c.because})`);
     if (plan.commands.some((c) => c.args[1] === "marketplace" && c.args[2] === "add")) {
@@ -825,7 +841,7 @@ export function planClaudePlugin(spec: ClaudePluginSpec, opts: PlanOptions): Pla
     lines.push(`  → payload ${cacheRoot(dir, spec)}/<version>`);
     if (plan.registration.bareCopy) lines.push(`  note: bare copy at ${plan.registration.bareCopy.path} is loaded by nothing (copy only, unregistered)`);
   }
-  return { claudeDetected: true, lines, plans };
+  return { claudeDetected: true, lines, plans, failures };
 }
 
 export interface RegisterOptions extends PlanOptions {

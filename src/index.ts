@@ -17,16 +17,18 @@ import { LEGACY_CLEANUP_ISSUE, cacheRoot, claudePluginSpec, describeOrigin, desc
 import type { RegistrationState } from "./claude-plugin.js";
 
 /**
- * An explicit --source-root must hold a marketplace for every claude-plugin product being
- * installed — checked BEFORE anything is installed, dependencies included, so a typo cannot
- * leave a partial install (say, wicked-vault without wicked-garden) behind. Throws with the
- * resolver's message.
+ * Everything a claude-plugin product needs resolved is checked BEFORE anything is installed,
+ * dependencies included, so a bad input cannot leave a partial install (say, wicked-vault
+ * without wicked-garden) behind: the Claude config dirs (a set-but-empty CLAUDE_CONFIG_DIR is
+ * an error) and, with an explicit --source-root, a marketplace manifest for every such
+ * product. Throws with the resolver's message.
  */
-function validateSourceRoot(products: Product[], flags: DispatchFlags): void {
+function validatePluginInputs(products: Product[], flags: DispatchFlags): void {
+  const plugins = products.filter((p) => p.type === "claude-plugin");
+  if (plugins.length === 0) return;
+  resolveClaudeConfigDirs({ homeFlags: flags.claudeHomes });
   if (!flags.sourceRoot) return;
-  for (const p of products) {
-    if (p.type === "claude-plugin") resolveMarketplaceSource(claudePluginSpec(p), flags.sourceRoot);
-  }
+  for (const p of plugins) resolveMarketplaceSource(claudePluginSpec(p), flags.sourceRoot);
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -238,7 +240,7 @@ export async function dispatchToClis(
 
   // Before any script runs or any binary is acquired.
   try {
-    validateSourceRoot(productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined), flags);
+    validatePluginInputs(productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined), flags);
   } catch (err) {
     console.log(chalk.red(`\n${err instanceof Error ? err.message : String(err)}`));
     return 1;
@@ -408,7 +410,7 @@ async function installDirectly(products: Product[], flags: DispatchFlags): Promi
 async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Promise<void> {
   const all = [...selection.addedDeps, ...selection.products]; // deps first
   try {
-    validateSourceRoot(all, flags); // before the first dependency is installed
+    validatePluginInputs(all, flags); // before the first dependency is installed
   } catch (err) {
     console.error(chalk.red(err instanceof Error ? err.message : String(err)));
     process.exit(1);
@@ -542,7 +544,7 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
     process.exit(1);
   }
   try {
-    validateSourceRoot([...added, ...selected], flags); // before the first dependency is installed
+    validatePluginInputs([...added, ...selected], flags); // before the first dependency is installed
   } catch (err) {
     console.error(chalk.red(err instanceof Error ? err.message : String(err)));
     process.exit(1);

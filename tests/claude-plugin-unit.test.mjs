@@ -32,6 +32,7 @@ const spec = claudePluginSpec({
   install: { marketplace: "mikeparcewski/wicked-garden", pluginId: "wicked-garden@wicked-garden" },
 });
 const WIN = process.platform === "win32";
+const escapeRe = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const tmp = () => mkdtempSync(join(tmpdir(), "wicked-cp-unit-"));
 const rm = (d) => rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 
@@ -547,11 +548,14 @@ test("planClaudePlugin: the dry-run plan refuses what the live spawn would refus
     const spawner = () => ({ status: 0, stdout: "9.9.9 (Claude Code)\n", stderr: "" });
     const env = { WICKED_CLAUDE_BIN: cmdShim };
     const configDirs = { dirs: [cfg], origin: "env" };
-    // A checkout under %TEMP% cannot be passed through cmd.exe unchanged: the plan fails as the live run would.
-    assert.throws(
-      () => planClaudePlugin(spec, { configDirs, source: "C:\\%TEMP%\\wicked-garden", env, spawner, platform: "win32" }),
-      /refusing to route .* through cmd\.exe/,
-    );
+    // A checkout under %TEMP% cannot be passed through cmd.exe unchanged: the plan fails THAT dir as
+    // the live run would (per-dir failure, reported in `failures` and as a `refused:` line).
+    const refused = planClaudePlugin(spec, { configDirs, source: "C:\\%TEMP%\\wicked-garden", env, spawner, platform: "win32" });
+    assert.equal(refused.claudeDetected, true);
+    assert.deepEqual(refused.plans, [], "nothing planned for the refused dir");
+    assert.equal(refused.failures.length, 1);
+    assert.match(refused.failures[0], new RegExp(`^${escapeRe(cfg)}: .*refusing to route .* through cmd\\.exe`));
+    assert.ok(refused.lines.some((l) => /^  refused: .*refusing to route/.test(l)), refused.lines.join("\n"));
     // The same source is fine when the binary is a native exe (no shell involved).
     const exe = join(d, "claude.exe");
     writeFileSync(exe, "");
@@ -626,4 +630,31 @@ test("expandHome: a leading ~ (alone or before a separator) becomes the home dir
   assert.equal(expandHome("~user/x", "/h"), "~user/x");
   assert.equal(expandHome("/abs/~/x", "/h"), "/abs/~/x");
   assert.equal(expandHome("~/x", "/h$1"), "/h$1/x", "a $ in the home path is not a replacement token");
+});
+
+test("planClaudePlugin: a dir whose state is unreadable fails THAT dir and the remaining dirs are still planned (dry-run mirrors the live per-dir policy)", () => {
+  const d = tmp();
+  try {
+    const broken = join(d, "broken");
+    mkdirSync(broken);
+    symlinkSync(join(d, "elsewhere"), join(broken, "plugins")); // a symlinked plugins/ ⇒ unreadable
+    const fine = join(d, "fine");
+    configDir(fine, { marketplace: true });
+    const spawner = () => ({ status: 0, stdout: "9.9.9 (Claude Code)\n", stderr: "" });
+    const bin = join(d, "claude");
+    writeFileSync(bin, "");
+    const out = planClaudePlugin(spec, { configDirs: { dirs: [broken, fine], origin: "env" }, source: spec.source, env: { WICKED_CLAUDE_BIN: bin }, spawner });
+    assert.equal(out.claudeDetected, true);
+    assert.equal(out.failures.length, 1, JSON.stringify(out.failures));
+    assert.match(out.failures[0], new RegExp(`^${escapeRe(broken)}: .*registration state unreadable`));
+    assert.equal(out.plans.length, 1, "the second dir is still planned");
+    assert.equal(out.plans[0].dir, fine);
+    assert.ok(out.plans[0].commands.some((c) => c.args[1] === "install"), "…with its install command");
+    const brokenIdx = out.lines.indexOf(broken);
+    const fineIdx = out.lines.indexOf(fine);
+    assert.ok(brokenIdx >= 0 && fineIdx > brokenIdx, "both dirs appear, in order");
+    assert.match(out.lines[brokenIdx + 1], /^  refused: /);
+  } finally {
+    rm(d);
+  }
 });

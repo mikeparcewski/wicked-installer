@@ -261,7 +261,7 @@ test("an UNSET CLAUDE_CONFIG_DIR means ~/.claude; a set-but-empty one is an erro
       rmSync(unset.guardLog, { force: true }); // the guard log is per sandbox; judge each run on its own spawns
       const r = runDry(sb, ["fake-plugin"], { env: { CLAUDE_CONFIG_DIR: bad } });
       assert.equal(r.status, 1, `CLAUDE_CONFIG_DIR=${JSON.stringify(bad)} must fail:\n${r.stdout}`);
-      assert.match(r.stdout, /CLAUDE_CONFIG_DIR is set but names no directory/);
+      assert.match(r.stdout + r.stderr, /CLAUDE_CONFIG_DIR is set but names no directory/); // validated before any install, printed by the dispatcher
       assert.doesNotMatch(r.stdout, /claude plugin (install|marketplace add)/, "no plan is produced for a misconfigured env");
       assert.deepEqual(guardEntries(r.guardLog), [], "nothing is spawned before the misconfiguration is rejected");
       assert.deepEqual(snapshot(sb.home), before, "and nothing is written");

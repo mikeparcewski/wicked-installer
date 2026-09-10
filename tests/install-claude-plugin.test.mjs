@@ -633,3 +633,79 @@ function lstatSyncSafe(p) {
     return false;
   }
 }
+
+test("install-claude.js treats valid JSON of an unrecognised marker shape as unusable: install exits 1 byte-identical, status exits 1", () => {
+  const sb = sandbox();
+  try {
+    const shapes = {
+      "products-object": { products: {} },
+      "array": [],
+      "string": "not a marker",
+      "v2-without-products": { markerVersion: 2 },
+      "v2-products-array": { markerVersion: 2, products: [] },
+      "v1-entry-without-id": { products: [{ noid: 1 }] },
+    };
+    for (const [name, shape] of Object.entries(shapes)) {
+      const cfg = join(sb.tmp, `cfg-shape-${name}`);
+      mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+      writeFileSync(join(cfg, "settings.json"), "{}");
+      writeFileSync(markerPath(cfg), JSON.stringify(shape));
+      const before = snapshot(cfg);
+      const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+      assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /install marker is unusable \(unrecognised marker shape/, name);
+      assert.equal(r.stdout.trim(), "", `${name}: no report`);
+      assert.deepEqual(snapshot(cfg), before, `${name}: byte-identical`);
+      const st = runScript(sb, ["status", "--claude-home", cfg, "--json"]);
+      assert.equal(st.status, 1, `${name} status: ${st.stdout}${st.stderr}`);
+      assert.match(st.stderr, /install marker is unusable \(unrecognised marker shape/, name);
+      assert.equal(JSON.parse(st.stdout).verb, "status", `${name}: stdout stays pure JSON`);
+      assert.deepEqual(snapshot(cfg), before, `${name}: status wrote nothing`);
+    }
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("install-claude.js handed ONLY plugins (after dependency expansion) creates no config dir, initialises no marker and upgrades no v1 marker", () => {
+  const sb = sandbox();
+  try {
+    // A registry whose plugin has no dependencies, so the selection stays plugin-only.
+    const registry = join(sb.tmp, "registry.json");
+    writeFileSync(registry, JSON.stringify({
+      version: "1",
+      products: [{
+        id: "fake-plugin", displayName: "Fake Plugin", description: "", type: "claude-plugin", standalone: true, opinionated: false, status: "active", requires: [],
+        install: { type: "npm-run", package: "fake-plugin-pkg", command: "install", marketplace: "acme/fake-plugin", pluginId: "fake-plugin@fake-plugin" },
+      }],
+    }));
+    // 1. A config dir that does not exist yet stays absent.
+    const fresh = join(sb.tmp, "cfg-fresh");
+    const r = runScript(sb, ["fake-plugin", "--registry", registry, "--claude-home", fresh, "--skip-binaries", "--json"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const report = JSON.parse(r.stdout).reports.find((x) => x.productId === "fake-plugin");
+    assert.equal(report.skipped, true);
+    assert.match(report.message, /Claude Code plugin — registered by the central installer/);
+    assert.ok(!existsSync(fresh), "the config dir was not created");
+    assert.ok(!existsSync(sb.stubLog), "claude never invoked");
+    // 2. A config dir holding a v1 marker (and a legacy copy) stays byte-identical: no upgrade, no skills/ dir.
+    const legacy = join(sb.tmp, "cfg-v1");
+    plantLegacyV1Marker(legacy);
+    const before = snapshot(legacy);
+    const r2 = runScript(sb, ["fake-plugin", "--registry", registry, "--claude-home", legacy, "--skip-binaries", "--json"]);
+    assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+    assert.deepEqual(snapshot(legacy), before, "the v1 marker and everything else are untouched");
+    // 3. With a real dependency in the selection the normal path still runs (the existing garden+vault test covers it);
+    //    the unusable-marker check still comes first even for a plugin-only selection.
+    const corrupt = join(sb.tmp, "cfg-corrupt");
+    mkdirSync(join(corrupt, "wicked-installer"), { recursive: true });
+    writeFileSync(markerPath(corrupt), "{ nope");
+    const snapC = snapshot(corrupt);
+    const r3 = runScript(sb, ["fake-plugin", "--registry", registry, "--claude-home", corrupt, "--skip-binaries", "--json"]);
+    assert.equal(r3.status, 1);
+    assert.match(r3.stderr, /install marker is unusable/);
+    assert.deepEqual(snapshot(corrupt), snapC);
+  } finally {
+    cleanup(sb);
+  }
+});
