@@ -61,10 +61,11 @@ export async function installProduct(product: Product, options: InstallOptions =
   const dryRun = options.dryRun === true;
   const log = options.log ?? ((line: string) => console.log(line));
 
-  // Every dry-run exit goes through here: the plan is printed, nothing runs, and the result
-  // is marked `planned` so callers can tell "would do" from "did".
+  // Every dry-run exit goes through here: the plan is printed, nothing that writes runs, and
+  // the result is marked `planned` so callers can tell "would do" from "did". `probe:` lines
+  // are what the plan was derived from; `dry-run:` lines are what a live run would execute.
   const plan: Planner = (lines, summary) => {
-    for (const line of lines) log(`  dry-run: ${line}`);
+    for (const line of lines) log(line.startsWith("probe:") ? `  ${line}` : `  dry-run: ${line}`);
     return { productId: id, success: true, skipped: false, planned: true, message: `${displayName}: dry-run — ${summary}` };
   };
 
@@ -311,15 +312,17 @@ async function installClaudePlugin(
   const note = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
   // A local checkout can only be registered through Claude Code; the npx fallback would install
   // the PUBLISHED package instead of `source`, which is not what --source-root asked for.
-  const noFallbackForSourceRoot = (reason: string): Error =>
-    new Error(`Claude Code not detected (${reason}); --source-root ${options.sourceRoot} registers ${source} through Claude Code and has no fallback — not running ${fallbackCmd ?? "the bare-copy install"}, which would install the published package instead`);
+  const noFallbackForSourceRoot = (): Error =>
+    new Error(`Claude Code CLI not detected on PATH; --source-root ${options.sourceRoot} registers ${source} through Claude Code and has no fallback — not running ${fallbackCmd ?? "the bare-copy install"}, which would install the published package instead`);
 
+  // Both branches probe the same way (claude --version + on-disk state); a present-but-broken
+  // Claude Code throws out of plan/register and is reported as a failure, never as "absent".
   if (options.dryRun) {
-    const planned = planClaudePlugin(spec, { configDirs, sourceRoot: options.sourceRoot });
+    const planned = planClaudePlugin(spec, { configDirs, source });
     if (planned.claudeDetected) {
       return plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}`);
     }
-    if (options.sourceRoot) throw noFallbackForSourceRoot("claude is not on PATH");
+    if (options.sourceRoot) throw noFallbackForSourceRoot();
     const lines = ["Claude Code CLI not detected on PATH — would fall back to the bare copy:"];
     if (fallbackCmd) lines.push(`${fallbackCmd}    (copies to ${bareCopy}; not registered — Claude Code would not load it)`);
     else lines.push(`nothing to run: ${id} has no fallback install command`);
@@ -331,7 +334,7 @@ async function installClaudePlugin(
     );
   }
 
-  const outcome = registerClaudePlugin(spec, { configDirs, sourceRoot: options.sourceRoot, log });
+  const outcome = registerClaudePlugin(spec, { configDirs, source, log });
   if (outcome.claudeDetected) {
     const where = Object.entries(outcome.versions).map(([dir, version]) => `${dir} (${version})`).join(", ");
     return {
@@ -340,14 +343,15 @@ async function installClaudePlugin(
     };
   }
 
-  if (options.sourceRoot) throw noFallbackForSourceRoot(outcome.reason);
+  // Only reached when NO claude binary resolves at all (PATH / WICKED_CLAUDE_BIN).
+  if (options.sourceRoot) throw noFallbackForSourceRoot();
   if (!fallbackArgs || !fallbackCmd) {
     return {
       productId: id, success: false, skipped: false,
-      message: `${displayName}: Claude Code not detected (${outcome.reason}) and ${id} has no fallback install command`,
+      message: `${displayName}: Claude Code CLI not detected on PATH and ${id} has no fallback install command`,
     };
   }
-  log(`  Claude Code not detected (${outcome.reason}); falling back to ${fallbackCmd}`);
+  log(`  Claude Code CLI not detected on PATH; falling back to ${fallbackCmd}`);
   await execa("npx", fallbackArgs, { stdio: "inherit" });
   return {
     productId: id, success: true, skipped: false,

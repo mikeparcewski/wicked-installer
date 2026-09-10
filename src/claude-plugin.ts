@@ -1,6 +1,6 @@
-import { accessSync, constants as fsConstants, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // ---------------------------------------------------------------------------
@@ -14,14 +14,19 @@ import { spawnSync } from "node:child_process";
 // produces, always into ~/.claude regardless of CLAUDE_CONFIG_DIR — is loaded by
 // nothing. So this module drives Claude Code's OWN plugin mechanism (`claude plugin
 // marketplace add`, `claude plugin install|update`) with CLAUDE_CONFIG_DIR pinned to
-// each active config dir, and reads the resulting registration back from disk.
+// each active config dir, and re-derives the registration from disk afterwards.
 //
-// Reading is deliberately file-based: even `claude plugin list` initialises
-// <configDir>/.claude.json (and a backup) as a side effect, so `status` must never
-// spawn the CLI, and a `--dry-run` must spawn nothing at all (see planClaudePlugin).
+// One plan for dry-run and live. `planForDir` decides what to run from two probes —
+// `claude --version` (a spawn; verified to write nothing) and the on-disk registration
+// state — and both the dry run and the live run print those probes, then the live run
+// executes exactly the planned commands. The state is read from disk rather than via
+// `claude plugin marketplace list` / `claude plugin list` because those, although
+// queries, initialise <configDir>/.claude.json and a backups/ entry as a side effect
+// (observed on an empty config dir) — unacceptable for a dry run and for `status`.
+// The files are what those commands print (their --json output mirrors them 1:1).
 //
-// Config-dir resolution mirrors install-claude.ts resolveTargets exactly:
-// --claude-home flags → CLAUDE_CONFIG_DIR (exclusive when set) → ~/.claude.
+// Config-dir resolution mirrors install-claude.ts: --claude-home flags → CLAUDE_CONFIG_DIR
+// (exclusive when the variable is SET; set-but-empty is an error) → ~/.claude.
 // ---------------------------------------------------------------------------
 
 export interface ClaudePluginSpec {
@@ -29,7 +34,7 @@ export interface ClaudePluginSpec {
   pluginId: string;
   pluginName: string;
   marketplaceName: string;
-  /** What `claude plugin marketplace add` receives: GitHub `owner/repo`, a URL, or a local path. */
+  /** What `claude plugin marketplace add` receives by default: GitHub `owner/repo`. */
   source: string;
 }
 
@@ -81,6 +86,12 @@ export function splitConfigDirValue(value: string, platform: NodeJS.Platform = p
     .filter(Boolean);
 }
 
+/**
+ * Resolve the Claude config dir(s) to act on. The default ~/.claude applies only when
+ * CLAUDE_CONFIG_DIR is ABSENT: a variable that is set but names no directory ("", blanks,
+ * a bare ":" or ",") is a misconfiguration and throws — silently acting on ~/.claude
+ * would install into a dir the user has explicitly steered Claude Code away from.
+ */
 export function resolveClaudeConfigDirs(
   opts: { homeFlags?: string[]; env?: NodeJS.ProcessEnv; home?: string; platform?: NodeJS.Platform } = {},
 ): ClaudeConfigDirs {
@@ -92,10 +103,15 @@ export function resolveClaudeConfigDirs(
   if (flags.length > 0) return { dirs: [...new Set(flags)], origin: "flag" };
 
   // 2. CLAUDE_CONFIG_DIR is authoritative and exclusive when set.
-  const raw = env.CLAUDE_CONFIG_DIR;
-  if (raw && raw.trim()) {
+  if ("CLAUDE_CONFIG_DIR" in env) {
+    const raw = env.CLAUDE_CONFIG_DIR ?? "";
     const dirs = splitConfigDirValue(raw, opts.platform).map((d) => resolve(expandHome(d, home)));
-    if (dirs.length > 0) return { dirs: [...new Set(dirs)], origin: "env" };
+    if (dirs.length === 0) {
+      throw new Error(
+        `CLAUDE_CONFIG_DIR is set but names no directory (value: ${JSON.stringify(raw)}) — unset it to use ~/.claude, or point it at a config dir`,
+      );
+    }
+    return { dirs: [...new Set(dirs)], origin: "env" };
   }
 
   // 3. Only ~/.claude is a config root Claude Code reads by default.
@@ -103,7 +119,7 @@ export function resolveClaudeConfigDirs(
 }
 
 // ---------------------------------------------------------------------------
-// Locating the Claude Code CLI without spawning (a dry run must spawn nothing)
+// Locating the Claude Code CLI without spawning
 // ---------------------------------------------------------------------------
 
 function isExecutableFile(path: string, platform: NodeJS.Platform): boolean {
@@ -203,8 +219,8 @@ export function prepareClaudeSpawn(bin: string, args: string[], platform: NodeJS
 
 /**
  * Run the Claude Code CLI once with CLAUDE_CONFIG_DIR=<configDir>. `capture` pipes
- * stdout/stderr (for `--json` queries); `inherit` streams them so marketplace clones
- * and install progress — and any consent prompt Claude Code raises — reach the user.
+ * stdout/stderr (probes); `inherit` streams them so marketplace clones and install
+ * progress — and any consent prompt Claude Code raises — reach the user.
  */
 export const spawnClaude: ClaudeSpawner = (bin, args, configDir, mode) => {
   let prepared: PreparedSpawn;
@@ -224,13 +240,50 @@ export const spawnClaude: ClaudeSpawner = (bin, args, configDir, mode) => {
 };
 
 // ---------------------------------------------------------------------------
-// Reading a registration back from disk (read-only; never spawns)
+// Probe: is Claude Code here, and does it work?
 // ---------------------------------------------------------------------------
+
+export interface ClaudeProbe {
+  bin: string;
+  version: string;
+}
+
+/**
+ * Locate and probe the CLI with `claude --version` (verified to write nothing, so it is
+ * safe under --dry-run and in `status`). No binary at all → undefined: the caller may
+ * fall back to the bare copy. A binary that is present but FAILS the probe is an
+ * installation error, never a licence to fall back — the user has Claude Code and it
+ * is broken, which the fallback would silently paper over.
+ */
+export function probeClaude(configDir: string, opts: { env?: NodeJS.ProcessEnv; spawner?: ClaudeSpawner } = {}): ClaudeProbe | undefined {
+  const bin = claudeBinary(opts.env ?? process.env);
+  if (!bin) return undefined;
+  const res = (opts.spawner ?? spawnClaude)(bin, ["--version"], configDir, "capture");
+  if (res.status !== 0) {
+    const detail = res.stderr.trim() || res.stdout.trim();
+    throw new Error(
+      `${bin} --version failed (exit ${res.status ?? "?"})${detail ? `: ${detail}` : ""} — Claude Code is present but not working; fix it, or remove it from PATH to use the bare-copy fallback`,
+    );
+  }
+  return { bin, version: res.stdout.trim() };
+}
+
+// ---------------------------------------------------------------------------
+// Reading a registration back from disk (read-only; never spawns; never follows links)
+// ---------------------------------------------------------------------------
+
+export interface PayloadCheck {
+  ok: boolean;
+  problem?: string;
+  manifestVersion?: string;
+}
 
 export interface InstalledEntry {
   version: string;
   scope: string;
   installPath: string;
+  /** Does the record's installPath hold a plugin manifest whose version matches the record? */
+  payload: PayloadCheck;
 }
 
 export interface PluginRegistration {
@@ -243,19 +296,69 @@ export interface PluginRegistration {
   cacheVersions: string[];
   /** A bare `plugins/<plugin>/` copy (what `npx wicked-garden install` writes) — loaded by nothing. */
   bareCopy?: { path: string; version?: string };
-  warnings: string[];
+  /** settings.json enabledPlugins[<pluginId>], when declared (informational). */
+  enabled?: boolean;
+  /** I/O, permission, symlink and containment problems — the state is UNREADABLE when non-empty. */
+  errors: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function readJsonFile(path: string): { value?: unknown; error?: string } {
-  if (!existsSync(path)) return {};
+function errCode(err: unknown): string {
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string") return code;
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isUnder(real: string, root: string): boolean {
+  return real === root || real.startsWith(root + sep);
+}
+
+/** A directory that really belongs to the config dir: exists, is not a symlink, resolves under root. */
+function ownedDir(root: string, path: string): { ok: true } | { ok: false; missing?: true; error?: string } {
+  let st;
   try {
-    return { value: JSON.parse(readFileSync(path, "utf8")) as unknown };
+    st = lstatSync(path);
   } catch (err) {
-    return { error: `${path}: ${err instanceof Error ? err.message : String(err)}` };
+    return errCode(err) === "ENOENT" ? { ok: false, missing: true } : { ok: false, error: `${path}: ${errCode(err)}` };
+  }
+  if (st.isSymbolicLink()) return { ok: false, error: `${path}: is a symlink — refusing to follow it` };
+  if (!st.isDirectory()) return { ok: false, error: `${path}: not a directory` };
+  try {
+    if (!isUnder(realpathSync(path), root)) return { ok: false, error: `${path}: resolves outside ${root}` };
+  } catch (err) {
+    return { ok: false, error: `${path}: ${errCode(err)}` };
+  }
+  return { ok: true };
+}
+
+/** Read a JSON file without following symlinks, and only when it really lives under the config dir. */
+function readOwnedJson(root: string, path: string): { value?: unknown; error?: string } {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (err) {
+    return errCode(err) === "ENOENT" ? {} : { error: `${path}: ${errCode(err)}` };
+  }
+  if (st.isSymbolicLink()) return { error: `${path}: is a symlink — refusing to follow it` };
+  if (!st.isFile()) return { error: `${path}: not a regular file` };
+  try {
+    if (!isUnder(realpathSync(path), root)) return { error: `${path}: resolves outside ${root}` };
+  } catch (err) {
+    return { error: `${path}: ${errCode(err)}` };
+  }
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    return { error: `${path}: ${errCode(err)}` };
+  }
+  try {
+    return { value: JSON.parse(text) as unknown };
+  } catch {
+    return { error: `${path}: corrupt JSON` };
   }
 }
 
@@ -269,12 +372,44 @@ export function describeMarketplaceSource(source: unknown): string {
   return typeof source === "string" ? source : "unknown";
 }
 
-export function readRegistration(configDir: string, spec: ClaudePluginSpec): PluginRegistration {
-  const reg: PluginRegistration = { configDir, installed: [], cacheVersions: [], warnings: [] };
-  const pluginsDir = join(configDir, "plugins");
+/** The directory Claude Code loads the plugin from once registered. */
+export function cacheRoot(configDir: string, spec: ClaudePluginSpec): string {
+  return join(configDir, "plugins", "cache", spec.marketplaceName, spec.pluginName);
+}
 
-  const known = readJsonFile(join(pluginsDir, "known_marketplaces.json"));
-  if (known.error) reg.warnings.push(`corrupt ${known.error}`);
+function checkPayload(root: string, installPath: string, recordVersion: string): PayloadCheck {
+  if (!installPath) return { ok: false, problem: "install record has no installPath" };
+  const dir = ownedDir(root, installPath);
+  if (!dir.ok) return { ok: false, problem: dir.missing ? `payload dir missing: ${installPath}` : dir.error };
+  const manifest = readOwnedJson(root, join(installPath, ".claude-plugin", "plugin.json"));
+  if (manifest.error) return { ok: false, problem: manifest.error };
+  if (manifest.value === undefined) return { ok: false, problem: `payload has no .claude-plugin/plugin.json: ${installPath}` };
+  const manifestVersion = isRecord(manifest.value) && typeof manifest.value.version === "string" ? manifest.value.version : undefined;
+  if (manifestVersion !== recordVersion) {
+    return { ok: false, manifestVersion, problem: `payload plugin.json version ${manifestVersion ?? "(missing)"} does not match the install record (${recordVersion})` };
+  }
+  return { ok: true, manifestVersion };
+}
+
+export function readRegistration(configDir: string, spec: ClaudePluginSpec): PluginRegistration {
+  const reg: PluginRegistration = { configDir, installed: [], cacheVersions: [], errors: [] };
+
+  let root: string;
+  try {
+    root = realpathSync(configDir);
+  } catch (err) {
+    if (errCode(err) !== "ENOENT") reg.errors.push(`${configDir}: ${errCode(err)}`);
+    return reg; // no config dir ⇒ nothing registered
+  }
+  const pluginsDir = join(configDir, "plugins");
+  const plugins = ownedDir(root, pluginsDir);
+  if (!plugins.ok) {
+    if (plugins.error) reg.errors.push(plugins.error);
+    return reg; // no plugins dir ⇒ nothing registered
+  }
+
+  const known = readOwnedJson(root, join(pluginsDir, "known_marketplaces.json"));
+  if (known.error) reg.errors.push(known.error);
   else if (isRecord(known.value) && isRecord(known.value[spec.marketplaceName])) {
     const entry = known.value[spec.marketplaceName] as Record<string, unknown>;
     reg.marketplace = {
@@ -283,239 +418,277 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
     };
   }
 
-  const installed = readJsonFile(join(pluginsDir, "installed_plugins.json"));
-  if (installed.error) reg.warnings.push(`corrupt ${installed.error}`);
+  const installed = readOwnedJson(root, join(pluginsDir, "installed_plugins.json"));
+  if (installed.error) reg.errors.push(installed.error);
   else if (isRecord(installed.value)) {
     // v2 nests the map under `plugins` and holds one entry per scope in an array; the
     // v1 file keyed plugins at the top level with a single object. Accept both.
-    const plugins = isRecord(installed.value.plugins) ? installed.value.plugins : installed.value;
-    const raw = plugins[spec.pluginId];
+    const map = isRecord(installed.value.plugins) ? installed.value.plugins : installed.value;
+    const raw = map[spec.pluginId];
     const entries = Array.isArray(raw) ? raw : raw !== undefined ? [raw] : [];
     for (const e of entries) {
       if (!isRecord(e)) continue;
+      const version = typeof e.version === "string" ? e.version : "unknown";
+      const installPath = typeof e.installPath === "string" ? e.installPath : "";
       reg.installed.push({
-        version: typeof e.version === "string" ? e.version : "unknown",
+        version,
         scope: typeof e.scope === "string" ? e.scope : "user",
-        installPath: typeof e.installPath === "string" ? e.installPath : "",
+        installPath,
+        payload: checkPayload(root, installPath, version),
       });
     }
     reg.installed.sort((a, b) => Number(b.scope === "user") - Number(a.scope === "user"));
   }
 
-  try {
-    reg.cacheVersions = readdirSync(join(pluginsDir, "cache", spec.marketplaceName, spec.pluginName), { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-      .sort();
-  } catch {
-    /* no cache dir */
+  const cache = ownedDir(root, cacheRoot(configDir, spec));
+  if (cache.ok) {
+    try {
+      reg.cacheVersions = readdirSync(cacheRoot(configDir, spec), { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !d.isSymbolicLink())
+        .map((d) => d.name)
+        .sort();
+    } catch (err) {
+      reg.errors.push(`${cacheRoot(configDir, spec)}: ${errCode(err)}`);
+    }
+  } else if (cache.error) {
+    reg.errors.push(cache.error);
   }
 
-  const barePath = join(pluginsDir, spec.pluginName);
-  const bareManifest = readJsonFile(join(barePath, ".claude-plugin", "plugin.json"));
-  if (bareManifest.value !== undefined || bareManifest.error) {
-    reg.bareCopy = {
-      path: barePath,
-      version: isRecord(bareManifest.value) && typeof bareManifest.value.version === "string" ? bareManifest.value.version : undefined,
-    };
+  const bareDir = join(pluginsDir, spec.pluginName);
+  const bare = ownedDir(root, bareDir);
+  if (bare.ok) {
+    const manifest = readOwnedJson(root, join(bareDir, ".claude-plugin", "plugin.json"));
+    if (manifest.error) reg.errors.push(manifest.error);
+    if (manifest.value !== undefined || manifest.error) {
+      reg.bareCopy = {
+        path: bareDir,
+        version: isRecord(manifest.value) && typeof manifest.value.version === "string" ? manifest.value.version : undefined,
+      };
+    }
+  } else if (bare.error) {
+    reg.errors.push(bare.error);
   }
+
+  // Informational: Claude Code records the enable switch in settings.json. A corrupt or
+  // unreadable settings.json is the user's problem to notice elsewhere, not a status error.
+  const settings = readOwnedJson(root, join(configDir, "settings.json"));
+  if (isRecord(settings.value) && isRecord(settings.value.enabledPlugins)) {
+    const flag = settings.value.enabledPlugins[spec.pluginId];
+    if (typeof flag === "boolean") reg.enabled = flag;
+  }
+
   return reg;
 }
 
-/** The directory Claude Code loads the plugin from once registered. */
-export function cacheRoot(configDir: string, spec: ClaudePluginSpec): string {
-  return join(configDir, "plugins", "cache", spec.marketplaceName, spec.pluginName);
-}
+// ---------------------------------------------------------------------------
+// The verdict — one definition for install, status and detection
+// ---------------------------------------------------------------------------
 
-export type RegistrationState = "registered" | "broken" | "copy-only" | "absent";
+export type RegistrationState = "registered" | "partial" | "copy-only" | "absent" | "unreadable";
 
 export interface RegistrationVerdict {
   state: RegistrationState;
-  /** Why a `broken` registration is broken (empty otherwise). */
+  /** What is missing (`partial`) or what could not be read (`unreadable`). */
   problems: string[];
 }
 
 /**
- * An installed_plugins.json record alone is not a registration. Claude Code (and crew)
- * load the plugin from the record's installPath under plugins/cache/, and updates go
- * through the marketplace entry — so `registered` requires all three: the marketplace
- * entry, the install record, and the payload (its plugin manifest) on disk. A record
- * whose payload or marketplace is gone is `broken`; a bare plugins/<plugin>/ copy with
- * no record is `copy-only`.
+ * REGISTERED requires all three: the marketplace entry, the install record, and the
+ * record's payload dir holding a plugin.json whose version matches the record. A
+ * record with anything missing is PARTIAL (what is missing is named); a bare
+ * plugins/<plugin>/ copy with no record is COPY-ONLY; an I/O, permission, symlink or
+ * containment problem makes the state UNREADABLE — reported as an error, never as
+ * "not installed".
  */
 export function registrationVerdict(reg: PluginRegistration): RegistrationVerdict {
+  if (reg.errors.length > 0) return { state: "unreadable", problems: [...reg.errors] };
   if (reg.installed.length === 0) return { state: reg.bareCopy ? "copy-only" : "absent", problems: [] };
   const problems: string[] = [];
-  if (!reg.marketplace) problems.push("marketplace entry missing from known_marketplaces.json (updates would fail)");
-  const payload = reg.installed.find(
-    (e) => e.installPath !== "" && existsSync(join(e.installPath, ".claude-plugin", "plugin.json")),
-  );
-  if (!payload) {
-    const onDisk = reg.cacheVersions.length > 0 ? reg.cacheVersions.join(", ") : "none";
-    problems.push(`payload missing: no recorded installPath holds .claude-plugin/plugin.json (cache versions on disk: ${onDisk})`);
+  if (!reg.marketplace) problems.push("marketplace entry missing from known_marketplaces.json");
+  if (!reg.installed.some((e) => e.payload.ok)) {
+    for (const e of reg.installed) problems.push(e.payload.problem ?? "payload problem");
   }
-  return { state: problems.length > 0 ? "broken" : "registered", problems };
+  return { state: problems.length > 0 ? "partial" : "registered", problems };
+}
+
+export function describeVerdict(verdict: RegistrationVerdict): string {
+  switch (verdict.state) {
+    case "registered": return "registered";
+    case "partial": return `partially registered (${verdict.problems.join("; ")})`;
+    case "copy-only": return "copy only (unregistered)";
+    case "absent": return "not installed";
+    case "unreadable": return `unreadable (${verdict.problems.join("; ")})`;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Marketplace source: published GitHub marketplace, or a local checkout
 // ---------------------------------------------------------------------------
 
+/** `<root>/<marketplace>` or `<root>` when it holds a marketplace manifest; else undefined. */
+export function localMarketplaceUnder(spec: ClaudePluginSpec, root: string): string | undefined {
+  const base = resolve(root);
+  for (const candidate of [join(base, spec.marketplaceName), base]) {
+    if (existsSync(join(candidate, ".claude-plugin", "marketplace.json"))) return candidate;
+  }
+  return undefined;
+}
+
 /**
- * `--source-root <dir>` registers a LOCAL checkout as the marketplace: `<dir>/<marketplace>`
- * when that holds `.claude-plugin/marketplace.json`, else `<dir>` itself. Fails fast (also
- * under --dry-run) when neither does — a wrong root must not silently fall back to GitHub.
+ * An explicit `--source-root <dir>` registers a LOCAL checkout as the marketplace. It
+ * fails fast (also under --dry-run) when the root holds no manifest — a wrong root must
+ * not silently fall back to GitHub.
  */
 export function resolveMarketplaceSource(spec: ClaudePluginSpec, sourceRoot?: string): string {
   if (!sourceRoot) return spec.source;
-  const root = resolve(sourceRoot);
-  const candidates = [join(root, spec.marketplaceName), root];
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, ".claude-plugin", "marketplace.json"))) return candidate;
-  }
-  throw new Error(`--source-root ${sourceRoot}: no .claude-plugin/marketplace.json under ${candidates.join(" or ")}`);
+  const local = localMarketplaceUnder(spec, sourceRoot);
+  if (local) return local;
+  const base = resolve(sourceRoot);
+  throw new Error(`--source-root ${sourceRoot}: no .claude-plugin/marketplace.json under ${join(base, spec.marketplaceName)} or ${base}`);
 }
 
 // ---------------------------------------------------------------------------
-// Dry-run plan (zero spawns) and live registration
+// The plan — shared by the dry run (printed) and the live run (executed)
 // ---------------------------------------------------------------------------
 
-export interface PlanOutcome {
-  claudeDetected: boolean;
-  claudeBin?: string;
-  lines: string[];
+export interface PlannedCommand {
+  args: string[];
+  /** The command as the user would type it, CLAUDE_CONFIG_DIR included. */
+  render: string;
+  /** Why it runs, from the probe result. */
+  because: string;
+}
+
+export interface DirPlan {
+  dir: string;
+  /** What was read from disk to decide, one line each. */
+  probes: string[];
+  commands: PlannedCommand[];
+  registration: PluginRegistration;
 }
 
 /**
- * The exact plan a live run would execute, derived from PATH + on-disk state only.
- * Spawns nothing — not even `claude --version` — so `--dry-run` is provably dry.
+ * Decide, from the on-disk state of one config dir, exactly which Claude Code commands
+ * bring the plugin to "registered": `marketplace add` only when the marketplace is
+ * absent (one already registered from another source, e.g. a local checkout, is kept);
+ * `plugin update` when a healthy install record exists, `plugin install` otherwise
+ * (including a partial record, which install repairs). An unreadable state is an error.
  */
-export function planClaudePlugin(
-  spec: ClaudePluginSpec,
-  opts: { configDirs: ClaudeConfigDirs; sourceRoot?: string; env?: NodeJS.ProcessEnv },
-): PlanOutcome {
-  const bin = claudeBinary(opts.env ?? process.env);
-  if (!bin) return { claudeDetected: false, lines: [] };
-  const source = resolveMarketplaceSource(spec, opts.sourceRoot);
-  const { dirs, origin } = opts.configDirs;
-  const lines: string[] = [
-    `Claude Code detected (${bin}); would register ${spec.pluginId} in ${dirs.length} config dir(s) from ${describeOrigin(origin)}:`,
-  ];
-  for (const dir of dirs) {
-    const reg = readRegistration(dir, spec);
-    const prefix = `CLAUDE_CONFIG_DIR=${dir} claude plugin`;
-    lines.push(dir);
-    lines.push(`  ${prefix} marketplace list --json`);
-    lines.push(
-      `  ${prefix} marketplace add ${source}    ` +
-        (reg.marketplace ? `(skip: marketplace already registered, ${reg.marketplace.source})` : "(marketplace not registered on disk)"),
-    );
-    lines.push(`  ${prefix} list --json`);
-    const current = reg.installed[0];
-    lines.push(
-      current
-        ? `  ${prefix} update ${spec.pluginId}    (installed ${current.version})`
-        : `  ${prefix} install ${spec.pluginId}    (not installed)`,
-    );
-    lines.push(`  → ${cacheRoot(dir, spec)}/<version>`);
-    if (reg.bareCopy) lines.push(`  note: bare copy at ${reg.bareCopy.path} is loaded by nothing (copy only, unregistered)`);
+export function planForDir(dir: string, spec: ClaudePluginSpec, source: string): DirPlan {
+  const registration = readRegistration(dir, spec);
+  if (registration.errors.length > 0) {
+    throw new Error(`${dir}: registration state unreadable — ${registration.errors.join("; ")}`);
   }
-  return { claudeDetected: true, claudeBin: bin, lines };
+  const current = registration.installed[0];
+  const probes = [
+    `${join(dir, "plugins", "known_marketplaces.json")} → marketplace ${spec.marketplaceName}: ${registration.marketplace ? `registered (${registration.marketplace.source})` : "not registered"}`,
+    `${join(dir, "plugins", "installed_plugins.json")} → ${spec.pluginId}: ${current ? `${current.version} (${current.scope})${current.payload.ok ? "" : `; ${current.payload.problem}`}` : "not installed"}`,
+  ];
+  const prefix = `CLAUDE_CONFIG_DIR=${dir} claude`;
+  const commands: PlannedCommand[] = [];
+  if (!registration.marketplace) {
+    commands.push({ args: ["plugin", "marketplace", "add", source], render: `${prefix} plugin marketplace add ${source}`, because: "marketplace not registered" });
+  }
+  if (current && current.payload.ok) {
+    commands.push({ args: ["plugin", "update", spec.pluginId], render: `${prefix} plugin update ${spec.pluginId}`, because: `installed ${current.version}` });
+  } else {
+    commands.push({
+      args: ["plugin", "install", spec.pluginId],
+      render: `${prefix} plugin install ${spec.pluginId}`,
+      because: current ? `install record present but ${current.payload.problem}` : "not installed",
+    });
+  }
+  return { dir, probes, commands, registration };
 }
 
-export interface RegisterOptions {
+export interface PlanOptions {
   configDirs: ClaudeConfigDirs;
-  sourceRoot?: string;
-  log: (line: string) => void;
+  /** Marketplace source (published `owner/repo`, or a local checkout path). */
+  source: string;
   env?: NodeJS.ProcessEnv;
   spawner?: ClaudeSpawner;
 }
 
-export type RegisterResult =
-  | { claudeDetected: false; reason: string }
-  | { claudeDetected: true; versions: Record<string, string> };
-
-function parseJsonArray(text: string, what: string): unknown[] {
-  const start = text.indexOf("[");
-  if (start === -1) throw new Error(`${what}: expected a JSON array, got: ${text.trim().slice(0, 200)}`);
-  const parsed = JSON.parse(text.slice(start)) as unknown;
-  if (!Array.isArray(parsed)) throw new Error(`${what}: expected a JSON array`);
-  return parsed;
-}
-
-/** A `claude plugin marketplace list --json` row: `{ name, source, path|repo|url, installLocation }`. */
-function describeListedMarketplace(row: Record<string, unknown>): string {
-  const kind = typeof row.source === "string" ? row.source : "unknown";
-  const where = [row.repo, row.path, row.url].find((v) => typeof v === "string") as string | undefined;
-  return where ? `${kind}:${where}` : kind;
+export interface PlanOutcome {
+  claudeDetected: boolean;
+  /** `probe: …` lines and the commands that would run, ready to print. */
+  lines: string[];
+  plans: DirPlan[];
 }
 
 /**
- * Register the plugin in every target config dir through Claude Code's own CLI:
- * `marketplace list` → `marketplace add` only when absent (a marketplace already
- * registered from another source is kept as-is) → `plugin list` → `plugin install`
- * or `plugin update`. Every call carries CLAUDE_CONFIG_DIR=<target>. Verifies from
- * disk that the cache payload exists afterwards. Throws on any CLI failure.
+ * The dry run: the same probes the live run makes (`claude --version`, on-disk state)
+ * and exactly the commands it would execute — nothing else runs. A present-but-broken
+ * Claude Code throws, as it would live.
+ */
+export function planClaudePlugin(spec: ClaudePluginSpec, opts: PlanOptions): PlanOutcome {
+  const { dirs, origin } = opts.configDirs;
+  const probe = probeClaude(dirs[0], opts);
+  if (!probe) return { claudeDetected: false, lines: [], plans: [] };
+  const lines: string[] = [
+    `probe: ${probe.bin} --version → ${probe.version}`,
+    `Claude Code detected; would register ${spec.pluginId} in ${dirs.length} config dir(s) from ${describeOrigin(origin)}:`,
+  ];
+  const plans: DirPlan[] = [];
+  for (const dir of dirs) {
+    const plan = planForDir(dir, spec, opts.source);
+    plans.push(plan);
+    lines.push(dir);
+    for (const p of plan.probes) lines.push(`probe:   ${p}`);
+    for (const c of plan.commands) lines.push(`  ${c.render}    (${c.because})`);
+    lines.push(`  → payload ${cacheRoot(dir, spec)}/<version>`);
+    if (plan.registration.bareCopy) lines.push(`  note: bare copy at ${plan.registration.bareCopy.path} is loaded by nothing (copy only, unregistered)`);
+  }
+  return { claudeDetected: true, lines, plans };
+}
+
+export interface RegisterOptions extends PlanOptions {
+  log: (line: string) => void;
+}
+
+export type RegisterResult =
+  | { claudeDetected: false }
+  | { claudeDetected: true; version: string; versions: Record<string, string>; ran: Record<string, string[]> };
+
+/**
+ * The live run: probe, then per config dir execute exactly the planned commands with
+ * CLAUDE_CONFIG_DIR pinned, then re-derive the registration from disk — Claude Code
+ * exiting 0 is a claim; a `registered` verdict is the evidence. Throws on any failure.
  */
 export function registerClaudePlugin(spec: ClaudePluginSpec, opts: RegisterOptions): RegisterResult {
-  const env = opts.env ?? process.env;
   const spawner = opts.spawner ?? spawnClaude;
   const { dirs, origin } = opts.configDirs;
 
-  const bin = claudeBinary(env);
-  if (!bin) return { claudeDetected: false, reason: "claude is not on PATH" };
-  const probe = spawner(bin, ["--version"], dirs[0], "capture");
-  if (probe.status !== 0) {
-    return { claudeDetected: false, reason: `${bin} --version failed${probe.stderr.trim() ? `: ${probe.stderr.trim()}` : ""}` };
-  }
+  const probe = probeClaude(dirs[0], opts);
+  if (!probe) return { claudeDetected: false };
+  opts.log(`  probe: ${probe.bin} --version → ${probe.version}`);
+  opts.log(`  registering ${spec.pluginId} in ${dirs.length} config dir(s) from ${describeOrigin(origin)}`);
 
-  const source = resolveMarketplaceSource(spec, opts.sourceRoot);
-  const run = (args: string[], dir: string, mode: "capture" | "inherit"): string => {
-    const res = spawner(bin, args, dir, mode);
-    if (res.status !== 0) {
-      const detail = res.stderr.trim() || res.stdout.trim();
-      throw new Error(`CLAUDE_CONFIG_DIR=${dir} claude ${args.join(" ")} failed (exit ${res.status ?? "?"})${detail ? `: ${detail}` : ""}`);
-    }
-    return res.stdout;
-  };
-
-  opts.log(`  Claude Code ${probe.stdout.trim()} at ${bin}; registering ${spec.pluginId} in ${dirs.length} config dir(s) from ${describeOrigin(origin)}`);
   const versions: Record<string, string> = {};
-
+  const ran: Record<string, string[]> = {};
   for (const dir of dirs) {
+    const plan = planForDir(dir, spec, opts.source);
     opts.log(`  ${dir}`);
-
-    const marketplaces = parseJsonArray(run(["plugin", "marketplace", "list", "--json"], dir, "capture"), "claude plugin marketplace list --json");
-    const known = marketplaces.find((m): m is Record<string, unknown> => isRecord(m) && m.name === spec.marketplaceName);
-    if (known) {
-      opts.log(`    marketplace ${spec.marketplaceName} already registered (${describeListedMarketplace(known)}); keeping it`);
-    } else {
-      opts.log(`    claude plugin marketplace add ${source}`);
-      run(["plugin", "marketplace", "add", source], dir, "inherit");
+    for (const p of plan.probes) opts.log(`    probe: ${p}`);
+    for (const c of plan.commands) {
+      opts.log(`    ${c.render}    (${c.because})`);
+      const res = spawner(probe.bin, c.args, dir, "inherit");
+      if (res.status !== 0) {
+        const detail = res.stderr.trim() || res.stdout.trim();
+        throw new Error(`${c.render} failed (exit ${res.status ?? "?"})${detail ? `: ${detail}` : ""}`);
+      }
     }
+    ran[dir] = plan.commands.map((c) => c.render);
 
-    const plugins = parseJsonArray(run(["plugin", "list", "--json"], dir, "capture"), "claude plugin list --json");
-    const installed = plugins.find((p): p is Record<string, unknown> => isRecord(p) && (p.id === spec.pluginId || p.name === spec.pluginId));
-    if (installed) {
-      opts.log(`    claude plugin update ${spec.pluginId}    (installed ${typeof installed.version === "string" ? installed.version : "unknown"})`);
-      run(["plugin", "update", spec.pluginId], dir, "inherit");
-    } else {
-      opts.log(`    claude plugin install ${spec.pluginId}`);
-      run(["plugin", "install", spec.pluginId], dir, "inherit");
-    }
-
-    // Re-derive from disk: Claude Code exiting 0 is a claim; a full registration (marketplace
-    // entry + install record + payload) is the evidence.
     const reg = readRegistration(dir, spec);
     const verdict = registrationVerdict(reg);
     if (verdict.state !== "registered") {
-      const why = verdict.problems.length > 0 ? ` — ${verdict.problems.join("; ")}` : "";
-      throw new Error(`${spec.pluginId}: claude reported success but the registration in ${dir} is ${verdict.state}${why} — Claude Code would not load it`);
+      throw new Error(`${spec.pluginId}: claude reported success but the registration in ${dir} is ${describeVerdict(verdict)} — Claude Code would not load it`);
     }
     const { version, installPath } = reg.installed[0];
     versions[dir] = version;
     opts.log(`    registered ${spec.pluginId} ${version} → ${installPath}`);
   }
 
-  return { claudeDetected: true, versions };
+  return { claudeDetected: true, version: probe.version, versions, ran };
 }

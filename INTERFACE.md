@@ -498,6 +498,8 @@ GitHub Copilot: **no install script exists and none is planned** — prior art r
 
 The v1 flow (§5–7), plus: marker v2 bookkeeping (§10.2), MCP/hooks wiring where supported (§8.3/§8.4), stale-sweep on upgrade (§8.1), and the **REQUIRED stale-artifact purge (§12.4)**.
 
+**Claude-specific (the claude script's own choice; non-normative for other CLIs):** a product of `type: "claude-plugin"` (wicked-garden) is neither staged nor copied by `install-claude`. It is **registered** through Claude Code's own plugin CLI — `claude plugin marketplace add <source>` when the marketplace is absent, then `claude plugin install <plugin>@<marketplace>` (or `update`), every call with `CLAUDE_CONFIG_DIR=<target>` (`src/claude-plugin.ts`) — and verified from disk (`plugins/known_marketplaces.json`, `plugins/installed_plugins.json`, the `plugins/cache/<marketplace>/<plugin>/<version>/` payload). It is reported as `acquire` actions whose `detail` is the exact command run; its marker entry records **no files** (the registration belongs to Claude Code — `uninstall` says so and names the `claude plugin uninstall` command). A skills/hooks copy recorded by an earlier install of the same product is removed on upgrade (marker-driven, §12.3 rules). Without a Claude Code CLI the product is a manual step (`skipped: true`) — nothing is copied, because a bare `plugins/<plugin>/` copy is loaded by nothing. `claude plugin … list` is never used to read state (it writes `<configDir>/.claude.json`); `--dry-run` runs only the `claude --version` probe.
+
 ### 12.2 `status`
 
 Read-only, always safe — never stages or acquires. Per product × target it reports:

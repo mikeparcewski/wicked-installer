@@ -5,17 +5,18 @@
 // ~/.claude/plugins/wicked-garden (ignoring CLAUDE_CONFIG_DIR) and registered nothing, so neither
 // Claude Code nor wicked-crew's skills discovery ever saw it.
 //
-// Network-free and sandboxed: WICKED_CLAUDE_BIN points at tests/claude-stub.mjs, a spawn-recording
-// fake that emulates the real CLI's on-disk effects inside CLAUDE_CONFIG_DIR only; npm/npx on PATH are
-// shell fakes that log their argv; HOME is a temp dir. The env is built from scratch (never spread from
-// process.env) so a developer's own CLAUDE_CONFIG_DIR can never leak into a test. The PATH fakes are
-// POSIX shell scripts, so these live-path tests are skipped on Windows (dry-run.test.mjs is not).
+// Network-free and sandboxed: the Claude Code CLI is tests/claude-stub.mjs — a spawn-recording fake
+// that emulates the real CLI's on-disk effects inside CLAUDE_CONFIG_DIR only — reached either through
+// WICKED_CLAUDE_BIN or as a real `claude` on PATH; npm/npx on PATH are shell fakes that log their argv;
+// HOME is a temp dir. The env is built from scratch (never spread from process.env) so a developer's
+// own CLAUDE_CONFIG_DIR can never leak into a test. The PATH fakes are POSIX shell scripts, so these
+// live-path tests are skipped on Windows (dry-run.test.mjs and claude-plugin-unit.test.mjs are not).
 //
 // Requires `npm run build` first (CI builds before test).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +28,7 @@ const CLI = join(ROOT, "dist", "index.js");
 const STUB = join(__dirname, "claude-stub.mjs");
 const POSIX = process.platform !== "win32";
 const skip = POSIX ? false : "PATH fakes are POSIX shell scripts";
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 function sandbox() {
   const tmp = mkdtempSync(join(tmpdir(), "wicked-garden-reg-"));
@@ -40,7 +42,16 @@ function sandbox() {
   return { tmp, home, bin, stubLog: join(tmp, "claude-stub.log"), npmLog: join(tmp, "npm.log") };
 }
 
-function run(sb, args, { configDir, claude = true, env: extra = {} } = {}) {
+/** Put the stub on PATH as a real `claude` executable (the non-seam way the installer finds it). */
+function claudeOnPath(sb) {
+  writeFileSync(join(sb.bin, "claude"), `#!/bin/sh\nexec "${process.execPath}" "${STUB}" "$@"\n`, { mode: 0o755 });
+}
+
+/**
+ * `claude`: "seam" → WICKED_CLAUDE_BIN points at the stub; "path" → only the PATH `claude` (see
+ * claudeOnPath); false → no claude anywhere.
+ */
+function run(sb, args, { configDir, claude = "seam", env: extra = {} } = {}) {
   const env = {
     PATH: `${sb.bin}:${dirname(process.execPath)}`,
     HOME: sb.home,
@@ -50,7 +61,7 @@ function run(sb, args, { configDir, claude = true, env: extra = {} } = {}) {
     ...extra,
   };
   if (configDir !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
-  if (claude) env.WICKED_CLAUDE_BIN = STUB;
+  if (claude === "seam") env.WICKED_CLAUDE_BIN = STUB;
   return spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env, timeout: 120_000 });
 }
 
@@ -68,18 +79,19 @@ test("install wicked-garden registers the plugin in the active CLAUDE_CONFIG_DIR
     const r = run(sb, ["install", "wicked-garden"], { configDir: cfg });
     assert.equal(r.status, 0, r.stdout + r.stderr);
 
-    // The exact sequence, every call pinned to the target dir: probe, then list→add, list→install.
+    // The exact sequence, every call pinned to the target dir: the probe, then only the commands
+    // the on-disk state called for. No `claude plugin … list` — those write .claude.json.
     assert.deepEqual(calls(sb), [
       [cfg, "--version"],
-      [cfg, "plugin marketplace list --json"],
       [cfg, "plugin marketplace add mikeparcewski/wicked-garden"],
-      [cfg, "plugin list --json"],
       [cfg, "plugin install wicked-garden@wicked-garden"],
     ]);
+    assert.match(r.stdout, /probe: .*claude-stub\.mjs --version → 9\.9\.9 \(Claude Code stub\)/);
+    assert.match(r.stdout, new RegExp(`probe: ${escapeRe(join(cfg, "plugins", "known_marketplaces.json"))} → marketplace wicked-garden: not registered`));
     assert.ok(existsSync(cacheDir(cfg)), "the payload lands where Claude Code loads from (and crew reads)");
     assert.ok(!existsSync(join(sb.home, ".claude", "plugins", "wicked-garden")), "no bare copy under ~/.claude");
     assert.match(r.stdout, /registered with Claude Code as wicked-garden@wicked-garden/);
-    assert.match(r.stdout, new RegExp(`registered wicked-garden@wicked-garden 0\\.0\\.1-stub → ${cacheDir(cfg).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(r.stdout, new RegExp(`registered wicked-garden@wicked-garden 0\\.0\\.1-stub → ${escapeRe(cacheDir(cfg))}`));
 
     // The required dependency still installs (through the fake npm — network-free) and garden's own
     // install.mjs is NOT run: the bare copy is only the no-Claude fallback.
@@ -98,13 +110,32 @@ test("a second install updates instead of re-adding the marketplace or re-instal
     rmSync(sb.stubLog);
     const r = run(sb, ["install", "wicked-garden"], { configDir: cfg, env: { CLAUDE_STUB_VERSION: "0.0.2-stub" } });
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    const seq = calls(sb).map(([, argv]) => argv);
-    assert.ok(seq.includes("plugin update wicked-garden@wicked-garden"), `expected an update, got ${JSON.stringify(seq)}`);
-    assert.ok(!seq.some((a) => a.startsWith("plugin marketplace add")), "marketplace add must be idempotent (list first)");
-    assert.ok(!seq.includes("plugin install wicked-garden@wicked-garden"), "an installed plugin is updated, not re-installed");
-    assert.match(r.stdout, /marketplace wicked-garden already registered \(github:mikeparcewski\/wicked-garden\); keeping it/);
+    assert.deepEqual(calls(sb), [
+      [cfg, "--version"],
+      [cfg, "plugin update wicked-garden@wicked-garden"],
+    ], "marketplace add is idempotent; an installed plugin is updated, not re-installed");
+    assert.match(r.stdout, /probe: .*known_marketplaces\.json → marketplace wicked-garden: registered \(github:mikeparcewski\/wicked-garden\)/);
+    assert.match(r.stdout, /claude plugin update wicked-garden@wicked-garden\s+\(installed 0\.0\.1-stub\)/);
     assert.ok(existsSync(cacheDir(cfg, "0.0.2-stub")), "the update populated the new cache version");
     assert.match(r.stdout, /\(0\.0\.2-stub\)/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a partial registration (record without payload) is repaired with `plugin install`, not `update`", { skip }, () => {
+  const sb = sandbox();
+  const cfg = join(sb.tmp, "cfg");
+  mkdirSync(cfg);
+  try {
+    assert.equal(run(sb, ["install", "wicked-garden"], { configDir: cfg }).status, 0);
+    rmSync(cacheDir(cfg), { recursive: true, force: true }); // the payload vanishes; the record stays
+    rmSync(sb.stubLog);
+    const r = run(sb, ["install", "wicked-garden"], { configDir: cfg });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(calls(sb).map(([, argv]) => argv), ["--version", "plugin install wicked-garden@wicked-garden"]);
+    assert.match(r.stdout, /claude plugin install wicked-garden@wicked-garden\s+\(install record present but payload dir missing/);
+    assert.ok(existsSync(cacheDir(cfg)), "repaired");
   } finally {
     cleanup(sb);
   }
@@ -139,8 +170,7 @@ test("--claude-home replaces CLAUDE_CONFIG_DIR as the target set", { skip }, () 
   try {
     const r = run(sb, ["install", "wicked-garden", "--claude-home", flagDir], { configDir: envDir });
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    const dirs = new Set(jsonLines(sb.stubLog).map((c) => c.configDir));
-    assert.deepEqual([...dirs], [flagDir], "every claude call must be pinned to the --claude-home dir");
+    assert.deepEqual([...new Set(jsonLines(sb.stubLog).map((c) => c.configDir))], [flagDir], "every claude call must be pinned to the --claude-home dir");
     assert.ok(existsSync(cacheDir(flagDir)));
     assert.ok(!existsSync(join(envDir, "plugins")), "the env dir must be untouched");
   } finally {
@@ -148,14 +178,31 @@ test("--claude-home replaces CLAUDE_CONFIG_DIR as the target set", { skip }, () 
   }
 });
 
-test("without CLAUDE_CONFIG_DIR the default ~/.claude is the target", { skip }, () => {
+test("with CLAUDE_CONFIG_DIR unset the default ~/.claude is the target, and a real `claude` on PATH is found without the seam", { skip }, () => {
   const sb = sandbox();
+  claudeOnPath(sb);
   try {
-    const r = run(sb, ["install", "wicked-garden"]);
+    const r = run(sb, ["install", "wicked-garden"], { claude: "path" });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const expected = join(sb.home, ".claude");
     assert.deepEqual([...new Set(jsonLines(sb.stubLog).map((c) => c.configDir))], [expected]);
     assert.ok(existsSync(cacheDir(expected)));
+    assert.match(r.stdout, new RegExp(`probe: ${escapeRe(join(sb.bin, "claude"))} --version`), "the PATH binary, not the seam");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a set-but-empty CLAUDE_CONFIG_DIR is an error (exit 1, nothing registered), not a fall-through to ~/.claude", { skip }, () => {
+  const sb = sandbox();
+  try {
+    for (const bad of ["", " ", ":", ","]) {
+      const r = run(sb, ["install", "wicked-garden"], { configDir: bad });
+      assert.equal(r.status, 1, `CLAUDE_CONFIG_DIR=${JSON.stringify(bad)}:\n${r.stdout}`);
+      assert.match(r.stdout, /CLAUDE_CONFIG_DIR is set but names no directory/);
+    }
+    assert.ok(!existsSync(join(sb.home, ".claude")), "~/.claude was never touched");
+    assert.ok(!existsSync(sb.stubLog), "claude was never invoked");
   } finally {
     cleanup(sb);
   }
@@ -199,7 +246,7 @@ test("--source-root without Claude Code fails rather than silently installing th
   }
 });
 
-test("without Claude Code the installer falls back to the bare copy and says it is unregistered", { skip }, () => {
+test("without any Claude Code the installer falls back to the bare copy and says it is unregistered", { skip }, () => {
   const sb = sandbox();
   const cfg = join(sb.tmp, "cfg");
   mkdirSync(cfg);
@@ -208,8 +255,24 @@ test("without Claude Code the installer falls back to the bare copy and says it 
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.deepEqual(lines(sb.npmLog), ["npm install -g wicked-vault", "npx wicked-garden install"]);
     assert.ok(!existsSync(sb.stubLog), "no claude calls when it is absent");
-    assert.match(r.stdout, /Claude Code not detected \(claude is not on PATH\); falling back to npx wicked-garden install/);
-    assert.match(r.stdout, new RegExp(`copied to ${join(sb.home, ".claude", "plugins", "wicked-garden").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} via npx wicked-garden install; not registered — Claude Code not detected`));
+    assert.match(r.stdout, /Claude Code CLI not detected on PATH; falling back to npx wicked-garden install/);
+    assert.match(r.stdout, new RegExp(`copied to ${escapeRe(join(sb.home, ".claude", "plugins", "wicked-garden"))} via npx wicked-garden install; not registered — Claude Code not detected`));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a PRESENT but broken Claude Code (`--version` fails) is an install error, never a fallback", { skip }, () => {
+  const sb = sandbox();
+  const cfg = join(sb.tmp, "cfg");
+  mkdirSync(cfg);
+  try {
+    const r = run(sb, ["install", "wicked-garden"], { configDir: cfg, env: { CLAUDE_STUB_FAIL: "version" } });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /claude-stub\.mjs --version failed \(exit 1\): stub: claude is broken — Claude Code is present but not working/);
+    assert.deepEqual(calls(sb).map(([, argv]) => argv), ["--version"], "nothing beyond the probe runs");
+    assert.deepEqual(lines(sb.npmLog), ["npm install -g wicked-vault"], "no npx fallback");
+    assert.ok(!existsSync(join(cfg, "plugins")));
   } finally {
     cleanup(sb);
   }
@@ -225,7 +288,7 @@ test("a failing claude subcommand fails the install with the rendered command", 
     // add/install/update run with inherited stdio so Claude Code's own progress (and any consent
     // prompt it raises) reaches the user directly — so the CLI's stderr is on OUR stderr, and the
     // installer's message carries the rendered command + exit code.
-    assert.match(r.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${cfg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} claude plugin install wicked-garden@wicked-garden failed \\(exit 1\\)`));
+    assert.match(r.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${escapeRe(cfg)} claude plugin install wicked-garden@wicked-garden failed \\(exit 1\\)`));
     assert.match(r.stderr, /stub: plugin install failed/);
     assert.match(r.stdout, /1 installation\(s\) failed/);
     assert.ok(!existsSync(cacheDir(cfg)), "nothing claims to be installed");
@@ -234,28 +297,31 @@ test("a failing claude subcommand fails the install with the rendered command", 
   }
 });
 
-test("status reports the registration per config dir and flags a bare copy as copy only (unregistered), without invoking claude", { skip }, () => {
+test("status: per-dir verdict (registered / partial / copy only / not installed), the product list agrees, and the ONLY claude invocation is the read-only `--version` probe", { skip }, () => {
   const sb = sandbox();
+  claudeOnPath(sb);
   const registered = join(sb.tmp, "cfg-registered");
   const bare = join(sb.tmp, "cfg-bare");
   const empty = join(sb.tmp, "cfg-empty");
-  const broken = join(sb.tmp, "cfg-broken");
+  const partial = join(sb.tmp, "cfg-partial");
   mkdirSync(registered);
   mkdirSync(join(bare, "plugins", "wicked-garden", ".claude-plugin"), { recursive: true });
   writeFileSync(join(bare, "plugins", "wicked-garden", ".claude-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version: "12.0.0" }));
   mkdirSync(empty);
   // A leftover install record with no marketplace entry and no payload on disk.
-  mkdirSync(join(broken, "plugins"), { recursive: true });
-  writeFileSync(join(broken, "plugins", "installed_plugins.json"), JSON.stringify({
+  mkdirSync(join(partial, "plugins"), { recursive: true });
+  writeFileSync(join(partial, "plugins", "installed_plugins.json"), JSON.stringify({
     version: 2,
-    plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: cacheDir(broken, "9.9.9"), version: "9.9.9" }] },
+    plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: cacheDir(partial, "9.9.9"), version: "9.9.9" }] },
   }));
   try {
     assert.equal(run(sb, ["install", "wicked-garden"], { configDir: registered }).status, 0);
     const statusLog = join(sb.tmp, "status-stub.log");
+    const status = (dir, args = []) => run(sb, ["status", ...args], { configDir: dir, claude: "path", env: { CLAUDE_STUB_LOG: statusLog } });
 
-    const a = run(sb, ["status"], { configDir: registered, env: { CLAUDE_STUB_LOG: statusLog } });
+    const a = status(registered);
     assert.equal(a.status, 0, a.stdout + a.stderr);
+    assert.match(a.stdout, /Detected CLIs:[\s\S]*Claude Code \(9\.9\.9 \(Claude Code stub\)\)/, "CLI detection sees the PATH stub");
     assert.match(a.stdout, /Claude Code plugin registration \(wicked-garden@wicked-garden\)/);
     assert.match(a.stdout, /marketplace: wicked-garden ← github:mikeparcewski\/wicked-garden/);
     assert.match(a.stdout, /installed:\s+0\.0\.1-stub \(user\)/);
@@ -263,7 +329,7 @@ test("status reports the registration per config dir and flags a bare copy as co
     assert.match(a.stdout, /state:\s+✓ registered/);
     assert.match(a.stdout, /✓ installed\s+wicked-garden/, "the product list counts a registration as installed");
 
-    const b = run(sb, ["status"], { configDir: bare, env: { CLAUDE_STUB_LOG: statusLog } });
+    const b = status(bare);
     assert.equal(b.status, 0, b.stdout + b.stderr);
     assert.match(b.stdout, /marketplace: not registered/);
     assert.match(b.stdout, /installed:\s+not installed/);
@@ -271,25 +337,57 @@ test("status reports the registration per config dir and flags a bare copy as co
     assert.match(b.stdout, /state:\s+~ copy only \(unregistered\)/);
     assert.match(b.stdout, /not installed\s+wicked-garden/, "a bare copy is not 'installed' in the product list: Claude Code cannot load it");
 
-    const c = run(sb, ["status"], { configDir: empty, env: { CLAUDE_STUB_LOG: statusLog } });
+    const c = status(empty);
     assert.equal(c.status, 0, c.stdout + c.stderr);
     assert.match(c.stdout, /state:\s+not installed/);
     assert.match(c.stdout, /not installed\s+wicked-garden/);
 
-    // A stale install record is a BROKEN registration, and the product list agrees.
-    const e = run(sb, ["status"], { configDir: broken, env: { CLAUDE_STUB_LOG: statusLog } });
+    const e = status(partial);
     assert.equal(e.status, 0, e.stdout + e.stderr);
     assert.match(e.stdout, /installed:\s+9\.9\.9 \(user\)/);
-    assert.match(e.stdout, /state:\s+✗ broken registration — marketplace entry missing.*; payload missing/);
+    assert.match(e.stdout, /state:\s+✗ partially registered \(marketplace entry missing from known_marketplaces\.json; payload dir missing: .*9\.9\.9\)/);
     assert.match(e.stdout, /not installed\s+wicked-garden/, "a stale record is not 'installed' in the product list either");
 
-    // --claude-home works for status too, and a multi-dir env renders every dir.
-    const d = run(sb, ["status", "--claude-home", registered], { configDir: empty, env: { CLAUDE_STUB_LOG: statusLog } });
+    // --claude-home works for status too, and detection follows the same target set.
+    const d = status(empty, ["--claude-home", registered]);
     assert.match(d.stdout, /from --claude-home/);
     assert.match(d.stdout, /state:\s+✓ registered/);
+    assert.match(d.stdout, /✓ installed\s+wicked-garden/);
 
-    assert.ok(!existsSync(statusLog), "status is read-only: it must never invoke the claude CLI");
+    // Exactly which claude invocations `status` made: one `--version` per run (CLI detection),
+    // and never a `claude plugin …` command.
+    const statusCalls = jsonLines(statusLog).map((x) => x.argv.join(" "));
+    assert.deepEqual(statusCalls, ["--version", "--version", "--version", "--version", "--version"]);
   } finally {
+    cleanup(sb);
+  }
+});
+
+test("status: an unreadable registration (symlinked or unreadable state file) is an ERROR — exit 1, reported as such, never 'not installed'", { skip }, () => {
+  const sb = sandbox();
+  const linked = join(sb.tmp, "cfg-linked");
+  const denied = join(sb.tmp, "cfg-denied");
+  mkdirSync(join(linked, "plugins"), { recursive: true });
+  writeFileSync(join(linked, "plugins", "real.json"), JSON.stringify({ version: 2, plugins: {} }));
+  symlinkSync(join(linked, "plugins", "real.json"), join(linked, "plugins", "installed_plugins.json"));
+  mkdirSync(join(denied, "plugins"), { recursive: true });
+  writeFileSync(join(denied, "plugins", "installed_plugins.json"), JSON.stringify({ version: 2, plugins: {} }));
+  chmodSync(join(denied, "plugins", "installed_plugins.json"), 0o000);
+  const root = typeof process.getuid === "function" && process.getuid() === 0;
+  try {
+    const a = run(sb, ["status"], { configDir: linked });
+    assert.equal(a.status, 1, a.stdout + a.stderr);
+    assert.match(a.stdout, /state:\s+! unreadable \(.*installed_plugins\.json: is a symlink — refusing to follow it\)/);
+    assert.match(a.stdout, /could not be read/);
+    assert.doesNotMatch(a.stdout, /state:\s+not installed/);
+
+    if (!root) {
+      const b = run(sb, ["status"], { configDir: denied });
+      assert.equal(b.status, 1, b.stdout + b.stderr);
+      assert.match(b.stdout, /state:\s+! unreadable \(.*installed_plugins\.json: EACCES\)/);
+    }
+  } finally {
+    chmodSync(join(denied, "plugins", "installed_plugins.json"), 0o644);
     cleanup(sb);
   }
 });

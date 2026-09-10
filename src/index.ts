@@ -13,7 +13,7 @@ import { promptSelectionMode, promptBundle, promptCustom, promptConfirm, promptC
 import type { CliOption, UserSelection } from "./ui.js";
 import { listProducts, getProduct } from "./registry.js";
 import type { InstallResult, Product } from "./types.js";
-import { cacheRoot, claudePluginSpec, describeOrigin, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
+import { cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const { version: VERSION } = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
@@ -472,40 +472,45 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
 }
 
 /**
- * Per active Claude config dir: is wicked-garden REGISTERED with Claude Code (marketplace +
- * install record + cache payload — registrationVerdict), broken, or merely copied? Read from
- * disk only: even `claude plugin list` writes <configDir>/.claude.json, so status runs no
- * `claude plugin` command. (CLI detection above still runs `claude --version`, which writes
- * nothing — verified against an empty config dir.)
+ * Per active Claude config dir: is wicked-garden REGISTERED with Claude Code (marketplace entry
+ * + install record + matching cache payload — registrationVerdict), partially registered, or
+ * merely copied? Read from disk only: even `claude plugin list` writes <configDir>/.claude.json,
+ * so status runs no `claude plugin` command. (CLI detection above runs `claude --version`, a
+ * read-only probe verified to write nothing.) Returns true when any dir's state could not be
+ * read — an error, reported as such and reflected in the exit code, never as "not installed".
  */
-function renderPluginRegistration(flags: DispatchFlags): void {
+function renderPluginRegistration(flags: DispatchFlags): boolean {
   const garden = getProduct("wicked-garden");
-  if (!garden || garden.type !== "claude-plugin") return;
+  if (!garden || garden.type !== "claude-plugin") return false;
   const spec = claudePluginSpec(garden);
   const { dirs, origin } = resolveClaudeConfigDirs({ homeFlags: flags.claudeHomes });
+  let hadError = false;
 
   console.log(chalk.bold(`\nClaude Code plugin registration (${spec.pluginId}):`));
   console.log(chalk.dim(`  config dir(s) from ${describeOrigin(origin)}; registration read from disk — no \`claude plugin\` command is run`));
 
   for (const dir of dirs) {
     const reg = readRegistration(dir, spec);
+    const verdict = registrationVerdict(reg);
     console.log(`  ${chalk.bold(dir)}${existsSync(dir) ? "" : chalk.dim("  (does not exist)")}`);
     console.log(`    marketplace: ${reg.marketplace ? chalk.green(`${spec.marketplaceName} ← ${reg.marketplace.source}`) : chalk.dim("not registered")}`);
     console.log(`    installed:   ${reg.installed.length > 0 ? chalk.green(reg.installed.map((i) => `${i.version} (${i.scope})`).join(", ")) : chalk.dim("not installed")}`);
     console.log(`    cache:       ${reg.cacheVersions.length > 0 ? reg.cacheVersions.join(", ") : chalk.dim("none")}  ${chalk.dim(cacheRoot(dir, spec))}`);
+    if (reg.enabled !== undefined) console.log(`    enabled:     ${reg.enabled ? chalk.green("yes") : chalk.yellow("no")}  ${chalk.dim("settings.json enabledPlugins")}`);
     if (reg.bareCopy) {
       console.log(`    bare copy:   ${chalk.yellow(`${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it`)}`);
     }
-    for (const w of reg.warnings) console.log(chalk.red(`    ! ${w}`));
-    const verdict = registrationVerdict(reg);
     const state = verdict.state === "registered"
-      ? chalk.green("✓ registered")
-      : verdict.state === "broken"
-        ? chalk.red(`✗ broken registration — ${verdict.problems.join("; ")}`)
+      ? chalk.green(`✓ ${describeVerdict(verdict)}`)
+      : verdict.state === "partial"
+        ? chalk.red(`✗ ${describeVerdict(verdict)}`)
         : verdict.state === "copy-only"
-          ? chalk.yellow("~ copy only (unregistered)")
-          : chalk.dim("  not installed");
+          ? chalk.yellow(`~ ${describeVerdict(verdict)}`)
+          : verdict.state === "unreadable"
+            ? chalk.red(`! ${describeVerdict(verdict)}`)
+            : chalk.dim(`  ${describeVerdict(verdict)}`);
     console.log(`    state:       ${state}`);
+    if (verdict.state === "unreadable") hadError = true;
   }
 
   // The pre-registration installer always copied into ~/.claude, which need not be an active
@@ -517,6 +522,7 @@ function renderPluginRegistration(flags: DispatchFlags): void {
       console.log(chalk.yellow(`  ${defaultHome} is not an active config dir but holds a bare copy at ${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it`));
     }
   }
+  return hadError;
 }
 
 async function runStatus(flags: DispatchFlags): Promise<void> {
@@ -552,7 +558,10 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
     console.log(`  ${statusIcon}  ${chalk.bold(p.id)}${statusBadge}`);
   }
 
-  renderPluginRegistration(flags);
+  if (renderPluginRegistration(flags)) {
+    console.log(chalk.red("\nOne or more Claude config dirs could not be read (see the `!` lines above)."));
+    process.exitCode = 1;
+  }
 }
 
 function printHelp(): void {

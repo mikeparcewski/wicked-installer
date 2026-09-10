@@ -2,10 +2,11 @@
 //
 // Before this, `install wicked-garden --dry-run` ran `npm install -g wicked-vault` and garden's real
 // install.mjs: the direct install path never looked at the flag. These tests prove the plan is printed
-// and NOTHING runs. Two independent witnesses:
+// and nothing that writes runs. Two independent witnesses:
 //   1. spawn-guard.cjs (a --require preload) replaces every child_process entry point and global
-//      fetch with a function that records the call and throws — so any spawn fails the run AND
-//      leaves its argv in the guard log;
+//      fetch: the ONE read-only probe a dry run may make — `claude --version`, verified to write
+//      nothing — is recorded and passed through; anything else is recorded and throws, so any other
+//      spawn fails the run AND leaves its argv in the guard log;
 //   2. the temp HOME/config tree is snapshotted before and after and must be byte-for-byte the same.
 // The plan itself is asserted per install type against a FAKE registry (one product per type), so
 // a new arm that forgets the flag fails here rather than on someone's machine.
@@ -55,9 +56,10 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
  * A self-contained copy of dist/ with its own registry + package.json (index.js reads both from
  * `..`), node_modules linked from the repo, a temp HOME holding a Claude config dir, and a PATH
- * that contains only node's directory plus an optional `claude` that exits 99 if ever executed.
+ * that contains only node's directory plus an optional `claude`: "ok" answers --version and exits
+ * 0 (it is never invoked with anything else — the guard would throw); "broken" exits 99.
  */
-function sandbox({ withClaude, registry = FAKE_REGISTRY } = {}) {
+function sandbox({ withClaude = "ok", registry = FAKE_REGISTRY } = {}) {
   const tmp = mkdtempSync(join(tmpdir(), "wicked-dry-run-"));
   cpSync(join(ROOT, "dist"), join(tmp, "dist"), { recursive: true });
   symlinkSync(join(ROOT, "node_modules"), join(tmp, "node_modules"), WIN ? "junction" : "dir");
@@ -71,11 +73,10 @@ function sandbox({ withClaude, registry = FAKE_REGISTRY } = {}) {
   mkdirSync(bin);
   writeFileSync(join(cfg, "settings.json"), "{}");
   if (withClaude) {
-    writeFileSync(
-      join(bin, WIN ? "claude.cmd" : "claude"),
-      WIN ? "@echo off\r\nexit /b 99\r\n" : "#!/bin/sh\nexit 99\n",
-      { mode: 0o755 },
-    );
+    const body = withClaude === "ok"
+      ? (WIN ? "@echo off\r\necho 9.9.9 (fake claude)\r\nexit /b 0\r\n" : "#!/bin/sh\necho '9.9.9 (fake claude)'\nexit 0\n")
+      : (WIN ? "@echo off\r\necho fake claude is broken 1>&2\r\nexit /b 99\r\n" : "#!/bin/sh\necho 'fake claude is broken' >&2\nexit 99\n");
+    writeFileSync(join(bin, WIN ? "claude.cmd" : "claude"), body, { mode: 0o755 });
   }
   return { tmp, home, cfg, bin, cli: join(tmp, "dist", "index.js") };
 }
@@ -92,7 +93,7 @@ function snapshot(dir) {
   return out.sort();
 }
 
-function runDry(sb, args, extraEnv = {}) {
+function runDry(sb, args, { env: extraEnv = {}, unsetConfigDir = false } = {}) {
   const guardLog = join(sb.tmp, "spawn-guard.log");
   const env = {
     ...process.env,
@@ -105,6 +106,7 @@ function runDry(sb, args, extraEnv = {}) {
     ...extraEnv,
   };
   delete env.WICKED_CLAUDE_BIN;
+  if (unsetConfigDir) delete env.CLAUDE_CONFIG_DIR;
   const r = spawnSync(process.execPath, ["--require", GUARD, sb.cli, "install", ...args, "--dry-run"], {
     encoding: "utf8",
     env,
@@ -113,27 +115,36 @@ function runDry(sb, args, extraEnv = {}) {
   return { ...r, guardLog };
 }
 
+const guardEntries = (log) => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+
 function cleanup(sb) {
   rmSync(sb.tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
-function assertDry(sb, r, before) {
+/** The dry-run contract: exit 0, only allow-listed `claude --version` probes spawned, no writes. */
+function assertDry(sb, r, before, { probes }) {
   assert.equal(r.status, 0, `a dry run must exit 0:\n${r.stdout}\n${r.stderr}`);
-  assert.ok(
-    !existsSync(r.guardLog),
-    `a dry run must spawn nothing, but the guard recorded:\n${existsSync(r.guardLog) ? readFileSync(r.guardLog, "utf8") : ""}`,
-  );
+  assertOnlyProbes(r, probes);
   assert.deepEqual(snapshot(sb.home), before, "a dry run must write nothing under HOME");
   assert.match(r.stdout, /Dry run complete — nothing was installed or written/);
 }
 
-test("--dry-run spawns nothing and writes nothing for ANY install type (claude present)", () => {
-  const sb = sandbox({ withClaude: true });
+function assertOnlyProbes(r, probes) {
+  const entries = guardEntries(r.guardLog);
+  const disallowed = entries.filter((e) => !e.allowed);
+  assert.deepEqual(disallowed, [], `a dry run may spawn nothing but \`claude --version\`, but the guard recorded:\n${JSON.stringify(disallowed, null, 2)}`);
+  for (const e of entries) assert.deepEqual(e.args.slice(-1), ["--version"], JSON.stringify(e));
+  if (probes) assert.ok(entries.length > 0, "with claude present the plan is derived from a real `claude --version` probe");
+  else assert.equal(entries.length, 0, "with no claude on PATH nothing at all is spawned");
+}
+
+test("--dry-run spawns nothing but the version probe and writes nothing, for ANY install type (claude present)", () => {
+  const sb = sandbox();
   try {
     const before = snapshot(sb.home);
     const ids = FAKE_REGISTRY.products.map((p) => p.id);
     const r = runDry(sb, ids);
-    assertDry(sb, r, before);
+    assertDry(sb, r, before, { probes: true });
 
     const out = r.stdout;
     assert.match(out, /dry-run: npm install -g fake-global-pkg/);
@@ -144,43 +155,61 @@ test("--dry-run spawns nothing and writes nothing for ANY install type (claude p
     assert.match(out, /download it from the fake site/, "manual instructions still surface in a dry run");
     assert.match(out, /grab the fake binary/);
 
-    // The claude-plugin product plans a REGISTRATION pinned to the active config dir, not a copy.
+    // The claude-plugin product: probes first, then a REGISTRATION plan pinned to the active
+    // config dir — exactly the commands a live run would execute, nothing more.
     const cfg = escapeRe(sb.cfg);
-    assert.match(out, new RegExp(`CLAUDE_CONFIG_DIR=${cfg} claude plugin marketplace add acme/fake-plugin`));
-    assert.match(out, new RegExp(`CLAUDE_CONFIG_DIR=${cfg} claude plugin install fake-plugin@fake-plugin`));
+    assert.match(out, /probe: .*claude(\.cmd)? --version → 9\.9\.9 \(fake claude\)/);
+    assert.match(out, new RegExp(`probe:\\s+${cfg}[\\\\/]plugins[\\\\/]known_marketplaces\\.json → marketplace fake-plugin: not registered`));
+    assert.match(out, new RegExp(`probe:\\s+${cfg}[\\\\/]plugins[\\\\/]installed_plugins\\.json → fake-plugin@fake-plugin: not installed`));
+    assert.match(out, new RegExp(`dry-run:\\s+CLAUDE_CONFIG_DIR=${cfg} claude plugin marketplace add acme/fake-plugin\\s+\\(marketplace not registered\\)`));
+    assert.match(out, new RegExp(`dry-run:\\s+CLAUDE_CONFIG_DIR=${cfg} claude plugin install fake-plugin@fake-plugin\\s+\\(not installed\\)`));
     assert.match(out, new RegExp(`${cfg}[\\\\/]plugins[\\\\/]cache[\\\\/]fake-plugin[\\\\/]fake-plugin[\\\\/]<version>`));
-    assert.doesNotMatch(out, /npx fake-plugin-pkg install/, "with Claude Code present the bare-copy fallback is not the plan");
+    assert.doesNotMatch(out, /dry-run: npx fake-plugin-pkg install/, "with Claude Code present the bare-copy fallback is not the plan");
     assert.doesNotMatch(out, /failed/i);
   } finally {
     cleanup(sb);
   }
 });
 
-test("--dry-run without Claude Code plans the bare-copy fallback and says it is unregistered", () => {
+test("--dry-run without Claude Code spawns nothing and plans the bare-copy fallback, saying it is unregistered", () => {
   const sb = sandbox({ withClaude: false });
   try {
     const before = snapshot(sb.home);
     const r = runDry(sb, ["fake-plugin"]);
-    assertDry(sb, r, before);
+    assertDry(sb, r, before, { probes: false });
     assert.match(r.stdout, /Claude Code CLI not detected/);
     assert.match(r.stdout, /dry-run: npx fake-plugin-pkg install/);
     assert.match(r.stdout, /not registered/);
     assert.doesNotMatch(r.stdout, /claude plugin marketplace add/);
-    // The dependency's plan is printed too (deps first).
-    assert.match(r.stdout, /dry-run: npm install -g fake-global-pkg/);
+    assert.match(r.stdout, /dry-run: npm install -g fake-global-pkg/, "the dependency's plan is printed too (deps first)");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--dry-run with a PRESENT but broken Claude Code fails (exit 1) instead of pretending it is absent", () => {
+  const sb = sandbox({ withClaude: "broken" });
+  try {
+    const before = snapshot(sb.home);
+    const r = runDry(sb, ["fake-plugin"]);
+    assert.equal(r.status, 1, `a broken claude must fail the run:\n${r.stdout}`);
+    assert.match(r.stdout, /--version failed \(exit 99\): fake claude is broken — Claude Code is present but not working/);
+    assert.doesNotMatch(r.stdout, /dry-run: npx fake-plugin-pkg install/, "a broken Claude Code is never a licence to fall back to the bare copy");
+    assertOnlyProbes(r, true);
+    assert.deepEqual(snapshot(sb.home), before, "still no writes");
   } finally {
     cleanup(sb);
   }
 });
 
 test("--claude-home wins over CLAUDE_CONFIG_DIR, is repeatable, and its values are not product ids", () => {
-  const sb = sandbox({ withClaude: true });
+  const sb = sandbox();
   try {
     const a = join(sb.tmp, "home-a");
     const b = join(sb.tmp, "home-b");
     const before = snapshot(sb.home);
     const r = runDry(sb, ["fake-plugin", "--claude-home", a, `--claude-home=${b}`]);
-    assertDry(sb, r, before);
+    assertDry(sb, r, before, { probes: true });
     assert.doesNotMatch(r.stdout, /Unknown products/, "flag values must not be parsed as product ids");
     assert.match(r.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${escapeRe(a)} claude plugin install fake-plugin@fake-plugin`));
     assert.match(r.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${escapeRe(b)} claude plugin install fake-plugin@fake-plugin`));
@@ -192,31 +221,66 @@ test("--claude-home wins over CLAUDE_CONFIG_DIR, is repeatable, and its values a
   }
 });
 
-test("--dry-run reads the existing registration and plans update/skip instead of add/install", () => {
-  const sb = sandbox({ withClaude: true });
+test("an UNSET CLAUDE_CONFIG_DIR means ~/.claude; a set-but-empty one is an error, not a silent fall-through", () => {
+  const sb = sandbox();
+  try {
+    const before = snapshot(sb.home);
+    const unset = runDry(sb, ["fake-plugin"], { unsetConfigDir: true });
+    assertDry(sb, unset, before, { probes: true });
+    assert.match(unset.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${escapeRe(join(sb.home, ".claude"))} claude plugin install fake-plugin@fake-plugin`));
+    assert.match(unset.stdout, /from default ~\/\.claude/);
+
+    for (const bad of ["", "   ", ":", ",", " : , "]) {
+      rmSync(unset.guardLog, { force: true }); // the guard log is per sandbox; judge each run on its own spawns
+      const r = runDry(sb, ["fake-plugin"], { env: { CLAUDE_CONFIG_DIR: bad } });
+      assert.equal(r.status, 1, `CLAUDE_CONFIG_DIR=${JSON.stringify(bad)} must fail:\n${r.stdout}`);
+      assert.match(r.stdout, /CLAUDE_CONFIG_DIR is set but names no directory/);
+      assert.doesNotMatch(r.stdout, /claude plugin (install|marketplace add)/, "no plan is produced for a misconfigured env");
+      assert.deepEqual(guardEntries(r.guardLog), [], "nothing is spawned before the misconfiguration is rejected");
+      assert.deepEqual(snapshot(sb.home), before, "and nothing is written");
+    }
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--dry-run reads the existing registration: no `marketplace add` when present, `update` for a healthy install, `install` to repair a partial one", () => {
+  const sb = sandbox();
   try {
     const pluginsDir = join(sb.cfg, "plugins");
-    mkdirSync(join(pluginsDir, "cache", "fake-plugin", "fake-plugin", "1.2.3"), { recursive: true });
+    const installPath = join(pluginsDir, "cache", "fake-plugin", "fake-plugin", "1.2.3");
+    mkdirSync(join(installPath, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(installPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "fake-plugin", version: "1.2.3" }));
     writeFileSync(join(pluginsDir, "known_marketplaces.json"), JSON.stringify({
       "fake-plugin": { source: { source: "github", repo: "acme/fake-plugin" }, installLocation: join(pluginsDir, "marketplaces", "fake-plugin"), lastUpdated: "2026-01-01T00:00:00.000Z" },
     }));
     writeFileSync(join(pluginsDir, "installed_plugins.json"), JSON.stringify({
       version: 2,
-      plugins: { "fake-plugin@fake-plugin": [{ scope: "user", installPath: join(pluginsDir, "cache", "fake-plugin", "fake-plugin", "1.2.3"), version: "1.2.3" }] },
+      plugins: { "fake-plugin@fake-plugin": [{ scope: "user", installPath, version: "1.2.3" }] },
     }));
-    const before = snapshot(sb.home);
-    const r = runDry(sb, ["fake-plugin"]);
-    assertDry(sb, r, before);
-    assert.match(r.stdout, /marketplace add acme\/fake-plugin\s+\(skip: marketplace already registered, github:acme\/fake-plugin\)/);
-    assert.match(r.stdout, /claude plugin update fake-plugin@fake-plugin\s+\(installed 1\.2\.3\)/);
+    let before = snapshot(sb.home);
+    let r = runDry(sb, ["fake-plugin"]);
+    assertDry(sb, r, before, { probes: true });
+    assert.match(r.stdout, /probe:\s+.*known_marketplaces\.json → marketplace fake-plugin: registered \(github:acme\/fake-plugin\)/);
+    assert.match(r.stdout, /probe:\s+.*installed_plugins\.json → fake-plugin@fake-plugin: 1\.2\.3 \(user\)/);
+    assert.doesNotMatch(r.stdout, /claude plugin marketplace add/, "an already-registered marketplace is not re-added");
+    assert.match(r.stdout, /dry-run:\s+CLAUDE_CONFIG_DIR=.* claude plugin update fake-plugin@fake-plugin\s+\(installed 1\.2\.3\)/);
     assert.doesNotMatch(r.stdout, /claude plugin install fake-plugin@fake-plugin/);
+
+    // Payload gone ⇒ partial ⇒ the plan is `install` (repair), and says why.
+    rmSync(installPath, { recursive: true, force: true });
+    before = snapshot(sb.home);
+    r = runDry(sb, ["fake-plugin"]);
+    assertDry(sb, r, before, { probes: true });
+    assert.match(r.stdout, /dry-run:\s+CLAUDE_CONFIG_DIR=.* claude plugin install fake-plugin@fake-plugin\s+\(install record present but payload dir missing/);
+    assert.doesNotMatch(r.stdout, /claude plugin update/);
   } finally {
     cleanup(sb);
   }
 });
 
 test("--dry-run fails fast on a --source-root with no marketplace manifest (and still writes nothing)", () => {
-  const sb = sandbox({ withClaude: true });
+  const sb = sandbox();
   try {
     const before = snapshot(sb.home);
     const bogus = join(sb.tmp, "not-a-checkout");
@@ -224,7 +288,7 @@ test("--dry-run fails fast on a --source-root with no marketplace manifest (and 
     const r = runDry(sb, ["fake-plugin", "--source-root", bogus]);
     assert.equal(r.status, 1, `a bad --source-root must fail the dry run:\n${r.stdout}`);
     assert.match(r.stdout, /no \.claude-plugin\/marketplace\.json under/);
-    assert.ok(!existsSync(r.guardLog), "still no spawns");
+    assert.deepEqual(guardEntries(r.guardLog), [], "the root is validated before anything is probed");
     assert.deepEqual(snapshot(sb.home), before, "still no writes");
   } finally {
     cleanup(sb);
@@ -244,20 +308,20 @@ test("--dry-run with a valid --source-root but no Claude Code fails instead of p
     assert.match(r.stdout, /--source-root .* has no fallback/);
     // The refusal names the command it is NOT running; only a `dry-run:` line would be a plan to run it.
     assert.doesNotMatch(r.stdout, /dry-run: npx fake-plugin-pkg install/, "no silent fallback to the published package");
-    assert.ok(!existsSync(r.guardLog), "still no spawns");
+    assert.deepEqual(guardEntries(r.guardLog), [], "still no spawns");
     assert.deepEqual(snapshot(sb.home), before, "still no writes");
   } finally {
     cleanup(sb);
   }
 });
 
-test("the shipped registry: `install wicked-garden --dry-run` plans vault + registration and runs nothing", () => {
+test("the shipped registry: `install wicked-garden --dry-run` plans vault + registration and runs only the probe", () => {
   const registry = JSON.parse(readFileSync(join(ROOT, "registry.json"), "utf8"));
-  const sb = sandbox({ withClaude: true, registry });
+  const sb = sandbox({ registry });
   try {
     const before = snapshot(sb.home);
     const r = runDry(sb, ["wicked-garden"]);
-    assertDry(sb, r, before);
+    assertDry(sb, r, before, { probes: true });
     assert.match(r.stdout, /Adding required dependencies: Wicked Vault/);
     assert.match(r.stdout, /dry-run: npm install -g wicked-vault/);
     assert.match(r.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${escapeRe(sb.cfg)} claude plugin marketplace add mikeparcewski/wicked-garden`));
@@ -268,18 +332,30 @@ test("the shipped registry: `install wicked-garden --dry-run` plans vault + regi
   }
 });
 
-test("the guard itself trips on a spawn (so a passing dry-run test is not vacuous)", () => {
-  const log = join(mkdtempSync(join(tmpdir(), "wicked-guard-")), "guard.log");
-  const r = spawnSync(
-    process.execPath,
-    ["--require", GUARD, "--input-type=module", "-e", "import { execa } from 'execa'; await execa('node', ['--version']);"],
-    { encoding: "utf8", cwd: ROOT, env: { ...process.env, SPAWN_GUARD_LOG: log, NODE_OPTIONS: "" }, timeout: 30_000 },
-  );
+test("the guard itself trips on a non-probe spawn and passes `claude --version` through (so a passing dry-run test is not vacuous)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wicked-guard-"));
+  const log = join(dir, "guard.log");
   try {
-    assert.notEqual(r.status, 0, "a guarded spawn must fail");
-    assert.ok(existsSync(log), "and be recorded");
-    assert.match(readFileSync(log, "utf8"), /"cmd":"node"/);
+    const blocked = spawnSync(
+      process.execPath,
+      ["--require", GUARD, "--input-type=module", "-e", "import { execa } from 'execa'; await execa('node', ['--version']);"],
+      { encoding: "utf8", cwd: ROOT, env: { ...process.env, SPAWN_GUARD_LOG: log, NODE_OPTIONS: "" }, timeout: 30_000 },
+    );
+    assert.notEqual(blocked.status, 0, "a guarded spawn must fail");
+    assert.deepEqual(guardEntries(log).map((e) => [e.cmd, e.allowed]), [["node", false]]);
+
+    rmSync(log, { force: true });
+    const allowed = spawnSync(
+      process.execPath,
+      ["--require", GUARD, "--input-type=module", "-e",
+        "import { spawnSync } from 'node:child_process'; const r = spawnSync(process.execPath, [process.argv[1], '--version'], { encoding: 'utf8' }); process.stdout.write(r.stdout);",
+        join(__dirname, "claude-stub.mjs")],
+      { encoding: "utf8", cwd: ROOT, env: { ...process.env, SPAWN_GUARD_LOG: log, NODE_OPTIONS: "" }, timeout: 30_000 },
+    );
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.match(allowed.stdout, /9\.9\.9 \(Claude Code stub\)/, "the allowed probe really ran");
+    assert.deepEqual(guardEntries(log).map((e) => e.allowed), [true]);
   } finally {
-    rmSync(dirname(log), { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -14,6 +14,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { isInstallable } from "./types.js";
+import {
+  claudeBinary,
+  claudePluginSpec,
+  describeVerdict,
+  localMarketplaceUnder,
+  planClaudePlugin,
+  readRegistration,
+  registerClaudePlugin,
+  registrationVerdict,
+  resolveMarketplaceSource,
+  spawnClaude,
+} from "./claude-plugin.js";
+import type { ClaudeConfigDirs, ClaudeSpawner } from "./claude-plugin.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -28,7 +41,9 @@ import { createHash, randomBytes } from "node:crypto";
 // behavior: multi config-dir fan-out, mcpServers wiring into .claude.json, hooks
 // scaffolding, verbs (install|status|uninstall), and install marker v2.
 //
-// Self-contained by design: no imports from other src/ modules, node: builtins only.
+// Nearly self-contained: node: builtins plus two sibling modules — ./types.js
+// (isInstallable) and ./claude-plugin.js (claude-plugin products are REGISTERED through
+// Claude Code's own plugin CLI rather than copied; see installRegisteredPlugin).
 // Cross-platform: path.join everywhere, where/which gated on platform, .cmd spawn
 // rule for npm/npx, atomic tmp+rename with Windows retry, no unix-only shell tricks.
 // ---------------------------------------------------------------------------
@@ -60,6 +75,8 @@ interface InstallAction {
   crate?: string;
   crates?: string[];
   version?: string;
+  marketplace?: string; // claude-plugin: marketplace source for `claude plugin marketplace add`
+  pluginId?: string;    // claude-plugin: `<plugin>@<marketplace>`
 }
 
 interface Product {
@@ -91,6 +108,9 @@ interface Options {
   homeFlags: string[];
   registryPath: string;
   sourceRoot: string;
+  // True when --source-root/WICKED_SOURCE_ROOT was given (a checkout that MUST exist),
+  // false when sourceRoot is the discovered default (used only if it happens to hold one).
+  sourceRootExplicit: boolean;
   dryRun: boolean;
   json: boolean;
   force: boolean;
@@ -288,6 +308,7 @@ function parseArgs(argv: string[]): Options {
   let sourceRoot = process.env.WICKED_SOURCE_ROOT
     ? expandHome(process.env.WICKED_SOURCE_ROOT)
     : findDefaultSourceRoot();
+  let sourceRootExplicit = !!process.env.WICKED_SOURCE_ROOT;
   let dryRun = false;
   let json = false;
   let force = false;
@@ -321,8 +342,10 @@ function parseArgs(argv: string[]): Options {
     } else if (arg === "--source-root" && rest[i + 1]) {
       i += 1;
       sourceRoot = expandHome(rest[i]);
+      sourceRootExplicit = true;
     } else if (arg.startsWith("--source-root=")) {
       sourceRoot = expandHome(arg.slice("--source-root=".length));
+      sourceRootExplicit = true;
     } else if (arg === "--products" && rest[i + 1]) {
       i += 1;
       productIds.push(...rest[i].split(",").map((id) => id.trim()).filter(Boolean));
@@ -342,6 +365,7 @@ function parseArgs(argv: string[]): Options {
     homeFlags,
     registryPath: resolve(registryPath),
     sourceRoot: resolve(sourceRoot),
+    sourceRootExplicit,
     dryRun,
     json,
     force,
@@ -532,14 +556,17 @@ function resolveTargets(options: Options): Resolution {
     return { targets, primary: targets[0].dir, cliPresent: true };
   }
 
-  // 2. CLAUDE_CONFIG_DIR is authoritative and exclusive when set.
-  const env = process.env.CLAUDE_CONFIG_DIR;
-  if (env && env.trim()) {
+  // 2. CLAUDE_CONFIG_DIR is authoritative and exclusive when SET. Set-but-empty ("", blanks,
+  //    a bare ":" or ",") is a misconfiguration, not "unset": falling through to ~/.claude
+  //    would write into a dir the user explicitly steered Claude Code away from.
+  if ("CLAUDE_CONFIG_DIR" in process.env) {
+    const env = process.env.CLAUDE_CONFIG_DIR ?? "";
     const dirs = splitConfigDirValue(env).map((d) => resolve(expandHome(d)));
-    if (dirs.length > 0) {
-      const targets = dirs.map((d) => makeTarget(d, "env"));
-      return { targets, primary: targets[0].dir, cliPresent: true };
+    if (dirs.length === 0) {
+      throw new Error(`CLAUDE_CONFIG_DIR is set but names no directory (value: ${JSON.stringify(env)}) — unset it to use ~/.claude, or point it at a config dir`);
     }
+    const targets = dirs.map((d) => makeTarget(d, "env"));
+    return { targets, primary: targets[0].dir, cliPresent: true };
   }
 
   // 3. Probe the default home, identity-filtered. Only ~/.claude is a config root Claude
@@ -1509,6 +1536,130 @@ function flushMarkerV2(dir: string, marker: MarkerV2, options: Options): void {
 }
 
 // ---------------------------------------------------------------------------
+// claude-plugin products (wicked-garden): REGISTERED through Claude Code's own plugin
+// CLI (src/claude-plugin.ts) — never staged, never copied into skills/, never wired into
+// settings.json or .claude.json. The config-file writes this script still performs are
+// only for products that genuinely need them: the registry `mcp` block (wicked-estate →
+// .claude.json mcpServers) and the skills/hooks assets of non-plugin products.
+// ---------------------------------------------------------------------------
+
+function configDirsFor(target: Target): ClaudeConfigDirs {
+  return { dirs: [target.dir], origin: target.origin === "flag" ? "flag" : target.origin === "env" ? "env" : "default" };
+}
+
+function installRegisteredPlugin(
+  product: Product,
+  options: Options,
+  targets: Target[],
+  markers: Map<string, MarkerV2>,
+): InstallReport {
+  const notes: string[] = [];
+  const actions: Action[] = [];
+  const zero: AssetCounts = { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 };
+  const spec = claudePluginSpec(product);
+  let version: string | undefined;
+  // With --json the report must be the only thing on stdout, so Claude Code's own output is captured.
+  const spawner: ClaudeSpawner = (bin, args, dir, mode) => spawnClaude(bin, args, dir, options.json ? "capture" : mode);
+
+  try {
+    log(options, `Installing ${product.displayName} for Claude (registered plugin)...`);
+
+    // An explicit --source-root must hold the checkout (fail fast, also under --dry-run); the
+    // discovered default root is used only when it happens to hold one, else the published marketplace.
+    const source = options.sourceRootExplicit
+      ? resolveMarketplaceSource(spec, options.sourceRoot)
+      : (localMarketplaceUnder(spec, options.sourceRoot) ?? spec.source);
+
+    // No Claude Code CLI at all: nothing is copied (a bare copy is loaded by nothing) — the
+    // registration is a manual step once Claude Code is installed. A present-but-broken CLI is
+    // an error, raised by the probe inside plan/register below.
+    if (!claudeBinary()) {
+      notes.push(`Claude Code CLI not detected; ${product.displayName} is a Claude Code plugin registered through \`claude plugin install ${spec.pluginId}\` — install Claude Code and re-run. Nothing was copied into the config dir.`);
+      return {
+        productId: product.id,
+        displayName: product.displayName,
+        success: true,
+        skipped: true,
+        message: `${product.displayName}: manual step noted (Claude Code CLI not detected)`,
+        assets: zero,
+        actions,
+        notes,
+      };
+    }
+
+    for (const target of targets) {
+      const marker = markers.get(target.dir);
+      if (!marker) continue;
+      const prev = marker.products[product.id];
+      const mp: MarkerProduct = {
+        version: undefined,
+        installedAt: new Date().toISOString(),
+        lastResult: "partial",
+        assets: { ...zero },
+        files: [],
+        notes: [],
+      };
+      marker.products[product.id] = mp;
+
+      // Migration: an earlier install by this script copied skills/hooks into the config dir. The
+      // registered plugin supersedes them, so remove exactly what the marker recorded (dry-run: planned).
+      if (prev && prev.files.length > 0) {
+        removeMarkerEntry(prev, target, options, actions);
+        mp.notes.push("migrated: removed the legacy skills/hooks copy recorded by the previous install; the plugin is registered with Claude Code instead");
+        notes.push(`${target.dir}: removed the legacy skills/hooks copy (${prev.files.length} recorded path(s)) — superseded by the registered plugin`);
+      }
+
+      const configDirs = configDirsFor(target);
+      if (options.dryRun) {
+        const plan = planClaudePlugin(spec, { configDirs, source, spawner });
+        for (const line of plan.lines) log(options, line.startsWith("probe:") ? `  ${line}` : `  dry-run: ${line}`);
+        for (const c of plan.plans[0]?.commands ?? []) {
+          actions.push({ kind: "acquire", target: spec.pluginId, result: "planned", detail: c.render });
+        }
+        mp.notes.push(`dry-run: would register with Claude Code as ${spec.pluginId}`);
+      } else {
+        const result = registerClaudePlugin(spec, { configDirs, source, spawner, log: (line) => log(options, line) });
+        if (!result.claudeDetected) throw new Error("Claude Code CLI disappeared between detection and registration");
+        version = result.versions[target.dir];
+        for (const rendered of result.ran[target.dir] ?? []) {
+          actions.push({ kind: "acquire", target: spec.pluginId, result: "ok", detail: rendered });
+        }
+        mp.version = version;
+        mp.notes.push(`registered with Claude Code as ${spec.pluginId} ${version} (payload under plugins/cache/${spec.marketplaceName}/${spec.pluginName}/)`);
+      }
+      mp.lastResult = "installed";
+    }
+
+    notes.push(`${options.dryRun ? "would be registered" : "registered"} with Claude Code as ${spec.pluginId}${version ? ` (${version})` : ""}; no skills/, settings.json or .claude.json writes`);
+    if (product.install.mcpInstructions) notes.push(product.install.mcpInstructions);
+    if (targets.length > 1) notes.push(`fanned out to ${targets.length} config dirs`);
+    return {
+      productId: product.id,
+      displayName: product.displayName,
+      success: true,
+      skipped: false,
+      message: `${product.displayName}: ${options.dryRun ? "would register" : "registered"} with Claude Code (${spec.pluginId}${version ? ` ${version}` : ""})`,
+      version,
+      assets: zero,
+      actions,
+      notes,
+    };
+  } catch (err) {
+    return {
+      productId: product.id,
+      displayName: product.displayName,
+      success: false,
+      skipped: false,
+      message: `${product.displayName}: failed: ${err instanceof Error ? err.message : String(err)}`,
+      version,
+      assets: zero,
+      actions,
+      notes,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // install verb
 // ---------------------------------------------------------------------------
 
@@ -1518,6 +1669,8 @@ function installOneInstall(
   targets: Target[],
   markers: Map<string, MarkerV2>,
 ): InstallReport {
+  if (product.type === "claude-plugin") return installRegisteredPlugin(product, options, targets, markers);
+
   const notes: string[] = [];
   const actions: Action[] = [];
   let assets: AssetCounts = { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 };
@@ -1730,6 +1883,15 @@ function runStatus(options: Options, registry: Registry): number {
       let state: string = "current";
       if (entry.lastResult === "partial") state = "partial";
       if (missing.length || modifiedExternally) state = "stale";
+      // A registered plugin's footprint is Claude Code's registration, not files this script
+      // owns: re-derive it from disk so a record whose payload is gone reads stale, not current.
+      const pluginProduct = byId.get(id);
+      if (pluginProduct?.type === "claude-plugin") {
+        const verdict = registrationVerdict(readRegistration(target.dir, claudePluginSpec(pluginProduct)));
+        if (verdict.state !== "registered") state = "stale";
+        if (verdict.state === "unreadable") hadParseError = true;
+        notes.push(`${target.dir}: plugin registration ${describeVerdict(verdict)}`);
+      }
       notes.push(`${target.dir}: ${state} (version ${entry.version ?? "unknown"})`);
       if (modifiedExternally) notes.push(`${target.dir}: modified-externally (json-key drift)`);
     }
@@ -1960,6 +2122,12 @@ function runUninstall(options: Options, registry: Registry): number {
       removeMarkerEntry(entry, target, options, actions);
       if (m.v2) delete m.v2.products[id];
       anyRemoved = true;
+      // The registration itself belongs to Claude Code; this script removes only what it created.
+      const pluginProduct = byId.get(id);
+      if (pluginProduct?.type === "claude-plugin") {
+        const spec = claudePluginSpec(pluginProduct);
+        notes.push(`${target.dir}: the Claude Code plugin registration is not removed by this script — run: CLAUDE_CONFIG_DIR=${target.dir} claude plugin uninstall ${spec.pluginId}`);
+      }
     }
 
     if (options.purgeBinaries) {

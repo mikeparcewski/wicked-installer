@@ -8,7 +8,7 @@
 // 2.1.267 (`claude plugin marketplace list --json`, `claude plugin list --json`).
 //
 //   CLAUDE_STUB_VERSION  the version it "installs" (default 0.0.1-stub)
-//   CLAUDE_STUB_FAIL     make one subcommand exit 1: add | install | update | list
+//   CLAUDE_STUB_FAIL     make one subcommand exit 1: version | add | install | update | list
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
@@ -19,6 +19,11 @@ if (process.env.CLAUDE_STUB_LOG) {
 }
 
 if (argv[0] === "--version") {
+  // A present-but-broken Claude Code: the installer must treat this as an error, not "absent".
+  if (process.env.CLAUDE_STUB_FAIL === "version") {
+    process.stderr.write("stub: claude is broken\n");
+    process.exit(1);
+  }
   process.stdout.write("9.9.9 (Claude Code stub)\n");
   process.exit(0);
 }
