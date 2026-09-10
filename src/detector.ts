@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import type { DetectedCli, Product } from "./types.js";
 import { loadRegistry } from "./registry.js";
+import { claudePluginSpec, findOnPath, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
 
 interface CliSpec {
   id: string;
@@ -197,18 +198,16 @@ export interface CliPresence {
   version?: string;
 }
 
-/** Run the §11.2 two-signal detection for a single CLI slug. */
+/**
+ * Run the §11.2 two-signal detection for a single CLI slug — WITHOUT spawning anything: the
+ * binary is resolved against PATH with filesystem probes only (the same `findOnPath` the Claude
+ * probe uses), the home signal is a marker lookup. No `command -v`/`where`, no `<bin> --version`:
+ * the picker runs this before any selection, also under --dry-run, and a dry run must not start
+ * the user's other CLIs just to list them.
+ */
 export function detectCli(cli: string): CliPresence {
   const spec = DETECT_SPECS[cli] ?? fallbackSpec(cli);
-  let binOnPath = false;
-  let version: string | undefined;
-  for (const bin of spec.bins) {
-    if (commandExists(bin)) {
-      binOnPath = true;
-      version = commandVersion(bin);
-      break;
-    }
-  }
+  const binOnPath = spec.bins.some((bin) => findOnPath(bin) !== undefined);
   const home = homeDetected(spec);
   return {
     cli: spec.cli,
@@ -216,7 +215,6 @@ export function detectCli(cli: string): CliPresence {
     binOnPath,
     homeDetected: home,
     detected: binOnPath || home,
-    version,
   };
 }
 
@@ -279,7 +277,12 @@ export function discoverCliScripts(dir: string): CliScript[] {
  *    something that is not installed — and the safe answer to "is this retired thing present" is
  *    about the PACKAGE, not its leftover data. The archive is deliberately not consulted.
  */
-export function isProductInstalled(productId: string, seen: ReadonlySet<string> = new Set()): boolean {
+export function isProductInstalled(
+  productId: string,
+  seen: ReadonlySet<string> = new Set(),
+  // `--claude-home` dirs: the same target set `status` renders, so the two never disagree.
+  claudeHomes: string[] = [],
+): boolean {
   // The `manual` arm recurses through `requires`, and requires comes from registry.json — data
   // that ships in the package and can be hand-edited or corrupted, exactly like the binary names
   // guarded above. A self-reference (`requires: ["itself"]`) or a cycle (A→B→A) would recurse
@@ -294,14 +297,23 @@ export function isProductInstalled(productId: string, seen: ReadonlySet<string> 
       // Retired, and never a binary: it installed skills into Claude Code's skills dir.
       return existsSync(join(home, ".claude", "skills", "wicked-testing-acceptance-testing")) ||
              existsSync(join(home, ".claude", "skills", "wicked-testing:acceptance-testing"));
-    case "wicked-garden":
-      // A plugin, not a CLI — the manifest is the evidence.
-      return existsSync(join(home, ".claude", "plugins", "wicked-garden", ".claude-plugin", "plugin.json"));
+    case "wicked-garden": {
+      // A plugin, not a CLI — "installed" means Claude Code can LOAD it: fully registered
+      // (marketplace entry + install record + cache payload, see registrationVerdict) in EVERY
+      // active config dir — the same worst-across-dirs aggregate `status` prints. A bare
+      // `plugins/wicked-garden` copy (what the pre-registration installer wrote) or a stale
+      // install record whose payload is gone is NOT installed — `status` explains which it is.
+      const garden = loadRegistry().products.find((p) => p.id === productId);
+      const spec = claudePluginSpec(garden ?? { id: productId, install: {} });
+      return resolveClaudeConfigDirs({ homeFlags: claudeHomes }).dirs.every(
+        (dir) => registrationVerdict(readRegistration(dir, spec)).state === "registered",
+      );
+    }
     case "wicked-brain":
       // Retired. `~/.wicked-brain` is a frozen archive, NOT an install — see the header.
       return commandExists("wicked-brain");
     default:
-      return installedPerRegistry(productId, chain);
+      return installedPerRegistry(productId, chain, claudeHomes);
   }
 }
 
@@ -324,7 +336,7 @@ function commandExistsSafe(name: string): boolean {
 }
 
 /** Detection derived from the product's own `install` spec, so a new product needs no new branch. */
-function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boolean {
+function installedPerRegistry(productId: string, seen: ReadonlySet<string>, claudeHomes: string[]): boolean {
   const product: Product | undefined = loadRegistry().products.find((p) => p.id === productId);
   if (product === undefined) return false;
   const install = product.install;
@@ -359,7 +371,7 @@ function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boo
       // Bad data yields a safe `false`; it never yields an exception.
       const requires = product.requires;
       if (!Array.isArray(requires) || requires.length === 0) return false;
-      return requires.every((r) => typeof r === "string" && isProductInstalled(r, seen));
+      return requires.every((r) => typeof r === "string" && isProductInstalled(r, seen, claudeHomes));
     }
     default:
       return false;

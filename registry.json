@@ -104,6 +104,8 @@
         "type": "npm-run",
         "package": "wicked-garden",
         "command": "install",
+        "marketplace": "mikeparcewski/wicked-garden",
+        "pluginId": "wicked-garden@wicked-garden",
         "mcpInstructions": "Run /wicked-garden-core setup in Claude Code to complete configuration (verifies peers; blocks only on wicked-vault, the one the evidence gate needs)."
       },
       "note": "Opinionated bundle — you get everything. Individual components cannot be disabled."

@@ -2,10 +2,14 @@
 import {
   accessSync,
   chmodSync,
+  copyFileSync,
   constants as fsConstants,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
+  realpathSync,
+  rmdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -13,7 +17,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { isInstallable } from "./types.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -28,7 +31,12 @@ import { createHash, randomBytes } from "node:crypto";
 // behavior: multi config-dir fan-out, mcpServers wiring into .claude.json, hooks
 // scaffolding, verbs (install|status|uninstall), and install marker v2.
 //
-// Self-contained by design: no imports from other src/ modules, node: builtins only.
+// Self-contained by design: no imports from other src/ modules, node: builtins only
+// (INTERFACE.md §15). Claude Code PLUGINS (type "claude-plugin", e.g. wicked-garden) are
+// not installed by this script at all: the central picker registers them through Claude
+// Code's own plugin CLI (src/claude-plugin.ts) after dispatching this script WITHOUT them —
+// see §12.1/§14. Legacy copies an earlier run of this script left behind are reported by the
+// picker and left in place (their removal is tracked separately).
 // Cross-platform: path.join everywhere, where/which gated on platform, .cmd spawn
 // rule for npm/npx, atomic tmp+rename with Windows retry, no unix-only shell tricks.
 // ---------------------------------------------------------------------------
@@ -60,6 +68,8 @@ interface InstallAction {
   crate?: string;
   crates?: string[];
   version?: string;
+  marketplace?: string; // claude-plugin: marketplace source for `claude plugin marketplace add`
+  pluginId?: string;    // claude-plugin: `<plugin>@<marketplace>`
 }
 
 interface Product {
@@ -81,6 +91,12 @@ interface Product {
 interface Registry {
   version: string;
   products: Product[];
+}
+
+// May this product be installed? `design` is unbuilt; `retired` is gone (npm-deprecated).
+// Deliberately duplicated from src/types.ts: this script imports nothing from src/ (§15).
+function isInstallable(p: { status: ProductStatus }): boolean {
+  return p.status !== "design" && p.status !== "retired";
 }
 
 interface Options {
@@ -180,6 +196,8 @@ interface MarkerRaw {
   v2?: MarkerV2;
   legacy?: LegacyMarker;
   corrupt: boolean;
+  // Why the marker did not parse, when `corrupt` — surfaced in the fail-closed diagnostic.
+  reason?: string;
 }
 
 interface Target {
@@ -207,6 +225,8 @@ const COPY_SKIP_SEGMENTS = new Set([
 ]);
 // Claude config-dir identity markers (ANY-of). See §11.1 / §11.2.
 const IDENTITY_MARKERS = ["settings.json", "plugins", "projects"];
+// Legacy (unregistered) Claude Code plugin copies are never removed by this script; their removal is tracked here.
+const LEGACY_CLEANUP_ISSUE = "https://github.com/mikeparcewski/wicked-installer/issues/20";
 
 // ---------------------------------------------------------------------------
 // Paths & platform helpers
@@ -497,13 +517,103 @@ function markerPathFor(dir: string): string {
   return join(markerDirFor(dir), "claude-install.json");
 }
 
+// ---------------------------------------------------------------------------
+// No-follow path access under a trusted root (the config dir, or the home dir for the
+// default MCP state file). EVERY filesystem operation this script performs on a path below
+// a root goes through lstatChainNoFollow first, so no read, write, backup, rename or
+// removal can be redirected through a symlink anywhere in the chain — parents included.
+// The root itself is trusted as the user gave it (CLAUDE_CONFIG_DIR may legitimately be a
+// symlinked directory); everything below it must be real.
+// ---------------------------------------------------------------------------
+
+class UnsafePathError extends Error {
+  constructor(readonly path: string, readonly reason: string) {
+    super(`${path}: ${reason}`);
+    this.name = "UnsafePathError";
+  }
+}
+
+type ChainResult =
+  | { exists: true; abs: string; kind: "dir" | "file" | "other" }
+  | { exists: false; abs: string };
+
+/**
+ * lstat every component of `relPath` below `root`, parents included. Throws UnsafePathError
+ * when any component is a symlink, a parent is not a directory, the path escapes the root
+ * (`..` or absolute), or a component cannot be stat'd for a reason other than absence.
+ * Returns exists:false only when a component is genuinely absent (ENOENT on a non-link
+ * path). Never follows a link.
+ */
+function lstatChainNoFollow(root: string, relPath: string): ChainResult {
+  const normalized = normalizeSlash(relPath);
+  if (isAbsolute(relPath) || /^[A-Za-z]:/.test(normalized)) {
+    throw new UnsafePathError(relPath, "absolute path where a path under the config dir was expected");
+  }
+  const segments = normalized.split("/").filter((seg) => seg !== "" && seg !== ".");
+  if (segments.some((seg) => seg === "..")) throw new UnsafePathError(join(root, relPath), "parent-traversing path");
+  const leaf = join(root, ...segments);
+  let current = root;
+  for (let i = 0; i < segments.length; i += 1) {
+    current = join(current, segments[i]);
+    let st;
+    try {
+      st = lstatSync(current);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return { exists: false, abs: leaf };
+      throw new UnsafePathError(current, `cannot stat (${code ?? String(err)})`);
+    }
+    if (st.isSymbolicLink()) throw new UnsafePathError(current, "is a symlink — refusing to follow it");
+    const isLeaf = i === segments.length - 1;
+    if (!isLeaf && !st.isDirectory()) throw new UnsafePathError(current, "not a directory");
+    if (isLeaf) return { exists: true, abs: current, kind: st.isDirectory() ? "dir" : st.isFile() ? "file" : "other" };
+  }
+  return { exists: true, abs: root, kind: "dir" };
+}
+
+/** The same check for an absolute path known to sit under `root` (escapes throw). */
+function chainUnder(root: string, abs: string): ChainResult {
+  return lstatChainNoFollow(root, relative(root, abs));
+}
+
+/** The trusted root for a config file: the config dir, or the home dir for the default MCP state file. */
+function rootFor(target: Target, abs: string): string {
+  return abs === target.mcpFile ? dirname(abs) : target.dir;
+}
+
+/**
+ * Presence for discovery only. A link or an unstat-able entry is evidence that SOMETHING is
+ * there — so the dir is treated as present and the path is then judged where it is used
+ * (a dangling marker link, for instance, must reach the corrupt-marker diagnostic, not be
+ * mistaken for "no Claude here").
+ */
+function presentNoFollow(root: string, relPath: string): boolean {
+  try {
+    return lstatChainNoFollow(root, relPath).exists;
+  } catch (err) {
+    if (err instanceof UnsafePathError) return true;
+    throw err;
+  }
+}
+
+/** True when `relPath` below `root` exists and is a real (non-link) directory; unsafe chains read as false. */
+function realDirNoFollow(root: string, relPath: string): boolean {
+  try {
+    const state = lstatChainNoFollow(root, relPath);
+    return state.exists && state.kind === "dir";
+  } catch (err) {
+    if (err instanceof UnsafePathError) return false;
+    throw err;
+  }
+}
+
 function hasIdentity(dir: string): boolean {
-  if (!existsSync(dir)) return false;
-  return IDENTITY_MARKERS.some((m) => existsSync(join(dir, m)));
+  if (!existsSync(dir)) return false; // the root itself is trusted as given (it may be a symlinked dir)
+  return IDENTITY_MARKERS.some((m) => presentNoFollow(dir, m));
 }
 
 function dirIsPresent(dir: string): boolean {
-  return hasIdentity(dir) || existsSync(markerPathFor(dir));
+  return hasIdentity(dir) || presentNoFollow(dir, join("wicked-installer", "claude-install.json"));
 }
 
 // Split CLAUDE_CONFIG_DIR on path.delimiter + ',' — ';'+',' on Windows so a bare
@@ -528,18 +638,21 @@ function makeTarget(dir: string, origin: Target["origin"]): Target {
 function resolveTargets(options: Options): Resolution {
   // 1. Explicit flags win as the full set (trusted; created if absent).
   if (options.homeFlags.length > 0) {
-    const targets = options.homeFlags.map((d) => makeTarget(d, "flag"));
+    const targets = [...new Set(options.homeFlags.map((d) => resolve(d)))].map((d) => makeTarget(d, "flag"));
     return { targets, primary: targets[0].dir, cliPresent: true };
   }
 
-  // 2. CLAUDE_CONFIG_DIR is authoritative and exclusive when set.
-  const env = process.env.CLAUDE_CONFIG_DIR;
-  if (env && env.trim()) {
-    const dirs = splitConfigDirValue(env).map((d) => resolve(expandHome(d)));
-    if (dirs.length > 0) {
-      const targets = dirs.map((d) => makeTarget(d, "env"));
-      return { targets, primary: targets[0].dir, cliPresent: true };
+  // 2. CLAUDE_CONFIG_DIR is authoritative and exclusive when SET. Set-but-empty ("", blanks,
+  //    a bare ":" or ",") is a misconfiguration, not "unset": falling through to ~/.claude
+  //    would write into a dir the user explicitly steered Claude Code away from.
+  if ("CLAUDE_CONFIG_DIR" in process.env) {
+    const env = process.env.CLAUDE_CONFIG_DIR ?? "";
+    const dirs = [...new Set(splitConfigDirValue(env).map((d) => resolve(expandHome(d))))]; // `cfg:cfg` is one target, as in the central resolver
+    if (dirs.length === 0) {
+      throw new Error(`CLAUDE_CONFIG_DIR is set but names no directory (value: ${JSON.stringify(env)}) — unset it to use ~/.claude, or point it at a config dir`);
     }
+    const targets = dirs.map((d) => makeTarget(d, "env"));
+    return { targets, primary: targets[0].dir, cliPresent: true };
   }
 
   // 3. Probe the default home, identity-filtered. Only ~/.claude is a config root Claude
@@ -564,7 +677,10 @@ function ensureConfigDir(dir: string, options: Options): void {
     for (const d of dirs) log(options, `  dry-run: mkdir -p ${d}`);
     return;
   }
-  for (const d of dirs) mkdirSync(d, { recursive: true });
+  mkdirSync(dir, { recursive: true }); // the root itself
+  const skills = lstatChainNoFollow(dir, "skills"); // a symlinked skills/ is refused, never followed
+  if (!skills.exists) mkdirSync(skills.abs);
+  else if (skills.kind !== "dir") throw new UnsafePathError(skills.abs, "not a directory");
   accessSync(dir, fsConstants.W_OK);
 }
 
@@ -616,12 +732,15 @@ function renameWithRetry(from: string, to: string): void {
   throw lastErr;
 }
 
-function atomicWriteJson(filePath: string, data: unknown, options: Options): void {
+function atomicWriteJson(root: string, filePath: string, data: unknown, options: Options): void {
   const text = `${JSON.stringify(data, null, 2)}\n`;
   if (options.dryRun) {
     log(options, `  dry-run: write ${filePath}`);
     return;
   }
+  // No component below the root may be a link, and the leaf, if present, must be a regular file.
+  const state = chainUnder(root, filePath);
+  if (state.exists && state.kind !== "file") throw new UnsafePathError(filePath, "not a regular file");
   mkdirSync(dirname(filePath), { recursive: true });
   const tmp = join(dirname(filePath), `${basename(filePath)}.wicked-tmp-${process.pid}-${randomBytes(4).toString("hex")}`);
   writeFileSync(tmp, text);
@@ -632,8 +751,9 @@ const backedUpThisRun = new Set<string>();
 
 function pruneBackups(backupsDir: string, base: string): void {
   try {
-    const matches = readdirSync(backupsDir)
-      .filter((f) => f.startsWith(`${base}.`) && f.endsWith(".bak"))
+    const matches = readdirSync(backupsDir, { withFileTypes: true })
+      .filter((e) => e.isFile() && !e.isSymbolicLink() && e.name.startsWith(`${base}.`) && e.name.endsWith(".bak"))
+      .map((e) => e.name)
       .sort();
     while (matches.length > 5) {
       const oldest = matches.shift();
@@ -644,17 +764,74 @@ function pruneBackups(backupsDir: string, base: string): void {
   }
 }
 
-function backupConfigFile(configDir: string, filePath: string, options: Options): void {
+function backupConfigFile(configDir: string, root: string, filePath: string, options: Options): void {
   if (options.dryRun) return;
-  if (!existsSync(filePath)) return;
-  if (backedUpThisRun.has(filePath)) return;
-  backedUpThisRun.add(filePath);
+  if (backedUpThisRun.has(filePath)) return; // set ONLY after a successful exclusive copy (below)
+  const source = chainUnder(root, filePath);
+  if (!source.exists) return;
+  if (source.kind !== "file") throw new UnsafePathError(filePath, "not a regular file");
   const backupsDir = join(configDir, "wicked-installer", "backups");
-  mkdirSync(backupsDir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backups = lstatChainNoFollow(configDir, join("wicked-installer", "backups"));
+  if (!backups.exists) mkdirSync(backupsDir, { recursive: true });
+  else if (backups.kind !== "dir") throw new UnsafePathError(backupsDir, "not a directory");
+  // The destination LEAF is validated too, never handed to a copy blindly: the predictable
+  // `<base>.<stamp>.bak` is used only when genuinely absent. A link at that leaf (dangling or not)
+  // is neither followed nor replaced, and an existing regular file is not overwritten — either
+  // way a fresh unique name is chosen and validated the same way. A link or other problem in a
+  // PARENT component is refused outright. The copy itself is exclusive (COPYFILE_EXCL).
+  const stamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
   const base = basename(filePath);
-  cpSync(filePath, join(backupsDir, `${base}.${stamp}.bak`), { force: true });
+  let leaf: string | undefined;
+  for (let attempt = 0; attempt < 8 && leaf === undefined; attempt += 1) {
+    const name = attempt === 0 ? `${base}.${stamp}.bak` : `${base}.${stamp}.${randomBytes(4).toString("hex")}.bak`;
+    const candidate = join(backupsDir, name);
+    try {
+      const state = lstatChainNoFollow(configDir, join("wicked-installer", "backups", name));
+      if (!state.exists) leaf = candidate; // occupied (regular file, dir, …) ⇒ next name
+    } catch (err) {
+      if (!(err instanceof UnsafePathError) || err.path !== candidate) throw err;
+      // a link (or an unstat-able entry) AT the leaf ⇒ left alone, next name
+    }
+  }
+  if (leaf === undefined) throw new UnsafePathError(join(backupsDir, `${base}.${stamp}.bak`), "no free backup name after 8 attempts");
+  copyFileSync(filePath, leaf, fsConstants.COPYFILE_EXCL);
+  backedUpThisRun.add(filePath); // a refused or failed backup never marks the file as backed up
   pruneBackups(backupsDir, base);
+}
+
+/**
+ * Back up, then write, a config file. A refused backup (a link or non-regular entry anywhere
+ * in the backups chain, at the leaf, or at the source) FAILS the write it protects: nothing is
+ * written, the `ok` actions that described this write are flipped to `failed` naming the
+ * refusal, and the error propagates so the product is reported failed — a later product that
+ * touches the same file goes through the very same check (nothing is remembered as backed up).
+ */
+function backupThenWrite(target: Target, file: string, data: unknown, options: Options, actions: Action[], describes: (a: Action) => boolean): void {
+  // EVERY failure — a refused path (UnsafePathError) or a plain I/O error (EACCES, ENOSPC, a
+  // failed rename …) in the backup or the write — flips the describing actions to `failed` with
+  // the diagnostic preserved, and propagates; nothing is ever silently swallowed.
+  const fail = (stage: "backup" | "write", err: unknown): never => {
+    const detail = err instanceof UnsafePathError
+      ? `not written — ${stage} refused: ${err.message}`
+      : `not written — ${stage} failed: ${err instanceof Error ? err.message : String(err)}`;
+    for (const a of actions) {
+      if (describes(a) && (a.result === "ok" || a.result === "planned")) {
+        a.result = "failed";
+        a.detail = detail;
+      }
+    }
+    throw new Error(`${file}: ${detail}`);
+  };
+  try {
+    backupConfigFile(target.dir, rootFor(target, file), file, options);
+  } catch (err) {
+    fail("backup", err);
+  }
+  try {
+    atomicWriteJson(rootFor(target, file), file, data, options);
+  } catch (err) {
+    fail("write", err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -951,13 +1128,20 @@ function stageProduct(product: Product, options: Options): PackageSource | undef
   }
 }
 
-function readStagedVersion(root: string): string | undefined {
-  const p = join(root, "package.json");
-  if (!existsSync(p)) return undefined;
+function readStagedVersion(root: string): { version?: string; refused?: string } {
+  let manifest: ChainResult;
   try {
-    return (JSON.parse(readFileSync(p, "utf8")) as { version?: string }).version;
+    manifest = lstatChainNoFollow(root, "package.json"); // no-follow: a symlinked manifest is not read
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    return { refused: err.message };
+  }
+  if (!manifest.exists) return {};
+  if (manifest.kind !== "file") return { refused: `${manifest.abs}: not a regular file` };
+  try {
+    return { version: (JSON.parse(readFileSync(manifest.abs, "utf8")) as { version?: string }).version };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -971,18 +1155,58 @@ function shouldCopy(src: string): boolean {
   return !parts.some((part) => COPY_SKIP_SEGMENTS.has(part));
 }
 
-function copyTree(src: string, dest: string, options: Options): void {
+/**
+ * Copy a source tree (staging / checkout — outside the config dir) to `dest` below `root`
+ * (the config dir). EVERY destination path — each directory and each file leaf — is walked
+ * no-follow through lstatChainNoFollow before it is created or written: a link anywhere is
+ * refused (UnsafePathError), an existing directory is reused, an existing regular file is
+ * unlinked and re-created exclusively (COPYFILE_EXCL). Source symlinks are never copied — a
+ * link is never planted inside the config dir — and are returned so the caller can report them.
+ */
+function copyTree(root: string, src: string, dest: string, options: Options): { skippedLinks: string[] } {
+  const skippedLinks: string[] = [];
   if (options.dryRun) {
     log(options, `  dry-run: copy ${src} -> ${dest}`);
-    return;
+    return { skippedLinks };
   }
-  mkdirSync(dirname(dest), { recursive: true });
-  cpSync(src, dest, { recursive: true, force: true, filter: shouldCopy });
+  const parent = chainUnder(root, dirname(dest));
+  if (!parent.exists) mkdirSync(dirname(dest), { recursive: true }); // every existing component verified real above
+  else if (parent.kind !== "dir") throw new UnsafePathError(dirname(dest), "not a directory");
+
+  const copyEntry = (from: string, to: string): void => {
+    if (!shouldCopy(from)) return;
+    const st = lstatSync(from);
+    if (st.isSymbolicLink()) {
+      skippedLinks.push(from);
+      return;
+    }
+    const state = chainUnder(root, to);
+    if (st.isDirectory()) {
+      if (!state.exists) mkdirSync(to);
+      else if (state.kind !== "dir") throw new UnsafePathError(to, "not a directory");
+      for (const entry of readdirSync(from, { withFileTypes: true })) copyEntry(join(from, entry.name), join(to, entry.name));
+      return;
+    }
+    if (!st.isFile()) return; // sockets, fifos, devices: never copied
+    if (state.exists) {
+      if (state.kind !== "file") throw new UnsafePathError(to, "not a regular file");
+      rmSync(to, { force: true });
+    }
+    copyFileSync(from, to, fsConstants.COPYFILE_EXCL);
+  };
+  copyEntry(src, dest);
+  return { skippedLinks };
 }
 
-function readSkillName(skillDir: string): string | undefined {
+function readSkillName(skillDir: string, root?: string): string | undefined {
   const skillFile = join(skillDir, "SKILL.md");
-  if (!existsSync(skillFile)) return undefined;
+  if (root !== undefined) {
+    // A skill dir inside the config dir: walk it no-follow (source-side staging dirs pass no root).
+    const state = chainUnder(root, skillFile);
+    if (!state.exists || state.kind !== "file") return undefined;
+  } else if (!existsSync(skillFile)) {
+    return undefined;
+  }
   const body = readFileSync(skillFile, "utf8");
   return body.match(/^name:\s*["']?([^"'\n]+)["']?\s*$/m)?.[1]?.trim();
 }
@@ -1000,10 +1224,11 @@ function sanitizePathPart(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function rewriteCopiedSkillName(dest: string, originalName: string | undefined, nextName: string, options: Options): void {
+function rewriteCopiedSkillName(root: string, dest: string, originalName: string | undefined, nextName: string, options: Options): void {
   if (!originalName || originalName === nextName || options.dryRun) return;
   const skillFile = join(dest, "SKILL.md");
-  if (!existsSync(skillFile)) return;
+  const state = chainUnder(root, skillFile);
+  if (!state.exists || state.kind !== "file") return;
   const body = readFileSync(skillFile, "utf8");
   const updated = body.replace(/^name:\s*["']?([^"'\n]+)["']?\s*$/m, `name: ${nextName}`);
   writeFileSync(skillFile, updated);
@@ -1012,40 +1237,65 @@ function rewriteCopiedSkillName(dest: string, originalName: string | undefined, 
 // Prefer platform/<cli>/ content over the generic skill body when present (§7.1).
 // A skill ships skills/<skill>/platform/claude/ with files that REPLACE the generic
 // equivalents; when absent, the generic content is used as-is.
-function skillCopyRoot(skillRoot: string): string {
+function skillCopyRoot(root: string, skillRoot: string): { dir: string; refused?: string } {
   const override = join(skillRoot, "platform", "claude");
-  if (existsSync(join(override, "SKILL.md"))) return override;
-  return skillRoot;
+  try {
+    const manifest = lstatChainNoFollow(root, relative(root, join(override, "SKILL.md")));
+    return { dir: manifest.exists && manifest.kind === "file" ? override : skillRoot };
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    return { dir: skillRoot, refused: err.message };
+  }
 }
 
-function findSkillRoots(skillsDir: string): string[] {
-  if (!existsSync(skillsDir)) return [];
-  const roots: string[] = [];
-  for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-    const direct = join(skillsDir, entry.name);
-    if (existsSync(join(direct, "SKILL.md"))) {
-      roots.push(direct);
-      continue;
-    }
-    roots.push(...findSkillRootsRecursive(direct));
-  }
-  return roots;
+interface SkillDiscovery {
+  roots: string[];
+  /** Source paths behind a symlink (or a non-regular manifest): never read, never copied — reported. */
+  refused: string[];
 }
 
-function findSkillRootsRecursive(dir: string): string[] {
-  const roots: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name.startsWith(".")) continue;
-    const full = join(dir, entry.name);
-    if (!entry.isDirectory()) continue;
-    if (existsSync(join(full, "SKILL.md"))) {
-      roots.push(full);
-    } else {
-      roots.push(...findSkillRootsRecursive(full));
-    }
+/**
+ * Skill roots under `<root>/skills`, walked NO-FOLLOW from the staged source root down: a
+ * symlinked skill dir, a symlinked `SKILL.md` (or one behind a symlinked parent) is refused —
+ * its external contents are never parsed for a name or copied — and reported to the caller.
+ */
+function findSkillRoots(root: string): SkillDiscovery {
+  const out: SkillDiscovery = { roots: [], refused: [] };
+  const skillsDir = join(root, "skills");
+  let top: ChainResult;
+  try {
+    top = lstatChainNoFollow(root, "skills");
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    out.refused.push(skillsDir);
+    return out;
   }
-  return roots;
+  if (!top.exists || top.kind !== "dir") return out;
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith(".")) continue;
+      const full = join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        out.refused.push(full);
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+      const manifestPath = join(full, "SKILL.md");
+      let manifest: ChainResult;
+      try {
+        manifest = lstatChainNoFollow(root, relative(root, manifestPath));
+      } catch (err) {
+        if (!(err instanceof UnsafePathError)) throw err;
+        out.refused.push(manifestPath);
+        continue;
+      }
+      if (manifest.exists && manifest.kind === "file") out.roots.push(full);
+      else if (!manifest.exists) walk(full);
+      else out.refused.push(manifestPath);
+    }
+  };
+  walk(skillsDir);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,11 +1315,12 @@ function skillDirOwner(markerPathRel: string, marker: MarkerV2, selfId: string):
 
 // Two-signal signature: frontmatter name references the product AND the body
 // mentions the product id. A third-party dir squatting the name never matches.
-function skillSignatureMatches(dest: string, productId: string): boolean {
-  const name = readSkillName(dest);
+function skillSignatureMatches(dest: string, productId: string, root: string): boolean {
+  const name = readSkillName(dest, root);
   if (!name) return false;
   const skillFile = join(dest, "SKILL.md");
-  if (!existsSync(skillFile)) return false;
+  const state = chainUnder(root, skillFile);
+  if (!state.exists || state.kind !== "file") return false;
   const body = readFileSync(skillFile, "utf8");
   const nameOwns = name.startsWith(productId) || name.startsWith("wicked-");
   return nameOwns && body.includes(productId);
@@ -1094,19 +1345,35 @@ function installSkills(
   mp: MarkerProduct,
 ): number {
   const skillsDir = join(root, "skills");
-  const roots = findSkillRoots(skillsDir);
+  const discovery = findSkillRoots(root);
+  for (const refused of discovery.refused) {
+    actions.push({ kind: "copy-skill", target: normalizeSlash(relative(root, refused)), result: "skipped", detail: "refused: behind a symlink in the source tree — not read, not copied" });
+  }
+  const roots = discovery.roots;
   let count = 0;
 
   for (const skillRoot of roots) {
     const rel = relative(skillsDir, skillRoot);
-    const originalName = readSkillName(skillRoot);
+    const originalName = readSkillName(skillRoot, root);
     const nextName = claudeSkillName(product.id, originalName ?? "", rel);
     const destName = sanitizePathPart(nextName);
     const dest = join(target.dir, "skills", destName);
     const markerPathRel = toMarkerPath(target.dir, dest);
-    const copyFrom = skillCopyRoot(skillRoot);
+    const copySource = skillCopyRoot(root, skillRoot);
+    if (copySource.refused) {
+      actions.push({ kind: "copy-skill", target: normalizeSlash(relative(root, skillRoot)), result: "skipped", detail: `refused: ${copySource.refused} — skill not read, not copied` });
+      continue;
+    }
+    const copyFrom = copySource.dir;
 
-    if (existsSync(dest) && !options.dryRun) {
+    // Walk the destination no-follow: a symlinked skills/ or dest is refused (UnsafePathError
+    // fails this product's install closed), a non-directory entry is a foreign collision.
+    const destState = options.dryRun ? { exists: false as const, abs: dest } : lstatChainNoFollow(target.dir, join("skills", destName));
+    if (destState.exists && destState.kind !== "dir") {
+      actions.push({ kind: "collision-skipped", target: markerPathRel, result: options.force ? "failed" : "skipped", detail: "foreign entry present (not a directory); rename it and re-run" });
+      continue;
+    }
+    if (destState.exists && !options.dryRun) {
       const owner = skillDirOwner(markerPathRel, marker, product.id);
       if (owner && owner !== product.id) {
         if (options.force) {
@@ -1117,7 +1384,7 @@ function installSkills(
           actions.push({ kind: "collision-skipped", target: markerPathRel, result: "skipped", detail: `owned by ${owner}` });
           continue;
         }
-      } else if (!owner && !skillSignatureMatches(dest, product.id)) {
+      } else if (!owner && !skillSignatureMatches(dest, product.id, target.dir)) {
         // Genuinely foreign dir: never overwrite, even with --force.
         actions.push({
           kind: "collision-skipped",
@@ -1132,8 +1399,11 @@ function installSkills(
       }
     }
 
-    copyTree(copyFrom, dest, options);
-    rewriteCopiedSkillName(dest, originalName, nextName, options);
+    const copied = copyTree(target.dir, copyFrom, dest, options);
+    if (copied.skippedLinks.length > 0) {
+      actions.push({ kind: "copy-skill", target: markerPathRel, result: "skipped", detail: `symlinks in the source were not copied (a link is never planted in the config dir): ${copied.skippedLinks.map((l) => relative(copyFrom, l)).join(", ")}` });
+    }
+    rewriteCopiedSkillName(target.dir, dest, originalName, nextName, options);
     mp.files.push({ kind: "dir", path: markerPathRel });
     actions.push({ kind: "copy-skill", target: markerPathRel, result: options.dryRun ? "planned" : "ok" });
     count += 1;
@@ -1142,10 +1412,12 @@ function installSkills(
   // Compat shim: wicked-testing version stamp read by downstream wg-check consumers.
   if (product.id === "wicked-testing") {
     const stampAbs = join(target.dir, "skills", ".wicked-testing-version");
-    const ver = readStagedVersion(root) ?? "";
+    const ver = readStagedVersion(root).version ?? "";
     if (options.dryRun) {
       log(options, `  dry-run: write ${stampAbs}`);
     } else {
+      const stamp = lstatChainNoFollow(target.dir, join("skills", ".wicked-testing-version"));
+      if (stamp.exists && stamp.kind !== "file") throw new UnsafePathError(stampAbs, "not a regular file");
       mkdirSync(dirname(stampAbs), { recursive: true });
       writeFileSync(stampAbs, `${ver}\n`);
     }
@@ -1189,7 +1461,18 @@ function wireMcp(
   const fileMarker = toMarkerPath(target.dir, file);
   let obj: Record<string, unknown> = {};
 
-  if (existsSync(file)) {
+  let fileState: ChainResult;
+  try {
+    fileState = chainUnder(rootFor(target, file), file);
+    if (fileState.exists && fileState.kind !== "file") throw new UnsafePathError(file, "not a regular file");
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    actions.push({ kind: "write-json-key", target: fileMarker, result: "failed", detail: `refused: ${err.reason}` });
+    notes.push(`mcp wiring skipped: ${err.message}`);
+    return 0;
+  }
+
+  if (fileState.exists) {
     let text: string;
     try {
       text = readFileSync(file, "utf8");
@@ -1274,8 +1557,7 @@ function wireMcp(
 
   if (changed) {
     obj.mcpServers = serverMap;
-    backupConfigFile(target.dir, file, options);
-    atomicWriteJson(file, obj, options);
+    backupThenWrite(target, file, obj, options, actions, (a) => a.kind === "write-json-key" && a.target.startsWith(fileMarker));
   }
 
   return count;
@@ -1305,20 +1587,50 @@ function wireHooks(
   notes: string[],
   mp: MarkerProduct,
 ): number {
+  // The source manifest is walked NO-FOLLOW from the staged source root: a symlinked
+  // hooks.json (or a symlinked hooks/ parent) is never read — its external contents would
+  // otherwise be parsed and written into settings.json — and is reported instead.
   const hooksJson = join(root, "hooks", "hooks.json");
-  if (!existsSync(hooksJson)) return 0;
+  let hooksState: ChainResult;
+  try {
+    hooksState = lstatChainNoFollow(root, join("hooks", "hooks.json"));
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    actions.push({ kind: "merge-hook", target: `${product.id}/hooks/hooks.json`, result: "skipped", detail: `refused: source manifest ${err.message} — not read, hooks not wired` });
+    notes.push(`${product.id}: hooks/hooks.json in the source is behind a symlink — refused, nothing read or wired`);
+    return 0;
+  }
+  if (!hooksState.exists) return 0;
+  if (hooksState.kind !== "file") {
+    actions.push({ kind: "merge-hook", target: `${product.id}/hooks/hooks.json`, result: "skipped", detail: "refused: source manifest is not a regular file — not read, hooks not wired" });
+    return 0;
+  }
 
-  // 1. Copy the product payload to an owned root (replace-on-install).
+  // 1. Copy the product payload to an owned root (replace-on-install) — walked no-follow first.
   const payloadRoot = join(target.dir, "wicked-installer", "products", product.id);
   if (!options.dryRun) {
-    rmSync(payloadRoot, { recursive: true, force: true });
+    let payloadState: ChainResult;
+    try {
+      payloadState = lstatChainNoFollow(target.dir, join("wicked-installer", "products", product.id));
+      if (payloadState.exists && payloadState.kind !== "dir") throw new UnsafePathError(payloadRoot, "not a directory");
+    } catch (err) {
+      if (!(err instanceof UnsafePathError)) throw err;
+      actions.push({ kind: "merge-hook", target: toMarkerPath(target.dir, payloadRoot), result: "failed", detail: `refused: ${err.reason}` });
+      notes.push(`hooks wiring skipped: ${err.message}`);
+      return 0;
+    }
+    if (payloadState.exists) rmSync(payloadRoot, { recursive: true, force: true });
     mkdirSync(payloadRoot, { recursive: true });
   } else {
     log(options, `  dry-run: refresh payload ${payloadRoot}`);
   }
   for (const sibling of ["hooks", "lib", "scenarios", "schemas", "scripts", "bin"]) {
     const src = join(root, sibling);
-    if (existsSync(src)) copyTree(src, join(payloadRoot, sibling), options);
+    if (!existsSync(src)) continue;
+    const copied = copyTree(target.dir, src, join(payloadRoot, sibling), options);
+    if (copied.skippedLinks.length > 0) {
+      notes.push(`${product.id}: symlinks in the source were not copied into ${payloadRoot} (a link is never planted in the config dir): ${copied.skippedLinks.map((l) => relative(root, l)).join(", ")}`);
+    }
   }
   mp.files.push({ kind: "dir", path: toMarkerPath(target.dir, payloadRoot) });
   actions.push({ kind: "merge-hook", target: toMarkerPath(target.dir, payloadRoot), result: options.dryRun ? "planned" : "ok", detail: "payload copied" });
@@ -1334,10 +1646,20 @@ function wireHooks(
   const eventsRaw = hooksDef.hooks && typeof hooksDef.hooks === "object" ? hooksDef.hooks : hooksDef;
   const events = eventsRaw as Record<string, unknown>;
 
-  // 3. Merge into <target>/settings.json event arrays.
+  // 3. Merge into <target>/settings.json event arrays — the file walked no-follow.
   const settingsFile = join(target.dir, "settings.json");
   let settings: Record<string, unknown> = {};
-  if (existsSync(settingsFile)) {
+  let settingsState: ChainResult;
+  try {
+    settingsState = lstatChainNoFollow(target.dir, "settings.json");
+    if (settingsState.exists && settingsState.kind !== "file") throw new UnsafePathError(settingsFile, "not a regular file");
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    actions.push({ kind: "merge-hook", target: toMarkerPath(target.dir, settingsFile), result: "failed", detail: `refused: ${err.reason}` });
+    notes.push(`hooks wiring skipped: ${err.message}`);
+    return 0;
+  }
+  if (settingsState.exists) {
     try {
       settings = JSON.parse(readFileSync(settingsFile, "utf8")) as Record<string, unknown>;
     } catch {
@@ -1367,8 +1689,8 @@ function wireHooks(
 
   if (count > 0) {
     settings.hooks = settingsHooks;
-    backupConfigFile(target.dir, settingsFile, options);
-    atomicWriteJson(settingsFile, settings, options);
+    const settingsMarker = toMarkerPath(target.dir, settingsFile);
+    backupThenWrite(target, settingsFile, settings, options, actions, (a) => a.kind === "merge-hook" && a.target.startsWith(`${settingsMarker}#`));
   }
 
   return count;
@@ -1414,8 +1736,22 @@ function purgeStaleArtifacts(
   const purge = (abs: string, markerPath: string, detail: string): void => {
     const key = normalizeSlash(markerPath);
     if (done.has(key)) return;
+    if (!strictlyInside(target.dir, abs)) {
+      done.add(key);
+      actions.push({ kind: "migrate-removed", target: markerPath, result: "failed", detail: "refused: path is not strictly inside the config dir — nothing removed" });
+      return;
+    }
     if (isSharedDiscoveryDir(target.dir, abs)) return; // never delete a shared discovery dir itself
-    if (!existsSync(abs)) return;
+    let state: ChainResult;
+    try {
+      state = chainUnder(target.dir, abs);
+    } catch (err) {
+      if (!(err instanceof UnsafePathError)) throw err;
+      done.add(key);
+      actions.push({ kind: "migrate-removed", target: markerPath, result: "skipped", detail: `refused: ${err.reason}` });
+      return;
+    }
+    if (!state.exists) return;
     done.add(key);
     if (options.dryRun) {
       log(options, `  dry-run: purge ${abs}`);
@@ -1449,8 +1785,9 @@ function purgeStaleArtifacts(
 
   // 2. Naming-heuristic (pre-marker migration): this product's own agents/ + commands/.
   const agentsDir = join(target.dir, "agents");
-  if (existsSync(agentsDir)) {
+  if (realDirNoFollow(target.dir, "agents")) {
     for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
       if (entry.isFile() && entry.name.endsWith(".md") && ownedName(entry.name)) {
         const abs = join(agentsDir, entry.name);
         purge(abs, toMarkerPath(target.dir, abs), "agent (heuristic)");
@@ -1458,8 +1795,9 @@ function purgeStaleArtifacts(
     }
   }
   const commandsDir = join(target.dir, "commands");
-  if (existsSync(commandsDir)) {
+  if (realDirNoFollow(target.dir, "commands")) {
     for (const entry of readdirSync(commandsDir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
       if (ownedName(entry.name)) {
         const abs = join(commandsDir, entry.name);
         purge(abs, toMarkerPath(target.dir, abs), "command (heuristic)");
@@ -1472,45 +1810,239 @@ function purgeStaleArtifacts(
 // Install marker read / init / flush
 // ---------------------------------------------------------------------------
 
-function isMarkerV2(value: unknown): value is MarkerV2 {
-  return !!value && typeof value === "object" && (value as { markerVersion?: unknown }).markerVersion === 2;
+const isPlainObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * Structural validation of a v2 marker, field by field, for everything install / status /
+ * uninstall consume: every product record (`installedAt`, `lastResult`, optional `version` /
+ * `source` / `assets`, `files`, `notes`) and every file record (`dir`/`file` → `path`;
+ * `json-key` → `file`, `pointer`, `wroteHash`; `hooks-entry` → `file`, `event`,
+ * `ownerMatch.commandContains`). Returns the first problem, or undefined when the marker is
+ * sound — a malformed record makes the whole marker unusable (fail closed) rather than
+ * something a consumer trips over after the run has started writing.
+ */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/; // C0, DEL and C1
+const UNSAFE_ID_CHARS = /[\\/\s\u0000-\u001f\u007f-\u009f]/;
+
+/** A product id as a marker key / v1 `id`: it becomes a path segment (`commands/<id>`, `<id>-*`), so exactly one safe segment. */
+function isSafeMarkerId(value: unknown): value is string {
+  return typeof value === "string" && value !== "" && value !== "." && value !== ".." && !value.startsWith(".") && !UNSAFE_ID_CHARS.test(value);
+}
+
+/**
+ * A marker-recorded path that a removal may act on (`dir`/`file` → `path`): a non-empty RELATIVE
+ * path with no empty, `.` or `..` segment, no leading separator or drive, no `~`, no control
+ * characters, that resolves strictly INSIDE the config dir (checked on the normalized value,
+ * never on a realpath). Anything else — `""`, `skills/..`, `/abs`, `a/../..` — would resolve to
+ * the config dir itself or above it and reach a recursive removal, so it makes the marker unusable.
+ */
+function markerPathProblem(value: unknown, dir: string): string | undefined {
+  if (typeof value !== "string") return "not a string";
+  if (value === "") return "empty";
+  if (CONTROL_CHARS.test(value)) return "contains control characters";
+  // Segments are judged on the RAW value (each `/` or `\\` is a boundary — nothing is collapsed), so
+  // `skills//x`, a leading separator, `.` and `..` are all refused before any normalisation.
+  const segments = value.split(/[\\/]/);
+  if (isAbsolute(value) || /^[A-Za-z]:/.test(value) || value.startsWith("~")) return "not a relative path";
+  if (segments.some((seg) => seg === "" || seg === "." || seg === "..")) return "has an empty, `.` or `..` segment";
+  const rel = relative(dir, resolve(dir, ...segments));
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return "does not resolve strictly inside the config dir";
+  return undefined;
+}
+
+/** A recorded config FILE (`json-key`/`hooks-entry` → `file`): inside the config dir, or exactly the target's MCP state file. */
+function markerFileProblem(value: unknown, dir: string): string | undefined {
+  if (typeof value === "string" && value === toMarkerPath(dir, mcpFileFor(dir))) return undefined;
+  return markerPathProblem(value, dir);
+}
+
+/**
+ * Structural validation of a v2 marker, field by field, for everything install / status /
+ * uninstall consume: every product record (`installedAt`, `lastResult`, optional `version` /
+ * `source` / `assets`, `files`, `notes`) and every file record (`dir`/`file` → `path`;
+ * `json-key` → `file`, `pointer`, `wroteHash`; `hooks-entry` → `file`, `event`,
+ * `ownerMatch.commandContains`), plus every value a removal could act on: product keys are safe
+ * path segments, recorded paths resolve strictly inside `dir`, owner keys are substantive.
+ * Returns the first problem, or undefined when the marker is sound — a malformed record makes
+ * the whole marker unusable (fail closed) rather than something a consumer trips over after the
+ * run has started writing or removing.
+ */
+function markerV2Problem(value: unknown, dir: string): string | undefined {
+  if (!isPlainObject(value) || value.markerVersion !== 2) return "not a markerVersion 2 object";
+  if (value.cli !== "claude") return "cli: missing or not \"claude\"";
+  if (typeof value.configDir !== "string") return "configDir: missing or not a string";
+  if (typeof value.updatedAt !== "string") return "updatedAt: missing or not a string";
+  if (value.installerVersion !== undefined && typeof value.installerVersion !== "string") return "installerVersion: not a string";
+  if (!isPlainObject(value.products)) return "products: not an object map";
+  const str = (v: unknown): v is string => typeof v === "string";
+  for (const [id, rec] of Object.entries(value.products)) {
+    const at = `products.${JSON.stringify(id)}`;
+    if (!isSafeMarkerId(id)) return `${at}: product id is not a safe path segment`;
+    if (!isPlainObject(rec)) return `${at}: not an object`;
+    if (rec.version !== undefined && !str(rec.version)) return `${at}.version: not a string`;
+    if (!str(rec.installedAt)) return `${at}.installedAt: missing or not a string`;
+    if (rec.source !== undefined && rec.source !== "local" && rec.source !== "npm-pack" && rec.source !== "git") return `${at}.source: unknown value`;
+    if (rec.lastResult !== "installed" && rec.lastResult !== "partial" && rec.lastResult !== "failed") return `${at}.lastResult: unknown value`;
+    if (rec.assets !== undefined && !(isPlainObject(rec.assets) && Object.values(rec.assets).every((n) => Number.isInteger(n) && (n as number) >= 0))) return `${at}.assets: not a map of non-negative integer counts`;
+    if (!Array.isArray(rec.notes) || !rec.notes.every(str)) return `${at}.notes: missing or not an array of strings`;
+    if (!Array.isArray(rec.files)) return `${at}.files: missing or not an array`;
+    for (let i = 0; i < rec.files.length; i += 1) {
+      const f: unknown = rec.files[i];
+      const fat = `${at}.files[${i}]`;
+      if (!isPlainObject(f)) return `${fat}: not an object`;
+      switch (f.kind) {
+        case "dir":
+        case "file": {
+          const problem = markerPathProblem(f.path, dir);
+          if (problem) return `${fat}.path: ${problem}`;
+          break;
+        }
+        case "json-key": {
+          const problem = markerFileProblem(f.file, dir);
+          if (problem) return `${fat}.file: ${problem}`;
+          if (!str(f.pointer) || f.pointer === "" || !f.pointer.startsWith("/") || CONTROL_CHARS.test(f.pointer)) return `${fat}.pointer: not a non-empty JSON pointer`;
+          if (!str(f.wroteHash) || f.wroteHash === "") return `${fat}.wroteHash: missing or empty`;
+          break;
+        }
+        case "hooks-entry": {
+          const problem = markerFileProblem(f.file, dir);
+          if (problem) return `${fat}.file: ${problem}`;
+          if (!str(f.event) || f.event === "" || CONTROL_CHARS.test(f.event)) return `${fat}.event: missing or empty`;
+          if (!isPlainObject(f.ownerMatch) || !str(f.ownerMatch.commandContains)) return `${fat}.ownerMatch.commandContains: missing or not a string`;
+          const owner = f.ownerMatch.commandContains;
+          if (CONTROL_CHARS.test(owner)) return `${fat}.ownerMatch.commandContains: contains control characters`;
+          if (owner.length < 8) return `${fat}.ownerMatch.commandContains: too short to identify an owner (min 8 chars)`;
+          break;
+        }
+        default:
+          return `${fat}.kind: unknown record kind ${JSON.stringify(f.kind)}`;
+      }
+    }
+  }
+  return undefined;
+}
+
+function isMarkerV2(value: unknown, dir: string): value is MarkerV2 {
+  return markerV2Problem(value, dir) === undefined;
+}
+
+/** A v1 marker: an object whose optional `products` is an array of objects carrying a string `id`. */
+function isLegacyMarker(value: unknown): value is LegacyMarker {
+  if (!isPlainObject(value) || value.markerVersion !== undefined) return false;
+  if (value.products === undefined) return true;
+  // Each `id` becomes a path segment in the heuristic uninstall (`commands/<id>`, `<id>-*`): one safe segment or the marker is unusable.
+  return Array.isArray(value.products) && value.products.every((p) => isPlainObject(p) && isSafeMarkerId(p.id));
 }
 
 function readMarkerRaw(dir: string): MarkerRaw {
   const p = markerPathFor(dir);
-  if (!existsSync(p)) return { corrupt: false };
+  // The whole chain below the config dir — `wicked-installer/` included — is walked no-follow:
+  // a symlinked parent or leaf (dangling or not), a non-regular file, or an unstat-able
+  // component makes the marker unusable, so install fails closed and nothing at that path is
+  // ever followed, created or replaced. Only a genuinely absent path is "no marker".
+  let state: ChainResult;
+  try {
+    state = lstatChainNoFollow(dir, join("wicked-installer", "claude-install.json"));
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    return { corrupt: true, reason: err.message };
+  }
+  if (!state.exists) return { corrupt: false };
+  if (state.kind !== "file") return { corrupt: true, reason: `${p}: not a regular file` };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(p, "utf8"));
-  } catch {
-    return { corrupt: true };
+  } catch (err) {
+    return { corrupt: true, reason: err instanceof Error ? err.message : String(err) };
   }
-  if (isMarkerV2(parsed)) return { v2: parsed, corrupt: false };
-  return { legacy: parsed as LegacyMarker, corrupt: false };
+  if (isPlainObject(parsed) && parsed.markerVersion === 2) {
+    const problem = markerV2Problem(parsed, dir);
+    if (problem !== undefined) return { corrupt: true, reason: `malformed v2 marker: ${problem}` };
+    return { v2: parsed as unknown as MarkerV2, corrupt: false };
+  }
+  // Any other valid JSON must be a v1 marker of the shape consumers index; anything else
+  // (`{"products": {}}`, an array, a string, a `markerVersion: 2` without a products map …)
+  // would crash a consumer instead of failing closed — so it is unusable, like invalid JSON.
+  if (isLegacyMarker(parsed)) return { legacy: parsed, corrupt: false };
+  return { corrupt: true, reason: "unrecognised marker shape (neither a v2 marker with a products map nor a v1 marker with a products array)" };
+}
+
+/**
+ * An existing marker that does not parse is a stop, not a blank slate: overwriting it would
+ * destroy the ownership/uninstall records it holds, and this script never renames or rewrites
+ * a file it cannot read. The install fails closed and the bytes stay untouched.
+ */
+function corruptMarkerMessage(dir: string, reason?: string, verb: "install" | "uninstall" = "install"): string {
+  const why = reason ? ` (${reason})` : "";
+  if (verb === "uninstall") {
+    return `${markerPathFor(dir)}: install marker is unusable${why} — refusing to uninstall: the manifest of what this installer wrote cannot be trusted, so nothing was removed anywhere. Fix or move the file, then re-run.`;
+  }
+  return `${markerPathFor(dir)}: install marker is unusable${why} — refusing to install: continuing would overwrite it and lose the ownership/uninstall records it holds. Fix or move the file, then re-run. Nothing was written.`;
 }
 
 function loadOrInitMarker(dir: string): MarkerV2 {
   const raw = readMarkerRaw(dir);
   if (raw.v2) return raw.v2;
-  // Fresh v2 (a pre-existing v1/legacy marker is replaced; its on-disk assets are
-  // reconciled forward as products get re-installed).
+  if (raw.corrupt) throw new Error(corruptMarkerMessage(dir, raw.reason)); // backstop — runInstall checks first
+  // Fresh v2. A pre-existing v1/legacy marker is upgraded, not dropped (§10.2): every product
+  // entry it lists is carried forward as a v2 entry with no file manifest — the bookkeeping that
+  // something was installed survives, and nothing is deleted on the strength of the upgrade.
+  const products: Record<string, MarkerProduct> = {};
+  for (const p of raw.legacy?.products ?? []) {
+    if (!p || typeof p.id !== "string") continue;
+    const legacyNotes = Array.isArray(p.notes) ? p.notes.filter((n): n is string => typeof n === "string") : [];
+    products[p.id] = {
+      installedAt: raw.legacy?.installedAt ?? new Date().toISOString(),
+      lastResult: p.success === false ? "failed" : "installed",
+      // Only non-negative integer counts are carried forward: the upgraded record must itself pass
+      // markerV2Problem on the next run, so a v1 `assets: { skills: "x" }` is dropped, not copied.
+      assets: isPlainObject(p.assets)
+        ? Object.fromEntries(Object.entries(p.assets).filter((kv): kv is [string, number] => Number.isInteger(kv[1]) && (kv[1] as number) >= 0))
+        : undefined,
+      files: [],
+      notes: [...legacyNotes, "carried forward from a v1 marker: no file manifest (exact uninstall unavailable — re-run install to upgrade bookkeeping)"],
+    };
+  }
   return {
     markerVersion: 2,
     cli: "claude",
     configDir: dir,
     installerVersion: installerVersion(),
     updatedAt: new Date().toISOString(),
-    products: {},
+    products,
   };
 }
 
 function flushMarkerV2(dir: string, marker: MarkerV2, options: Options): void {
-  atomicWriteJson(markerPathFor(dir), marker, options);
+  atomicWriteJson(dir, markerPathFor(dir), marker, options);
 }
 
 // ---------------------------------------------------------------------------
 // install verb
 // ---------------------------------------------------------------------------
+
+/**
+ * A Claude Code PLUGIN (wicked-garden) is not installed by this script. Copying it into
+ * skills/ or wiring its hooks would produce a copy Claude Code never loads; registering it
+ * needs Claude Code's own plugin CLI, which the central picker drives through the shared
+ * mechanism (src/claude-plugin.ts) AFTER this script has run — this script stays
+ * self-contained (§15) and writes nothing for the product. Reported as a manual step so a
+ * direct invocation still says what to do.
+ */
+function pluginManagedCentrally(product: Product): InstallReport {
+  return {
+    productId: product.id,
+    displayName: product.displayName,
+    success: true,
+    skipped: true,
+    message: `${product.displayName}: Claude Code plugin — registered by the central installer, not copied by this script`,
+    assets: { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 },
+    actions: [],
+    notes: [
+      `run \`npx wicked-installer install ${product.id}\` (or the interactive installer) to register it through \`claude plugin marketplace add\` + \`claude plugin install\`; this script writes no skills/, settings.json or .claude.json entries for plugins`,
+    ],
+  };
+}
 
 function installOneInstall(
   product: Product,
@@ -1518,6 +2050,8 @@ function installOneInstall(
   targets: Target[],
   markers: Map<string, MarkerV2>,
 ): InstallReport {
+  if (product.type === "claude-plugin") return pluginManagedCentrally(product);
+
   const notes: string[] = [];
   const actions: Action[] = [];
   let assets: AssetCounts = { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 };
@@ -1530,7 +2064,15 @@ function installOneInstall(
     notes.push(...installProductBinaries(product, options, actions));
 
     source = stageProduct(product, options);
-    version = source ? readStagedVersion(source.root) : undefined;
+    if (source) {
+      const staged = readStagedVersion(source.root);
+      version = staged.version;
+      if (staged.refused) {
+        // Treated like every other refused source manifest: named, never read, the install goes on without a version.
+        actions.push({ kind: "acquire", target: `${product.id}/package.json`, result: "skipped", detail: `refused: source manifest ${staged.refused} — not read, version unknown` });
+        notes.push(`${product.id}: package.json in the source is behind a symlink — refused, version unknown`);
+      }
+    }
 
     let lastSkills = 0;
     let lastMcp = 0;
@@ -1618,6 +2160,21 @@ function runInstall(options: Options, registry: Registry): number {
   const products = resolveProducts(registry, options.productIds, options.all);
   const resolution = resolveTargets(options);
 
+  // Fail closed on an unparseable marker BEFORE anything is staged, copied, deleted or written
+  // (also under --dry-run, §13.4): the diagnostic names the file and the cause; its bytes stay as they are.
+  for (const target of resolution.targets) {
+    const raw = readMarkerRaw(target.dir);
+    if (raw.corrupt) throw new Error(corruptMarkerMessage(target.dir, raw.reason));
+  }
+
+  // Only Claude Code plugins selected (after dependency expansion): this script owns none of that
+  // work (§12.1), so it must not create the config dir, initialise or upgrade the marker, or flush
+  // it — a manual-step report per product and nothing written.
+  if (products.every((p) => p.type === "claude-plugin")) {
+    emitReport(options, "install", resolution, products.map(pluginManagedCentrally));
+    return 0;
+  }
+
   if (!resolution.cliPresent && resolution.targets[0].origin === "fallback") {
     log(options, `Claude command/home not detected; creating ${resolution.primary} because Claude was selected.`);
   }
@@ -1671,8 +2228,22 @@ function runStatus(options: Options, registry: Registry): number {
   if (options.all) selected = [...idsPresent];
   else if (options.productIds.length) selected = options.productIds;
   else selected = [...idsPresent];
+  // Claude Code plugins are not this script's (§12.1): their registration is reported by the
+  // central installer's `status`, and a marker entry for one can only be a legacy copy an
+  // earlier run left behind — so they are not reported here at all.
+  selected = selected.filter((id) => byId.get(id)?.type !== "claude-plugin");
 
+  // Marker corruption is a property of the config dir, not of any product selection: an
+  // unparseable marker contributes no ids, so a plain `status` or `--all` would otherwise pass it
+  // by. Report it (on stderr, so --json stdout stays pure) and fail the query regardless.
   let hadParseError = false;
+  for (const target of resolution.targets) {
+    const m = markerByTarget.get(target.dir);
+    if (m?.corrupt) {
+      hadParseError = true;
+      console.error(`${markerPathFor(target.dir)}: install marker is unusable${m.reason ? ` (${m.reason})` : ""} — status cannot describe this config dir; fix or move the file`);
+    }
+  }
   const reports: InstallReport[] = [];
 
   for (const id of selected) {
@@ -1704,14 +2275,24 @@ function runStatus(options: Options, registry: Registry): number {
       }
       anyPresent = true;
 
+      // Recorded paths are judged no-follow: a link (or an escape) where a file/dir was recorded
+      // counts as missing / externally modified — never followed to see what is behind it.
+      const recordedPresent = (root: string, abs: string): boolean => {
+        try {
+          return chainUnder(root, abs).exists;
+        } catch (err) {
+          if (err instanceof UnsafePathError) return false;
+          throw err;
+        }
+      };
       const missing = entry.files.filter(
-        (f) => (f.kind === "dir" || f.kind === "file") && !existsSync(fromMarkerPath(target.dir, f.path)),
+        (f) => (f.kind === "dir" || f.kind === "file") && !recordedPresent(target.dir, fromMarkerPath(target.dir, f.path)),
       );
       let modifiedExternally = false;
       for (const f of entry.files) {
         if (f.kind !== "json-key") continue;
         const abs = fromMarkerPath(target.dir, f.file);
-        if (!existsSync(abs)) {
+        if (!recordedPresent(rootFor(target, abs), abs)) {
           modifiedExternally = true;
           continue;
         }
@@ -1755,6 +2336,17 @@ function runStatus(options: Options, registry: Registry): number {
 // uninstall verb (marker-driven exact removal)
 // ---------------------------------------------------------------------------
 
+/**
+ * Removal guard, independent of the parser: an absolute path a removal is about to act on must
+ * lie strictly INSIDE the config dir — never the dir itself, never above or beside it. Checked on
+ * the resolved path (no realpath) at every removal call site, so a record a future parser lets
+ * through still cannot reach a recursive removal of the config dir.
+ */
+function strictlyInside(configDir: string, abs: string): boolean {
+  const rel = relative(configDir, abs);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
 function isSharedDiscoveryDir(configDir: string, abs: string): boolean {
   const shared = [
     join(configDir, "skills"),
@@ -1766,11 +2358,31 @@ function isSharedDiscoveryDir(configDir: string, abs: string): boolean {
   return shared.includes(abs);
 }
 
-function tryRemoveEmptyDir(dir: string): void {
+/**
+ * Remove `dir` when it is an empty real directory strictly inside `root`. A path outside the
+ * root (or the root itself), a link anywhere in its chain, or an I/O failure is a named `failed`
+ * action — never a silent no-op. A non-empty directory is simply left (no action: that is the
+ * normal case, not a failure).
+ */
+export function tryRemoveEmptyDir(root: string, dir: string, actions: Action[]): void {
+  const target = toMarkerPath(root, dir);
+  if (!strictlyInside(root, dir)) {
+    actions.push({ kind: "remove", target, result: "failed", detail: "refused: path is not strictly inside the config dir — not removed" });
+    return;
+  }
+  let state: ChainResult;
   try {
-    if (existsSync(dir) && readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true });
-  } catch {
-    /* best-effort */
+    state = chainUnder(root, dir);
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    actions.push({ kind: "remove", target, result: "failed", detail: `refused: ${err.reason} — not removed` });
+    return;
+  }
+  if (!state.exists || state.kind !== "dir") return;
+  try {
+    if (readdirSync(dir).length === 0) rmdirSync(dir); // non-recursive by construction: only an EMPTY directory
+  } catch (err) {
+    actions.push({ kind: "remove", target, result: "failed", detail: `could not remove the empty directory: ${err instanceof Error ? err.message : String(err)}` });
   }
 }
 
@@ -1779,14 +2391,44 @@ function removeMarkerEntry(
   target: Target,
   options: Options,
   actions: Action[],
-): void {
+): number {
+  let failures = 0;
+  const refuseOutside = (kind: ActionKind, disp: string): void => {
+    actions.push({ kind, target: disp, result: "failed", detail: "refused: recorded path is not strictly inside the config dir — nothing removed" });
+    failures += 1;
+  };
+  // Every recorded path is walked no-follow first (chainUnder): a symlink anywhere in the chain,
+  // an escape from the root, or a non-regular file is refused — never read, backed up, written or
+  // removed. `refusal` returns the reason, or undefined when the path is safe and present.
+  const refusal = (root: string, abs: string, want: "file" | "any"): { skip: string } | { absent: true } | undefined => {
+    let state: ChainResult;
+    try {
+      state = chainUnder(root, abs);
+    } catch (err) {
+      if (err instanceof UnsafePathError) return { skip: `refused: ${err.reason}` };
+      throw err;
+    }
+    if (!state.exists) return { absent: true };
+    if (want === "file" && state.kind !== "file") return { skip: "refused: not a regular file" };
+    return undefined;
+  };
+
   // Config entries first (json-key, hooks-entry), then payload dirs/files.
   for (const f of entry.files) {
     if (f.kind === "json-key") {
       const abs = fromMarkerPath(target.dir, f.file);
       const disp = `${f.file}${f.pointer}`;
-      if (!existsSync(abs)) {
+      if (abs !== target.mcpFile && !strictlyInside(target.dir, abs)) {
+        refuseOutside("remove", disp);
+        continue;
+      }
+      const verdict = refusal(rootFor(target, abs), abs, "file");
+      if (verdict && "absent" in verdict) {
         actions.push({ kind: "remove", target: disp, result: "skipped", detail: "file absent" });
+        continue;
+      }
+      if (verdict) {
+        actions.push({ kind: "remove", target: disp, result: "skipped", detail: verdict.skip });
         continue;
       }
       let obj: unknown;
@@ -1813,14 +2455,27 @@ function removeMarkerEntry(
         actions.push({ kind: "remove", target: disp, result: options.dryRun ? "planned" : "ok" });
       }
       if (!options.dryRun) {
-        backupConfigFile(target.dir, abs, options);
-        atomicWriteJson(abs, obj, options);
+        try {
+          backupThenWrite(target, abs, obj, options, actions, (a) => (a.kind === "remove" || a.kind === "restore-prior") && a.target === disp);
+        } catch {
+          failures += 1; // the `remove`/`restore-prior` action now reads `failed` with the refusal; nothing was written
+          continue;
+        }
       }
     } else if (f.kind === "hooks-entry") {
       const abs = fromMarkerPath(target.dir, f.file);
       const disp = `${f.file}#${f.event}`;
-      if (!existsSync(abs)) {
+      if (abs !== target.mcpFile && !strictlyInside(target.dir, abs)) {
+        refuseOutside("remove", disp);
+        continue;
+      }
+      const verdict = refusal(rootFor(target, abs), abs, "file");
+      if (verdict && "absent" in verdict) {
         actions.push({ kind: "remove", target: disp, result: "skipped", detail: "file absent" });
+        continue;
+      }
+      if (verdict) {
+        actions.push({ kind: "remove", target: disp, result: "skipped", detail: verdict.skip });
         continue;
       }
       let settings: Record<string, unknown>;
@@ -1841,8 +2496,12 @@ function removeMarkerEntry(
       settings.hooks = hooksObj;
       actions.push({ kind: "remove", target: disp, result: options.dryRun ? "planned" : "ok" });
       if (!options.dryRun) {
-        backupConfigFile(target.dir, abs, options);
-        atomicWriteJson(abs, settings, options);
+        try {
+          backupThenWrite(target, abs, settings, options, actions, (a) => a.kind === "remove" && a.target === disp);
+        } catch {
+          failures += 1; // as above: action flipped to `failed`, nothing written
+          continue;
+        }
       }
     }
   }
@@ -1850,12 +2509,22 @@ function removeMarkerEntry(
   for (const f of entry.files) {
     if (f.kind !== "dir" && f.kind !== "file") continue;
     const abs = fromMarkerPath(target.dir, f.path);
+    // Independent of the parser: never the config dir itself, never above or beside it.
+    if (!strictlyInside(target.dir, abs)) {
+      refuseOutside("remove", f.path);
+      continue;
+    }
     if (isSharedDiscoveryDir(target.dir, abs)) {
       actions.push({ kind: "remove", target: f.path, result: "skipped", detail: "shared discovery dir preserved" });
       continue;
     }
-    if (!existsSync(abs)) {
+    const verdict = refusal(target.dir, abs, "any");
+    if (verdict && "absent" in verdict) {
       actions.push({ kind: "remove", target: f.path, result: "skipped", detail: "absent" });
+      continue;
+    }
+    if (verdict) {
+      actions.push({ kind: "remove", target: f.path, result: "skipped", detail: verdict.skip });
       continue;
     }
     if (options.dryRun) {
@@ -1866,6 +2535,7 @@ function removeMarkerEntry(
       actions.push({ kind: "remove", target: f.path, result: "ok" });
     }
   }
+  return failures;
 }
 
 // v1/legacy marker mode: remove only product-prefixed paths this convention would
@@ -1876,10 +2546,24 @@ function heuristicUninstall(
   options: Options,
   actions: Action[],
   notes: string[],
-): void {
+): number {
+  let failures = 0;
   notes.push(`${target.dir}: v1 marker — heuristic removal (shared JSON config left for manual-review)`);
   const removePath = (abs: string): void => {
-    if (!existsSync(abs)) return;
+    if (!strictlyInside(target.dir, abs)) {
+      actions.push({ kind: "remove", target: toMarkerPath(target.dir, abs), result: "failed", detail: "refused: path is not strictly inside the config dir — nothing removed" });
+      failures += 1;
+      return;
+    }
+    let state: ChainResult;
+    try {
+      state = chainUnder(target.dir, abs);
+    } catch (err) {
+      if (!(err instanceof UnsafePathError)) throw err;
+      actions.push({ kind: "remove", target: toMarkerPath(target.dir, abs), result: "skipped", detail: `refused: ${err.reason}` });
+      return;
+    }
+    if (!state.exists) return;
     if (options.dryRun) {
       log(options, `  dry-run: remove ${abs}`);
       actions.push({ kind: "remove", target: toMarkerPath(target.dir, abs), result: "planned" });
@@ -1889,21 +2573,66 @@ function heuristicUninstall(
     }
   };
 
+  const realDir = (rel: string): boolean => {
+    try {
+      const state = lstatChainNoFollow(target.dir, rel);
+      return state.exists && state.kind === "dir";
+    } catch (err) {
+      if (err instanceof UnsafePathError) {
+        notes.push(`${target.dir}: ${err.message} — skipped`);
+        return false;
+      }
+      throw err;
+    }
+  };
   const skillsDir = join(target.dir, "skills");
-  if (existsSync(skillsDir)) {
+  if (realDir("skills")) {
     for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const abs = join(skillsDir, entry.name);
-      if (entry.name.startsWith(`${id}-`) || skillSignatureMatches(abs, id)) removePath(abs);
+      if (entry.name.startsWith(`${id}-`) || skillSignatureMatches(abs, id, target.dir)) removePath(abs);
     }
   }
   removePath(join(target.dir, "commands", id));
   const agentsDir = join(target.dir, "agents");
-  if (existsSync(agentsDir)) {
+  if (realDir("agents")) {
     for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
       if (entry.isFile() && entry.name.startsWith(`${id}-`)) removePath(join(agentsDir, entry.name));
     }
   }
+  return failures;
+}
+
+/**
+ * `uninstall <claude-plugin product>`: nothing is removed. The plugin's registration is Claude
+ * Code's (named here as the command to run), and any legacy copy this script's marker records is
+ * left in place — its removal is tracked in LEGACY_CLEANUP_ISSUE. Read-only over the markers.
+ */
+function pluginUninstallNotice(product: Product, resolution: Resolution, markers: Map<string, MarkerRaw>): InstallReport {
+  const pluginId = product.install.pluginId ?? `${product.id}@${product.id}`;
+  const notes = [
+    `the plugin registration is Claude Code's — remove it with: claude plugin uninstall ${pluginId} (with CLAUDE_CONFIG_DIR set to the config dir); check with: npx wicked-installer status`,
+  ];
+  for (const target of resolution.targets) {
+    const m = markers.get(target.dir);
+    const recorded = m?.v2
+      ? m.v2.products[product.id] !== undefined
+      : (m?.legacy?.products?.some((p) => p.id === product.id) ?? false);
+    if (recorded) {
+      notes.push(`${target.dir}: a legacy copy recorded in ${markerPathFor(target.dir)} is left in place — removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`);
+    }
+  }
+  return {
+    productId: product.id,
+    displayName: product.displayName,
+    success: true,
+    skipped: true,
+    message: `${product.displayName}: Claude Code plugin — nothing removed by this script`,
+    assets: { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 },
+    actions: [],
+    notes,
+  };
 }
 
 function runUninstall(options: Options, registry: Registry): number {
@@ -1917,6 +2646,14 @@ function runUninstall(options: Options, registry: Registry): number {
   const byId = new Map(registry.products.map((p) => [p.id, p]));
   const markers = new Map<string, MarkerRaw>();
   for (const target of resolution.targets) markers.set(target.dir, readMarkerRaw(target.dir));
+
+  // Fail closed BEFORE any removal or purge anywhere: an unusable marker in ANY selected target
+  // means the manifest of what this installer wrote cannot be trusted — the other targets are
+  // not touched either (also under --dry-run).
+  for (const target of resolution.targets) {
+    const m = markers.get(target.dir);
+    if (m?.corrupt) throw new Error(corruptMarkerMessage(target.dir, m.reason, "uninstall"));
+  }
 
   const idsPresent = new Set<string>();
   for (const target of resolution.targets) {
@@ -1932,24 +2669,40 @@ function runUninstall(options: Options, registry: Registry): number {
   else throw new Error("no products selected; pass product ids or --all");
 
   const reports: InstallReport[] = [];
+  const dirty = new Set<string>(); // targets whose marker actually lost an entry — the only ones flushed or deleted
+  let anyFailed = false;
   for (const id of selected) {
+    // A Claude Code plugin is never this script's to remove: nothing pre-existing — not a legacy
+    // skills/hooks copy, not a marker entry, not a config key — is deleted (LEGACY_CLEANUP_ISSUE
+    // tracks that cleanup). Only the external command that removes the registration is named.
+    // Short-circuited BEFORE any deletion or marker mutation below.
+    const pluginProduct = byId.get(id);
+    if (pluginProduct?.type === "claude-plugin") {
+      reports.push(pluginUninstallNotice(pluginProduct, resolution, markers));
+      continue;
+    }
+
     const notes: string[] = [];
     const actions: Action[] = [];
     let heuristic = false;
     let anyRemoved = false;
+    let failures = 0;
 
     for (const target of resolution.targets) {
       const m = markers.get(target.dir);
       if (!m) continue;
-      if (m.corrupt) {
-        notes.push(`${target.dir}: corrupt marker; skipped`);
-        continue;
-      }
       if (m.legacy && !m.v2) {
         heuristic = true;
-        heuristicUninstall(id, target, options, actions, notes);
+        const refused = heuristicUninstall(id, target, options, actions, notes);
+        if (refused > 0) {
+          // Something this run had to refuse: the record stays so the uninstall can be re-run.
+          failures += refused;
+          notes.push(`${target.dir}: ${refused} removal(s) refused — the marker record for ${id} is kept`);
+          continue;
+        }
         if (m.legacy.products) m.legacy.products = m.legacy.products.filter((p) => p.id !== id);
         anyRemoved = true;
+        dirty.add(target.dir);
         continue;
       }
       const entry = m.v2?.products[id];
@@ -1957,10 +2710,19 @@ function runUninstall(options: Options, registry: Registry): number {
         notes.push(`${target.dir}: not installed`);
         continue;
       }
-      removeMarkerEntry(entry, target, options, actions);
+      const refused = removeMarkerEntry(entry, target, options, actions);
+      if (refused > 0) {
+        // A refused backup or a refused path: the entry is KEPT (the manifest still describes
+        // what is on disk), the product is reported failed and the run exits non-zero.
+        failures += refused;
+        notes.push(`${target.dir}: ${refused} removal(s) refused — the marker record for ${id} is kept`);
+        continue;
+      }
       if (m.v2) delete m.v2.products[id];
       anyRemoved = true;
+      dirty.add(target.dir);
     }
+    if (failures > 0) anyFailed = true;
 
     if (options.purgeBinaries) {
       const product = byId.get(id);
@@ -1971,9 +2733,11 @@ function runUninstall(options: Options, registry: Registry): number {
     const report: InstallReport = {
       productId: id,
       displayName: display,
-      success: true,
+      success: failures === 0,
       skipped: false,
-      message: `${display}: ${anyRemoved ? (options.dryRun ? "would remove" : "removed") : "not installed"}`,
+      message: failures > 0
+        ? `${display}: failed: ${failures} removal(s) refused — see actions; nothing refused was removed, the marker record is kept`
+        : `${display}: ${anyRemoved ? (options.dryRun ? "would remove" : "removed") : "not installed"}`,
       assets: { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 },
       actions,
       notes,
@@ -1982,8 +2746,12 @@ function runUninstall(options: Options, registry: Registry): number {
     reports.push(report);
   }
 
-  // Write back / delete markers.
+  // Write back / delete markers — per target, and only for a target whose marker actually lost
+  // an entry in this run. Every other marker (a target where nothing was removed, a run that
+  // only emitted plugin notices) stays byte-identical. Housekeeping refusals are named actions.
+  const housekeeping: Action[] = [];
   for (const target of resolution.targets) {
+    if (!dirty.has(target.dir)) continue;
     const m = markers.get(target.dir);
     if (!m) continue;
     if (m.v2) {
@@ -1991,8 +2759,9 @@ function runUninstall(options: Options, registry: Registry): number {
         if (options.dryRun) {
           log(options, `  dry-run: remove ${markerPathFor(target.dir)}`);
         } else {
-          rmSync(markerPathFor(target.dir), { force: true });
-          tryRemoveEmptyDir(markerDirFor(target.dir));
+          const marker = lstatChainNoFollow(target.dir, join("wicked-installer", "claude-install.json"));
+          if (marker.exists && marker.kind === "file") rmSync(marker.abs, { force: true });
+          tryRemoveEmptyDir(target.dir, markerDirFor(target.dir), housekeeping);
         }
       } else {
         m.v2.updatedAt = new Date().toISOString();
@@ -2003,17 +2772,27 @@ function runUninstall(options: Options, registry: Registry): number {
       if (remaining === 0) {
         if (options.dryRun) log(options, `  dry-run: remove ${markerPathFor(target.dir)}`);
         else {
-          rmSync(markerPathFor(target.dir), { force: true });
-          tryRemoveEmptyDir(markerDirFor(target.dir));
+          const marker = lstatChainNoFollow(target.dir, join("wicked-installer", "claude-install.json"));
+          if (marker.exists && marker.kind === "file") rmSync(marker.abs, { force: true });
+          tryRemoveEmptyDir(target.dir, markerDirFor(target.dir), housekeeping);
         }
       } else if (!options.dryRun) {
-        atomicWriteJson(markerPathFor(target.dir), m.legacy, options);
+        atomicWriteJson(target.dir, markerPathFor(target.dir), m.legacy, options);
       }
+    }
+  }
+  if (housekeeping.length > 0 && reports.length > 0) {
+    const last = reports[reports.length - 1];
+    last.actions.push(...housekeeping);
+    if (housekeeping.some((a) => a.result === "failed")) {
+      last.success = false;
+      last.notes.push("marker directory housekeeping refused — see actions");
+      anyFailed = true;
     }
   }
 
   emitReport(options, "uninstall", resolution, reports);
-  return 0;
+  return anyFailed ? 1 : 0;
 }
 
 function purgeProductBinary(product: Product, options: Options, actions: Action[], notes: string[]): void {
@@ -2083,7 +2862,19 @@ async function main(): Promise<void> {
   if (code) process.exit(code);
 }
 
-main().catch((err: unknown) => {
-  console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+// Run only as the entry script. Importing the compiled module (the test suite does, to exercise
+// exported guards directly) executes nothing.
+function isEntryScript(): boolean {
+  try {
+    return process.argv[1] !== undefined && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryScript()) {
+  main().catch((err: unknown) => {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}

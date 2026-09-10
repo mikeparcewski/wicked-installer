@@ -17,6 +17,8 @@ export interface InstallAction {
   crate?: string;            // crates.io crate name — for cargo; when `crates` is present, names the product's primary (MCP) binary
   crates?: string[];         // for cargo products that ship >1 crate (e.g. wicked-estate + wicked-estate-mcp); wins over `crate` for acquisition
   version?: string;          // exact version to pin — for cargo (omit for latest)
+  marketplace?: string;      // claude-plugin: what `claude plugin marketplace add` receives (GitHub owner/repo, URL, or path); default mikeparcewski/<id>
+  pluginId?: string;         // claude-plugin: `<plugin>@<marketplace>` for `claude plugin install|update`; default <id>@<id>
 }
 
 export interface Product {
@@ -51,6 +53,10 @@ export interface InstallResult {
   success: boolean;
   skipped: boolean;
   message: string;
+  planned?: boolean;         // --dry-run: the plan was printed and nothing ran
+  // claude-plugin products: how the install ended — registered with Claude Code, planned (dry-run,
+  // Claude Code present), or the bare-copy fallback (no Claude Code CLI). Absent for other products.
+  registration?: "registered" | "planned" | "fallback" | "manual";
 }
 
 export interface DetectedCli {
