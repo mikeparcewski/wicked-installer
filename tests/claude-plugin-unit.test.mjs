@@ -300,6 +300,23 @@ test("readRegistration: symlinked registration files and escapes are refused and
     assert.match(v.problems[0], /is a symlink — refusing to follow it/);
     assert.equal(reg.installed[0].payload.ok, false);
 
+    // The EXPECTED cache path itself may not be a link either: a record pointing at the real
+    // directory while plugins/cache/…/<version> is a symlink to it would make the realpath
+    // comparison pass — the component-wise lstat of the expected chain catches it.
+    const linkedExpected = join(d, "linked-expected");
+    const le = configDir(linkedExpected, { marketplace: true });
+    const realDir = join(le.plugins, "cache", "wicked-garden", "wicked-garden", "real-1.0.0");
+    mkdirSync(join(realDir, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(realDir, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version: "1.0.0" }));
+    symlinkSync(realDir, le.installPath); // plugins/cache/wicked-garden/wicked-garden/1.0.0 -> real-1.0.0
+    writeFileSync(join(le.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: realDir, version: "1.0.0" }] },
+    }));
+    reg = readRegistration(linkedExpected, spec);
+    v = registrationVerdict(reg);
+    assert.equal(v.state, "unreadable", JSON.stringify(reg));
+    assert.ok(reg.errors.some((e) => /wicked-garden[\\/]1\.0\.0: is a symlink — refusing to follow it/.test(e)), JSON.stringify(reg.errors));
+
     // Ancestors too: a symlinked `plugins/` or `<marketplace>/` component — even one resolving
     // elsewhere INSIDE the config dir — makes the state unreadable.
     const linkedPlugins = join(d, "linked-plugins");
