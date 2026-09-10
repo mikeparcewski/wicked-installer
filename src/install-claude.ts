@@ -8,6 +8,8 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  realpathSync,
+  rmdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -805,20 +807,31 @@ function backupConfigFile(configDir: string, root: string, filePath: string, opt
  * touches the same file goes through the very same check (nothing is remembered as backed up).
  */
 function backupThenWrite(target: Target, file: string, data: unknown, options: Options, actions: Action[], describes: (a: Action) => boolean): void {
-  try {
-    backupConfigFile(target.dir, rootFor(target, file), file, options);
-  } catch (err) {
-    if (!(err instanceof UnsafePathError)) throw err;
-    const detail = `not written — backup refused: ${err.message}`;
+  // EVERY failure — a refused path (UnsafePathError) or a plain I/O error (EACCES, ENOSPC, a
+  // failed rename …) in the backup or the write — flips the describing actions to `failed` with
+  // the diagnostic preserved, and propagates; nothing is ever silently swallowed.
+  const fail = (stage: "backup" | "write", err: unknown): never => {
+    const detail = err instanceof UnsafePathError
+      ? `not written — ${stage} refused: ${err.message}`
+      : `not written — ${stage} failed: ${err instanceof Error ? err.message : String(err)}`;
     for (const a of actions) {
-      if (describes(a) && a.result === "ok") {
+      if (describes(a) && (a.result === "ok" || a.result === "planned")) {
         a.result = "failed";
         a.detail = detail;
       }
     }
     throw new Error(`${file}: ${detail}`);
+  };
+  try {
+    backupConfigFile(target.dir, rootFor(target, file), file, options);
+  } catch (err) {
+    fail("backup", err);
   }
-  atomicWriteJson(rootFor(target, file), file, data, options);
+  try {
+    atomicWriteJson(rootFor(target, file), file, data, options);
+  } catch (err) {
+    fail("write", err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1808,8 +1821,8 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => !!va
  * sound — a malformed record makes the whole marker unusable (fail closed) rather than
  * something a consumer trips over after the run has started writing.
  */
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
-const UNSAFE_ID_CHARS = /[\\/\s\u0000-\u001f\u007f]/;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/; // C0, DEL and C1
+const UNSAFE_ID_CHARS = /[\\/\s\u0000-\u001f\u007f-\u009f]/;
 
 /** A product id as a marker key / v1 `id`: it becomes a path segment (`commands/<id>`, `<id>-*`), so exactly one safe segment. */
 function isSafeMarkerId(value: unknown): value is string {
@@ -1897,7 +1910,8 @@ function markerV2Problem(value: unknown, dir: string): string | undefined {
           if (!str(f.event) || f.event === "" || CONTROL_CHARS.test(f.event)) return `${fat}.event: missing or empty`;
           if (!isPlainObject(f.ownerMatch) || !str(f.ownerMatch.commandContains)) return `${fat}.ownerMatch.commandContains: missing or not a string`;
           const owner = f.ownerMatch.commandContains;
-          if (owner.length < 8 || CONTROL_CHARS.test(owner)) return `${fat}.ownerMatch.commandContains: too short to identify an owner (min 8 chars)`;
+          if (CONTROL_CHARS.test(owner)) return `${fat}.ownerMatch.commandContains: contains control characters`;
+          if (owner.length < 8) return `${fat}.ownerMatch.commandContains: too short to identify an owner (min 8 chars)`;
           break;
         }
         default:
@@ -2344,13 +2358,31 @@ function isSharedDiscoveryDir(configDir: string, abs: string): boolean {
   return shared.includes(abs);
 }
 
-function tryRemoveEmptyDir(root: string, dir: string): void {
-  if (!strictlyInside(root, dir)) return;
+/**
+ * Remove `dir` when it is an empty real directory strictly inside `root`. A path outside the
+ * root (or the root itself), a link anywhere in its chain, or an I/O failure is a named `failed`
+ * action — never a silent no-op. A non-empty directory is simply left (no action: that is the
+ * normal case, not a failure).
+ */
+export function tryRemoveEmptyDir(root: string, dir: string, actions: Action[]): void {
+  const target = toMarkerPath(root, dir);
+  if (!strictlyInside(root, dir)) {
+    actions.push({ kind: "remove", target, result: "failed", detail: "refused: path is not strictly inside the config dir — not removed" });
+    return;
+  }
+  let state: ChainResult;
   try {
-    const state = chainUnder(root, dir); // UnsafePathError ⇒ leave it alone
-    if (state.exists && state.kind === "dir" && readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true });
-  } catch {
-    /* best-effort */
+    state = chainUnder(root, dir);
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    actions.push({ kind: "remove", target, result: "failed", detail: `refused: ${err.reason} — not removed` });
+    return;
+  }
+  if (!state.exists || state.kind !== "dir") return;
+  try {
+    if (readdirSync(dir).length === 0) rmdirSync(dir); // non-recursive by construction: only an EMPTY directory
+  } catch (err) {
+    actions.push({ kind: "remove", target, result: "failed", detail: `could not remove the empty directory: ${err instanceof Error ? err.message : String(err)}` });
   }
 }
 
@@ -2637,7 +2669,7 @@ function runUninstall(options: Options, registry: Registry): number {
   else throw new Error("no products selected; pass product ids or --all");
 
   const reports: InstallReport[] = [];
-  let markersMutated = false;
+  const dirty = new Set<string>(); // targets whose marker actually lost an entry — the only ones flushed or deleted
   let anyFailed = false;
   for (const id of selected) {
     // A Claude Code plugin is never this script's to remove: nothing pre-existing — not a legacy
@@ -2670,7 +2702,7 @@ function runUninstall(options: Options, registry: Registry): number {
         }
         if (m.legacy.products) m.legacy.products = m.legacy.products.filter((p) => p.id !== id);
         anyRemoved = true;
-        markersMutated = true;
+        dirty.add(target.dir);
         continue;
       }
       const entry = m.v2?.products[id];
@@ -2688,7 +2720,7 @@ function runUninstall(options: Options, registry: Registry): number {
       }
       if (m.v2) delete m.v2.products[id];
       anyRemoved = true;
-      markersMutated = true;
+      dirty.add(target.dir);
     }
     if (failures > 0) anyFailed = true;
 
@@ -2714,9 +2746,12 @@ function runUninstall(options: Options, registry: Registry): number {
     reports.push(report);
   }
 
-  // Write back / delete markers — only when this run actually removed something. A run that
-  // only emitted plugin notices must leave every marker byte-identical.
-  for (const target of markersMutated ? resolution.targets : []) {
+  // Write back / delete markers — per target, and only for a target whose marker actually lost
+  // an entry in this run. Every other marker (a target where nothing was removed, a run that
+  // only emitted plugin notices) stays byte-identical. Housekeeping refusals are named actions.
+  const housekeeping: Action[] = [];
+  for (const target of resolution.targets) {
+    if (!dirty.has(target.dir)) continue;
     const m = markers.get(target.dir);
     if (!m) continue;
     if (m.v2) {
@@ -2726,7 +2761,7 @@ function runUninstall(options: Options, registry: Registry): number {
         } else {
           const marker = lstatChainNoFollow(target.dir, join("wicked-installer", "claude-install.json"));
           if (marker.exists && marker.kind === "file") rmSync(marker.abs, { force: true });
-          tryRemoveEmptyDir(target.dir, markerDirFor(target.dir));
+          tryRemoveEmptyDir(target.dir, markerDirFor(target.dir), housekeeping);
         }
       } else {
         m.v2.updatedAt = new Date().toISOString();
@@ -2739,11 +2774,20 @@ function runUninstall(options: Options, registry: Registry): number {
         else {
           const marker = lstatChainNoFollow(target.dir, join("wicked-installer", "claude-install.json"));
           if (marker.exists && marker.kind === "file") rmSync(marker.abs, { force: true });
-          tryRemoveEmptyDir(target.dir, markerDirFor(target.dir));
+          tryRemoveEmptyDir(target.dir, markerDirFor(target.dir), housekeeping);
         }
       } else if (!options.dryRun) {
         atomicWriteJson(target.dir, markerPathFor(target.dir), m.legacy, options);
       }
+    }
+  }
+  if (housekeeping.length > 0 && reports.length > 0) {
+    const last = reports[reports.length - 1];
+    last.actions.push(...housekeeping);
+    if (housekeeping.some((a) => a.result === "failed")) {
+      last.success = false;
+      last.notes.push("marker directory housekeeping refused — see actions");
+      anyFailed = true;
     }
   }
 
@@ -2818,7 +2862,19 @@ async function main(): Promise<void> {
   if (code) process.exit(code);
 }
 
-main().catch((err: unknown) => {
-  console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+// Run only as the entry script. Importing the compiled module (the test suite does, to exercise
+// exported guards directly) executes nothing.
+function isEntryScript(): boolean {
+  try {
+    return process.argv[1] !== undefined && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryScript()) {
+  main().catch((err: unknown) => {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}

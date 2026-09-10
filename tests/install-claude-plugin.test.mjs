@@ -20,11 +20,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1130,5 +1130,118 @@ test("dispatch: without a Claude target the Claude-specific preflight does not r
     assert.ok(!existsSync(sb.stubLog), "claude was never invoked");
   } finally {
     cleanup(sb);
+  }
+});
+
+test("uninstall: markers are flushed per target — a target that lost no entry stays byte-identical", () => {
+  const sb = sandbox();
+  try {
+    const a = join(sb.tmp, "cfg-a");
+    mkdirSync(join(a, "wicked-installer"), { recursive: true });
+    plantVaultInstall(a);
+    const b = join(sb.tmp, "cfg-b");
+    mkdirSync(join(b, "wicked-installer"), { recursive: true });
+    writeFileSync(join(b, "settings.json"), "{}");
+    writeFileSync(markerPath(b), JSON.stringify({ markerVersion: 2, cli: "claude", configDir: b, updatedAt: "2026-01-01T00:00:00.000Z", products: { "wicked-bus": { installedAt: "t", lastResult: "installed", files: [], notes: [] } } }));
+    const beforeB = snapshot(b);
+    const r = runScript(sb, ["uninstall", "wicked-vault", "--claude-home", a, "--claude-home", b, "--json"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(!existsSync(markerPath(a)), "A lost its last record => marker removed");
+    assert.deepEqual(readdirSync(join(a, "wicked-installer")).sort(), ["backups", "products"], "the settings.json backup and the shared (preserved) products dir remain beside the removed marker — a non-empty marker dir is left, no action");
+    assert.deepEqual(snapshot(b), beforeB, "B lost nothing => its marker was not rewritten (no new updatedAt)");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("uninstall: a plain I/O failure of the backup (unwritable backups dir) is a NAMED failed action with the cause, not a swallowed count", { skip: !POSIX || (process.getuid && process.getuid() === 0) ? "needs an unprivileged POSIX user" : false }, () => {
+  const sb = sandbox();
+  const backups = join(sb.cfg, "wicked-installer", "backups");
+  try {
+    mkdirSync(backups, { recursive: true });
+    plantVaultInstall(sb.cfg);
+    chmodSync(backups, 0o555); // real dir, no link anywhere: the exclusive copy fails with EACCES
+    const settingsBytes = readFileSync(join(sb.cfg, "settings.json"));
+    const markerBytes = readFileSync(markerPath(sb.cfg));
+    const r = runScript(sb, ["uninstall", "wicked-vault", "--claude-home", sb.cfg, "--json"]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.ok(readFileSync(join(sb.cfg, "settings.json")).equals(settingsBytes), "settings.json byte-identical");
+    assert.ok(readFileSync(markerPath(sb.cfg)).equals(markerBytes), "marker byte-identical (record kept)");
+    const rep = JSON.parse(r.stdout).reports.find((x) => x.productId === "wicked-vault");
+    assert.equal(rep.success, false);
+    const failed = rep.actions.find((a) => a.kind === "remove" && a.target === "settings.json#SessionStart");
+    assert.ok(failed && failed.result === "failed", JSON.stringify(rep.actions));
+    assert.match(failed.detail, /not written — backup failed: .*EACCES/, "the I/O diagnostic is preserved on the action");
+  } finally {
+    try { chmodSync(backups, 0o755); } catch { /* absent */ }
+    cleanup(sb);
+  }
+});
+
+test("uninstall: C1 control characters (U+0085) in a recorded path, an owner selector or a product id make the marker unusable", () => {
+  const sb = sandbox();
+  const c1 = String.fromCharCode(0x85); // NEL, a C1 control
+  try {
+    const good = { installedAt: "t", lastResult: "installed", notes: [] };
+    const cases = {
+      "path-c1": (cfg) => ({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "t", products: { "wicked-vault": { ...good, files: [{ kind: "dir", path: `skills/x${c1}y` }] } } }),
+      "owner-c1": (cfg) => ({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "t", products: { "wicked-vault": { ...good, files: [{ kind: "hooks-entry", file: "settings.json", event: "SessionStart", ownerMatch: { commandContains: `wicked-installer/products/${c1}vault` } }] } } }),
+      "id-c1": (cfg) => ({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "t", products: { [`vault${c1}`]: { ...good, files: [] } } }),
+      "v1-id-c1": () => ({ products: [{ id: `vault${c1}` }] }),
+    };
+    for (const [name, marker] of Object.entries(cases)) {
+      const cfg = join(sb.tmp, `cfg-${name}`);
+      mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+      writeFileSync(join(cfg, "settings.json"), "{}");
+      writeFileSync(markerPath(cfg), JSON.stringify(marker(cfg)));
+      const before = snapshot(cfg);
+      const r = runScript(sb, ["uninstall", "--all", "--claude-home", cfg, "--json"]);
+      assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /install marker is unusable \(malformed v2 marker: .*(contains control characters|not a safe path segment)\) — refusing to uninstall|install marker is unusable \(unrecognised marker shape.*\) — refusing to uninstall/, name);
+      assert.deepEqual(snapshot(cfg), before, `${name}: byte-identical`);
+    }
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("tryRemoveEmptyDir (direct): outside/root/linked paths are NAMED failed actions and nothing is removed; an empty real dir inside is removed; a non-empty one is left", async () => {
+  const mod = await import(pathToFileURL(SCRIPT).href); // importing the compiled script runs nothing
+  const { tryRemoveEmptyDir } = mod;
+  assert.equal(typeof tryRemoveEmptyDir, "function");
+  const tmp = mkdtempSync(join(tmpdir(), "wicked-tred-"));
+  try {
+    const root = join(tmp, "root");
+    mkdirSync(join(root, "wicked-installer"), { recursive: true });
+    mkdirSync(join(tmp, "outside-empty"));
+    const actions = [];
+    tryRemoveEmptyDir(root, join(root, ".."), actions);
+    tryRemoveEmptyDir(root, root, actions);
+    tryRemoveEmptyDir(root, join(tmp, "outside-empty"), actions);
+    assert.equal(actions.length, 3);
+    for (const a of actions) assert.ok(a.kind === "remove" && a.result === "failed" && /not strictly inside the config dir/.test(a.detail), JSON.stringify(a));
+    assert.ok(existsSync(join(tmp, "outside-empty")) && existsSync(root), "nothing outside was removed");
+    if (POSIX) {
+      mkdirSync(join(tmp, "linked-target"));
+      symlinkSync(join(tmp, "linked-target"), join(root, "linked"));
+      const linked = [];
+      tryRemoveEmptyDir(root, join(root, "linked"), linked);
+      assert.equal(linked.length, 1);
+      assert.match(linked[0].detail, /refused: is a symlink — refusing to follow it — not removed/);
+      assert.ok(lstatSync(join(root, "linked")).isSymbolicLink() && existsSync(join(tmp, "linked-target")), "the link and its target are untouched");
+    }
+    mkdirSync(join(root, "wicked-installer", "keep"));
+    writeFileSync(join(root, "wicked-installer", "keep", "f"), "x");
+    const nonEmpty = [];
+    tryRemoveEmptyDir(root, join(root, "wicked-installer", "keep"), nonEmpty);
+    assert.deepEqual(nonEmpty, [], "a non-empty dir is simply left, no action");
+    assert.ok(existsSync(join(root, "wicked-installer", "keep", "f")));
+    rmSync(join(root, "wicked-installer", "keep"), { recursive: true });
+    const empty = [];
+    tryRemoveEmptyDir(root, join(root, "wicked-installer"), empty);
+    assert.deepEqual(empty, []);
+    assert.ok(!existsSync(join(root, "wicked-installer")), "the empty dir inside the root was removed");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });

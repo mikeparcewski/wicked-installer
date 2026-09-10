@@ -95,6 +95,10 @@ All notable changes to wicked-installer are documented here. The format follows
   anywhere when ANY selected target's marker is unusable, and a refused backup fails the config
   write it protects, the product and the run — the marker record is kept. A symlinked source
   `package.json` is refused and named (version unknown) like the other source manifests.
+  Uninstall flushes or deletes only the markers that actually lost an entry (per target); every
+  backup/write failure — refused path or plain I/O error — is a named `failed` action carrying the
+  diagnostic; C1 control characters are rejected like C0; the empty-marker-dir housekeeping reports
+  a refusal instead of silently returning.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is
