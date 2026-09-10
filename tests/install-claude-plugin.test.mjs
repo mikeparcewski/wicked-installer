@@ -20,7 +20,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,14 +67,18 @@ const markerPath = (cfg) => join(cfg, "wicked-installer", "claude-install.json")
 const marker = (cfg) => JSON.parse(readFileSync(markerPath(cfg), "utf8"));
 const cacheDir = (cfg, version = "0.0.1-stub") => join(cfg, "plugins", "cache", "wicked-garden", "wicked-garden", version);
 
-/** Content-hashed listing of a tree, to prove byte-identity. */
+/** Listing of a tree with a full-file sha256, size and mode per entry (links by target), to prove byte-identity. */
 function snapshot(dir) {
   const out = [];
   (function walk(d) {
     for (const e of readdirSync(d, { withFileTypes: true })) {
       const f = join(d, e.name);
-      out.push(relative(dir, f) + (e.isDirectory() ? "/" : `:${statSync(f).size}:${readFileSync(f).toString("base64").slice(0, 64)}`));
-      if (e.isDirectory()) walk(f);
+      const st = lstatSync(f);
+      const mode = (st.mode & 0o777).toString(8);
+      const rel = relative(dir, f);
+      if (e.isSymbolicLink()) out.push(`${rel} -> ${readlinkSync(f)} [link ${mode}]`);
+      else if (e.isDirectory()) { out.push(`${rel}/ [${mode}]`); walk(f); }
+      else out.push(`${rel} sha256=${createHash("sha256").update(readFileSync(f)).digest("hex")} size=${st.size} [${mode}]`);
     }
   })(dir);
   return out.sort();
@@ -179,6 +184,17 @@ test("install-claude.js fails closed on an unparseable marker: exit 1 before any
     const st = runScript(sb, ["status", "wicked-vault", "--claude-home", sb.cfg, "--json"]);
     assert.equal(st.status, 1, st.stdout + st.stderr);
     assert.ok(JSON.parse(st.stdout).reports[0].notes.some((n) => /corrupt marker/.test(n)));
+    // Corruption is a property of the config dir, not of the product selection: a plain `status`
+    // and `status --all` — where a corrupt marker contributes no ids at all — still exit 1, with
+    // the diagnostic on stderr and stdout still pure JSON.
+    for (const args of [["status"], ["status", "--all"]]) {
+      const r = runScript(sb, [...args, "--claude-home", sb.cfg, "--json"]);
+      assert.equal(r.status, 1, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`${escapeRe(markerPath(sb.cfg))}: install marker exists but is not valid JSON \\(.+\\) — status cannot describe this config dir`));
+      const report = JSON.parse(r.stdout);
+      assert.equal(report.verb, "status");
+      assert.deepEqual(report.reports, [], `${args.join(" ")}: no product-derived lines from an unparseable marker`);
+    }
     const un = runScript(sb, ["uninstall", "wicked-vault", "--claude-home", sb.cfg, "--json"]);
     assert.equal(un.status, 0, un.stdout + un.stderr);
     assert.deepEqual(snapshot(sb.cfg), before, "status and uninstall leave the corrupt marker exactly as it was");

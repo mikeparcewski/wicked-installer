@@ -15,7 +15,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,13 +82,18 @@ function sandbox({ withClaude = "ok", registry = FAKE_REGISTRY } = {}) {
   return { tmp, home, cfg, bin, cli: join(tmp, "dist", "index.js") };
 }
 
+/** Listing of a tree with a full-file sha256, size and mode per entry (links by target), to prove byte-identity. */
 function snapshot(dir) {
   const out = [];
   (function walk(d) {
     for (const e of readdirSync(d, { withFileTypes: true })) {
       const f = join(d, e.name);
-      out.push(relative(dir, f) + (e.isDirectory() ? "/" : `:${statSync(f).size}`));
-      if (e.isDirectory()) walk(f);
+      const st = lstatSync(f);
+      const mode = (st.mode & 0o777).toString(8);
+      const rel = relative(dir, f);
+      if (e.isSymbolicLink()) out.push(`${rel} -> ${readlinkSync(f)} [link ${mode}]`);
+      else if (e.isDirectory()) { out.push(`${rel}/ [${mode}]`); walk(f); }
+      else out.push(`${rel} sha256=${createHash("sha256").update(readFileSync(f)).digest("hex")} size=${st.size} [${mode}]`);
     }
   })(dir);
   return out.sort();

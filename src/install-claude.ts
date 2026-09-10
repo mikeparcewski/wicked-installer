@@ -1750,7 +1750,17 @@ function runStatus(options: Options, registry: Registry): number {
   // earlier run left behind — so they are not reported here at all.
   selected = selected.filter((id) => byId.get(id)?.type !== "claude-plugin");
 
+  // Marker corruption is a property of the config dir, not of any product selection: an
+  // unparseable marker contributes no ids, so a plain `status` or `--all` would otherwise pass it
+  // by. Report it (on stderr, so --json stdout stays pure) and fail the query regardless.
   let hadParseError = false;
+  for (const target of resolution.targets) {
+    const m = markerByTarget.get(target.dir);
+    if (m?.corrupt) {
+      hadParseError = true;
+      console.error(`${markerPathFor(target.dir)}: install marker exists but is not valid JSON${m.reason ? ` (${m.reason})` : ""} — status cannot describe this config dir; fix or move the file`);
+    }
+  }
   const reports: InstallReport[] = [];
 
   for (const id of selected) {

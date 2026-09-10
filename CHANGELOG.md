@@ -44,7 +44,9 @@ All notable changes to wicked-installer are documented here. The format follows
   detection recognises both marker shapes and runs before the script can upgrade the marker. An
   existing install marker that does not parse fails `install-claude.js` closed — exit 1 before any
   staging, copying, deletion or marker write, also under `--dry-run`, with the file and parse error
-  named and its bytes left untouched (it used to be silently replaced by an empty v2 marker).
+  named and its bytes left untouched (it used to be silently replaced by an empty v2 marker);
+  `status` reports such a marker on stderr and exits 1 regardless of which products are selected
+  (a plain `status` or `--all` used to exit 0 because the unparseable marker contributed no ids).
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is
