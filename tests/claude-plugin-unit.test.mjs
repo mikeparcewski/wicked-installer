@@ -196,7 +196,7 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
     }));
     v = registrationVerdict(readRegistration(elsewhere, spec));
     assert.equal(v.state, "partial");
-    assert.match(v.problems[0], /is not the expected cache path .*[\\/]cache[\\/]wicked-garden[\\/]wicked-garden[\\/]1\.0\.0$/);
+    assert.match(v.problems[0], /is not the expected cache path .*[\\/]cache[\\/]wicked-garden[\\/]wicked-garden[\\/]1\.0\.0 \(user scope\)$/);
 
     // A record without a version is never completed with a placeholder: it is partial, named as such.
     const noVersion = join(d, "no-version");
@@ -224,6 +224,30 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
     v = registrationVerdict(readRegistration(twoScopes, spec));
     assert.equal(v.state, "partial");
     assert.deepEqual(v.problems, ["install record has no version (project scope)"]);
+
+    // Likewise a healthy user-scope record does not excuse a project-scope record whose payload
+    // is missing (a version that has no cache dir) or mismatched — every selected record verifies.
+    writeFileSync(join(ts.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2,
+      plugins: { "wicked-garden@wicked-garden": [
+        { scope: "user", installPath: ts.installPath, version: "1.0.0" },
+        { scope: "project", projectPath: "/some/project", installPath: join(ts.plugins, "cache", "wicked-garden", "wicked-garden", "2.0.0"), version: "2.0.0" },
+      ] },
+    }));
+    v = registrationVerdict(readRegistration(twoScopes, spec));
+    assert.equal(v.state, "partial", JSON.stringify(v));
+    assert.equal(v.problems.length, 1);
+    assert.match(v.problems[0], /^payload dir missing: .*2\.0\.0 \(project scope\)$/);
+    writeFileSync(join(ts.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2,
+      plugins: { "wicked-garden@wicked-garden": [
+        { scope: "user", installPath: ts.installPath, version: "1.0.0" },
+        { scope: "managed", installPath: ts.installPath, version: "1.0.1" }, // record says 1.0.1, payload is 1.0.0
+      ] },
+    }));
+    v = registrationVerdict(readRegistration(twoScopes, spec));
+    assert.equal(v.state, "partial", JSON.stringify(v));
+    assert.match(v.problems[0], /is not the expected cache path .*\(managed scope\)$/);
 
     const good = join(d, "good");
     configDir(good, { marketplace: true, record: true, payload: true });
@@ -260,6 +284,17 @@ test("shellQuote / renderClaudeCommand: printed commands are quoted for the plat
     renderClaudeCommand("C:\\cfg", ["plugin", "install", "wicked-garden@wicked-garden"], "win32"),
     'set "CLAUDE_CONFIG_DIR=C:\\cfg" && claude plugin install wicked-garden@wicked-garden',
   );
+  // cmd.exe expands %VAR% / !VAR! even inside quotes: such a dir or argument is never shown as a
+  // pasteable cmd.exe line that would point somewhere else — it is rendered structurally.
+  for (const [dir, args] of [
+    ["C:\\work\\%TEMP%\\cfg", ["plugin", "install", "wicked-garden@wicked-garden"]],
+    ["C:\\cfg", ["plugin", "marketplace", "add", "C:\\src\\!v!\\wicked-garden"]],
+  ]) {
+    const rendered = renderClaudeCommand(dir, args, "win32");
+    assert.doesNotMatch(rendered, /^set "CLAUDE_CONFIG_DIR=/, rendered);
+    assert.ok(rendered.startsWith(`claude ${JSON.stringify(args)} with env CLAUDE_CONFIG_DIR=${JSON.stringify(dir)}`), rendered);
+    assert.match(rendered, /% or ! would be expanded by the shell/);
+  }
 });
 
 test("readRegistration: symlinked registration files and escapes are refused and reported as errors (unreadable), not as 'not installed'", { skip: WIN && "symlink creation needs privileges on Windows" }, async () => {

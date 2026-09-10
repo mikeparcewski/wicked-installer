@@ -395,7 +395,7 @@ test("status: per-dir verdict (registered / partial / copy only / not installed)
     const e = status(partial);
     assert.equal(e.status, 1, e.stdout + e.stderr);
     assert.match(e.stdout, /installed:\s+9\.9\.9 \(user\)/);
-    assert.match(e.stdout, /state:\s+✗ partially registered \(marketplace entry missing from known_marketplaces\.json; payload dir missing: .*9\.9\.9\)/);
+    assert.match(e.stdout, /state:\s+✗ partially registered \(marketplace entry missing from known_marketplaces\.json; payload dir missing: .*9\.9\.9 \(user scope\)\)/);
     assert.match(e.stdout, /not installed\s+wicked-garden/, "a stale record is not 'installed' in the product list either");
 
     // --claude-home works for status too, and detection follows the same target set.

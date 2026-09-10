@@ -618,9 +618,10 @@ export function registrationVerdict(reg: PluginRegistration): RegistrationVerdic
   // does not is evidence we cannot verify, and a registration is only as good as its worst record.
   const versionless = reg.installed.filter((e) => !e.version);
   for (const e of versionless) problems.push(`install record has no version (${e.scope} scope)`);
-  const versioned = reg.installed.filter((e) => e.version);
-  if (versioned.length > 0 && !versioned.some((e) => e.payload.ok)) {
-    for (const e of versioned) problems.push(e.payload.problem ?? "payload problem");
+  // EVERY versioned record must verify — a healthy user-scope record does not excuse a
+  // project/managed record whose payload is missing or mismatched.
+  for (const e of reg.installed.filter((e) => e.version)) {
+    if (!e.payload.ok) problems.push(`${e.payload.problem ?? "payload problem"} (${e.scope} scope)`);
   }
   return { state: problems.length > 0 ? "partial" : "registered", problems };
 }
@@ -675,9 +676,18 @@ export function shellQuote(token: string, platform: NodeJS.Platform = process.pl
 /**
  * The command as the user would type it, with CLAUDE_CONFIG_DIR pinned: POSIX
  * `CLAUDE_CONFIG_DIR='<dir>' claude …`; cmd.exe `set "CLAUDE_CONFIG_DIR=<dir>" && claude …`.
+ * cmd.exe expands `%VAR%` (and `!VAR!`) even inside quotes with no escape, so when the dir or
+ * an argument contains `%` or `!` there is no pasteable cmd.exe form that means what the
+ * installer does (it passes the env and argv directly, unexpanded) — the line is rendered
+ * structurally instead, never as a command that would point somewhere else.
  */
 export function renderClaudeCommand(configDir: string, args: string[], platform: NodeJS.Platform = process.platform): string {
-  if (platform === "win32") return `set "CLAUDE_CONFIG_DIR=${configDir}" && claude ${args.map((a) => winQuote(a)).join(" ")}`;
+  if (platform === "win32") {
+    if (/[%!]/.test(configDir) || args.some((a) => /[%!]/.test(a))) {
+      return `claude ${JSON.stringify(args)} with env CLAUDE_CONFIG_DIR=${JSON.stringify(configDir)}  (not shown as a cmd.exe line: % or ! would be expanded by the shell)`;
+    }
+    return `set "CLAUDE_CONFIG_DIR=${configDir}" && claude ${args.map((a) => winQuote(a)).join(" ")}`;
+  }
   return [`CLAUDE_CONFIG_DIR=${shellQuote(configDir, platform)}`, "claude", ...args.map((a) => shellQuote(a, platform))].join(" ");
 }
 

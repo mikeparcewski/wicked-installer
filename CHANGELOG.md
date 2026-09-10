@@ -51,8 +51,12 @@ All notable changes to wicked-installer are documented here. The format follows
   merely resolves to it is `partial`); the recorded version must be a single path segment (a value
   such as `alias/1.0.0` is `partial`, never a path); any selected install record without a real version makes the
   dir `partial` ("install record has no version (<scope> scope)") regardless of other entries — never
-  completed with a placeholder. The dry-run plan applies the same launch-shape validation as the
-  live spawn (a `.cmd`-shim `claude` with `%`/`!` in an argument fails the plan too).
+  completed with a placeholder; every selected install record must verify — a healthy user-scope
+  record does not excuse a project/managed record whose payload is missing or mismatched. The
+  dry-run plan applies the same launch-shape validation as the live spawn (a `.cmd`-shim `claude`
+  with `%`/`!` in an argument fails the plan too), and on Windows a config dir or argument holding
+  `%`/`!` is rendered structurally (argv + env) rather than as a `set "…" && claude …` line that
+  cmd.exe would expand to a different path.
 - `CLAUDE_CONFIG_DIR` that is set but names no directory ("", blanks, a bare `:`/`,`) is an error
   (exit 1, nothing written) instead of a silent fall-through to `~/.claude` — in the installer and
   in `install-claude.js`.
