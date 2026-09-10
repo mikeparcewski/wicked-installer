@@ -679,3 +679,25 @@ test("isUnder: containment by prefix, with a root that already ends in the separ
   assert.equal(isUnder(sep, sep), true);
   assert.equal(isUnder(r("/a/plugins"), r("/a/")), true, "a root given with a trailing separator");
 });
+
+test("readRegistration: a state file whose root shape cannot be trusted is unreadable, never \"not installed\"", () => {
+  const d = tmp();
+  try {
+    for (const [name, file, body] of [
+      ["marketplaces-array", "known_marketplaces.json", "[]"],
+      ["marketplaces-null", "known_marketplaces.json", "null"],
+      ["installed-array", "installed_plugins.json", "[]"],
+      ["installed-string", "installed_plugins.json", "\"x\""],
+      ["installed-plugins-array", "installed_plugins.json", JSON.stringify({ version: 2, plugins: [] })],
+    ]) {
+      const cfg = join(d, name);
+      configDir(cfg, { marketplace: true, record: true, payload: true });
+      writeFileSync(join(cfg, "plugins", file), body);
+      const v = registrationVerdict(readRegistration(cfg, spec));
+      assert.equal(v.state, "unreadable", `${name}: ${JSON.stringify(v)}`);
+      assert.match(v.problems[0], /state cannot be trusted/, name);
+    }
+  } finally {
+    rm(d);
+  }
+});

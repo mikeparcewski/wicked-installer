@@ -142,8 +142,9 @@ All notable changes to wicked-installer are documented here. The format follows
 - `wicked-garden` detection (`status` product list) now means *registered with Claude Code* in every
   active config dir (honouring `--claude-home`) — a bare copy under `~/.claude` or a stale install
   record no longer counts, so the product list agrees with the registration detail.
-- `--source-root` without Claude Code fails instead of silently installing the published package
-  through the `npx` fallback, and a root without `.claude-plugin/marketplace.json` fails fast —
-  before the first dependency is installed, on every path (direct, interactive, zero-CLI) and
-  also under `--dry-run` — so an invalid invocation never leaves a partial install behind. On Windows, a `.cmd`-shim `claude` is refused `%`/`!`-bearing arguments (cmd.exe
+- `--source-root` without Claude Code fails on the direct and zero-CLI paths instead of silently
+  installing the published package through the `npx` fallback (the interactive Claude-target path
+  is a manual step that copies nothing either way), and a root without
+  `.claude-plugin/marketplace.json` fails fast — before the first dependency is installed, on every
+  path and also under `--dry-run` — so an invalid invocation never leaves a partial install behind. On Windows, a `.cmd`-shim `claude` is refused `%`/`!`-bearing arguments (cmd.exe
   would expand them; INTERFACE.md §1.1) rather than passing a rewritten path to Claude Code.

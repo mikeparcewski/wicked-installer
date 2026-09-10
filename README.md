@@ -41,8 +41,9 @@ npx wicked-installer status          Show detected CLIs, installed products, and
 npx wicked-installer --version
 
 Flags:
-  --dry-run              Print the exact plan (target dirs, commands) and run NOTHING
-                         that writes — no npm/npx/cargo/git, no downloads, no copies
+  --dry-run              Print the exact plan (target dirs, commands) and write nothing
+                         into any target — no npm/npx/cargo/git installs, no downloads,
+                         no copies (per-CLI scripts may stage into the OS temp dir, §13)
   --claude-home <dir>    Claude Code config dir to register wicked-garden into
                          (repeatable; default: $CLAUDE_CONFIG_DIR, else ~/.claude)
   --source-root <dir>    Register wicked-garden from the local checkout
@@ -129,8 +130,9 @@ the config dir, or cannot be read. The **overall** line is the worst state acros
 active dirs (unreadable > not installed > copy only > partial > registered) and `status`
 exits 1 unless wicked-garden is registered in every active dir; the product list's
 "installed" for wicked-garden means exactly that. `status` runs no `claude plugin …`
-command; its CLI detection runs the read-only `claude --version` probe (verified to write
-nothing) and nothing else.
+command. Its CLI detection is read-only: the `claude --version` probe (verified to write
+nothing) plus the pre-existing product-status probes (`<cli> --version` for the other
+detected CLIs) — no install, no write.
 
 ---
 

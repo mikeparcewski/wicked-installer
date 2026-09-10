@@ -534,6 +534,7 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
   const knownChain = symlinkInChain(configDir, ["plugins", "known_marketplaces.json"]);
   const known = knownChain ? { error: knownChain } : readOwnedJson(root, join(pluginsDir, "known_marketplaces.json"));
   if (known.error) reg.errors.push(known.error);
+  else if (known.value !== undefined && !isRecord(known.value)) reg.errors.push(`${join(pluginsDir, "known_marketplaces.json")}: not an object map — state cannot be trusted`);
   else if (isRecord(known.value) && isRecord(known.value[spec.marketplaceName])) {
     const entry = known.value[spec.marketplaceName] as Record<string, unknown>;
     reg.marketplace = {
@@ -545,6 +546,8 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
   const installedChain = symlinkInChain(configDir, ["plugins", "installed_plugins.json"]);
   const installed = installedChain ? { error: installedChain } : readOwnedJson(root, join(pluginsDir, "installed_plugins.json"));
   if (installed.error) reg.errors.push(installed.error);
+  else if (installed.value !== undefined && !isRecord(installed.value)) reg.errors.push(`${join(pluginsDir, "installed_plugins.json")}: not an object — state cannot be trusted`);
+  else if (isRecord(installed.value) && installed.value.plugins !== undefined && !isRecord(installed.value.plugins)) reg.errors.push(`${join(pluginsDir, "installed_plugins.json")}: \`plugins\` is not an object map — state cannot be trusted`);
   else if (isRecord(installed.value)) {
     // v2 nests the map under `plugins` and holds one entry per scope in an array; the
     // v1 file keyed plugins at the top level with a single object. Accept both.

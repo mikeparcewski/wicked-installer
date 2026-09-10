@@ -1100,3 +1100,35 @@ test("install: a symlinked source package.json is refused and NAMED (version unk
     cleanup(sb);
   }
 });
+
+test("dispatch: without a Claude target the Claude-specific preflight does not run — an empty CLAUDE_CONFIG_DIR does not abort a Codex-only install", { skip }, async () => {
+  const sb = sandbox();
+  try {
+    // A stand-in per-CLI script for another CLI: logs its argv and prints an empty JSON object.
+    const stubLog = join(sb.tmp, "codex-stub.log");
+    const stub = join(sb.tmp, "install-codex.mjs");
+    writeFileSync(stub, `import { appendFileSync } from "node:fs"; appendFileSync(${JSON.stringify(stubLog)}, process.argv.slice(2).join(" ") + "\\n"); console.log("{}");\n`);
+    const codex = { cli: "codex", displayName: "Codex", scriptPath: stub, detected: true, binOnPath: true, homeDetected: false };
+    const saved = { ...process.env };
+    const logs = [];
+    const origLog = console.log;
+    console.log = (...a) => logs.push(a.join(" "));
+    for (const k of ["WICKED_CLAUDE_BIN", "CLAUDE_STUB_FAIL"]) delete process.env[k];
+    Object.assign(process.env, { PATH: `${sb.bin}:${dirname(process.execPath)}`, HOME: sb.home, USERPROFILE: sb.home, CLAUDE_CONFIG_DIR: "", FAKE_NPM_LOG: sb.npmLog, WICKED_SOURCE_ROOT: sb.srcRoot });
+    let out;
+    try {
+      await indexModule.dispatchToClis([codex], ["wicked-garden"], { dryRun: false, force: false, claudeHomes: [] });
+      out = logs.join("\n");
+    } finally {
+      console.log = origLog;
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+      Object.assign(process.env, saved);
+    }
+    assert.doesNotMatch(out, /CLAUDE_CONFIG_DIR is set but names no directory/, "no Claude-specific preflight for a non-Claude dispatch");
+    assert.ok(existsSync(stubLog), "the Codex script ran");
+    assert.match(readFileSync(stubLog, "utf8"), /wicked-garden/, "…and received the plugin as an ordinary asset");
+    assert.ok(!existsSync(sb.stubLog), "claude was never invoked");
+  } finally {
+    cleanup(sb);
+  }
+});

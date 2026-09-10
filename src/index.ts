@@ -238,12 +238,16 @@ export async function dispatchToClis(
   const results: CliRunResult[] = [];
   const pluginIds = productIds.filter((id) => getProduct(id)?.type === "claude-plugin");
 
-  // Before any script runs or any binary is acquired.
-  try {
-    validatePluginInputs(productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined), flags);
-  } catch (err) {
-    console.log(chalk.red(`\n${err instanceof Error ? err.message : String(err)}`));
-    return 1;
+  // Before any script runs or any binary is acquired — but only when Claude Code is among the
+  // selected targets: without it, plugin products go to the other CLIs' scripts as ordinary
+  // assets, and the Claude config dirs / marketplace inputs are simply not in play.
+  if (clis.some((c) => c.cli === "claude")) {
+    try {
+      validatePluginInputs(productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined), flags);
+    } catch (err) {
+      console.log(chalk.red(`\n${err instanceof Error ? err.message : String(err)}`));
+      return 1;
+    }
   }
 
   for (const [index, cli] of clis.entries()) {
