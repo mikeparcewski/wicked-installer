@@ -74,6 +74,13 @@ All notable changes to wicked-installer are documented here. The format follows
   dirs (a set-but-empty `CLAUDE_CONFIG_DIR` is an error) before the first dependency is installed;
   `--dry-run` describes every active config dir even when an earlier one is refused, failing the
   product afterwards exactly like the live run.
+- Marker and source hardening: every v2 product record and file record is validated field by
+  field at parse time (a malformed record makes the marker unusable — fail closed, byte-identical);
+  the product's own source manifests (`hooks/hooks.json`, `skills/*/SKILL.md`, the
+  `platform/claude` override, `package.json`) are walked no-follow from the staged source root —
+  one behind a symlink is never read and the skill / hook set is skipped with a named action; a
+  refused backup fails the config write it protects for every product touching that file (nothing
+  is remembered as backed up until the exclusive copy succeeded).
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is

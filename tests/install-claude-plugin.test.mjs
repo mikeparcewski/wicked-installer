@@ -641,8 +641,6 @@ test("install-claude.js treats valid JSON of an unrecognised marker shape as unu
       "products-object": { products: {} },
       "array": [],
       "string": "not a marker",
-      "v2-without-products": { markerVersion: 2 },
-      "v2-products-array": { markerVersion: 2, products: [] },
       "v1-entry-without-id": { products: [{ noid: 1 }] },
     };
     for (const [name, shape] of Object.entries(shapes)) {
@@ -705,6 +703,187 @@ test("install-claude.js handed ONLY plugins (after dependency expansion) creates
     assert.equal(r3.status, 1);
     assert.match(r3.stderr, /install marker is unusable/);
     assert.deepEqual(snapshot(corrupt), snapC);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("install-claude.js validates every v2 product and file record at parse time: a malformed record makes the marker unusable (exit 1, byte-identical)", () => {
+  const sb = sandbox();
+  try {
+    const good = { installedAt: "2026-01-01T00:00:00.000Z", lastResult: "installed", files: [], notes: [] };
+    const shapes = {
+      "no-products": { markerVersion: 2 },
+      "products-array": { markerVersion: 2, products: [] },
+      "record-empty": { markerVersion: 2, products: { x: {} } },
+      "record-files-string": { markerVersion: 2, products: { x: { ...good, files: "nope" } } },
+      "record-notes-string": { markerVersion: 2, products: { x: { ...good, notes: "nope" } } },
+      "record-lastResult": { markerVersion: 2, products: { x: { ...good, lastResult: "weird" } } },
+      "record-version-number": { markerVersion: 2, products: { x: { ...good, version: 1 } } },
+      "file-dir-no-path": { markerVersion: 2, products: { x: { ...good, files: [{ kind: "dir" }] } } },
+      "file-string": { markerVersion: 2, products: { x: { ...good, files: ["skills/x"] } } },
+      "file-json-key-no-hash": { markerVersion: 2, products: { x: { ...good, files: [{ kind: "json-key", file: "f", pointer: "/a" }] } } },
+      "file-hooks-no-owner": { markerVersion: 2, products: { x: { ...good, files: [{ kind: "hooks-entry", file: "f", event: "E", ownerMatch: {} }] } } },
+      "file-unknown-kind": { markerVersion: 2, products: { x: { ...good, files: [{ kind: "bogus", path: "x" }] } } },
+    };
+    for (const [name, shape] of Object.entries(shapes)) {
+      const cfg = join(sb.tmp, `cfg-v2-${name}`);
+      mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+      writeFileSync(join(cfg, "settings.json"), "{}");
+      writeFileSync(markerPath(cfg), JSON.stringify(shape));
+      const before = snapshot(cfg);
+      const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+      assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /install marker is unusable \(malformed v2 marker: /, name);
+      assert.equal(r.stdout.trim(), "", `${name}: no report`);
+      assert.deepEqual(snapshot(cfg), before, `${name}: byte-identical — never flushed`);
+      const st = runScript(sb, ["status", "--claude-home", cfg, "--json"]);
+      assert.equal(st.status, 1, `${name} status`);
+      assert.match(st.stderr, /malformed v2 marker: /, name);
+      assert.deepEqual(snapshot(cfg), before, `${name}: status wrote nothing`);
+    }
+    // …and a sound marker with every record kind still loads.
+    const ok = join(sb.tmp, "cfg-v2-ok");
+    mkdirSync(join(ok, "wicked-installer"), { recursive: true });
+    writeFileSync(markerPath(ok), JSON.stringify({ markerVersion: 2, cli: "claude", configDir: ok, updatedAt: "x", products: { y: { ...good, version: "1.0.0", source: "local", assets: { skills: 1 }, files: [
+      { kind: "dir", path: "skills/y" }, { kind: "json-key", file: ".claude.json", pointer: "/mcpServers/y", wroteHash: "abc" }, { kind: "hooks-entry", file: "settings.json", event: "SessionStart", ownerMatch: { commandContains: "wicked-installer/products/y" } },
+    ] } } }));
+    const st = runScript(sb, ["status", "--claude-home", ok, "--json"]);
+    assert.equal(st.status, 0, st.stdout + st.stderr);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("install-claude.js never reads a source manifest through a symlink: a linked hooks.json wires nothing, linked skills are skipped and reported, a real skill still installs", () => {
+  const sb = sandbox();
+  try {
+    const cfg = sb.cfg;
+    mkdirSync(cfg, { recursive: true });
+    writeFileSync(join(cfg, "settings.json"), JSON.stringify({ theme: "kept" }));
+    const external = join(sb.tmp, "external");
+    mkdirSync(join(external, "skilldir"), { recursive: true });
+    writeFileSync(join(external, "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "${CLAUDE_PLUGIN_ROOT}/hooks/evil.sh" }] }] } }));
+    writeFileSync(join(external, "skilldir", "SKILL.md"), "---\nname: wicked-vault-evil\n---\nevil\n");
+    writeFileSync(join(external, "SKILL.md"), "---\nname: wicked-vault-evil2\n---\nevil\n");
+    const vault = join(sb.srcRoot, "wicked-vault");
+    mkdirSync(join(vault, "hooks"));
+    writeFileSync(join(vault, "hooks", "evil.sh"), "#!/bin/sh\n");
+    symlinkSync(join(external, "hooks.json"), join(vault, "hooks", "hooks.json"));
+    mkdirSync(join(vault, "skills", "good"), { recursive: true });
+    writeFileSync(join(vault, "skills", "good", "SKILL.md"), "---\nname: wicked-vault-good\n---\ngood\n");
+    symlinkSync(join(external, "skilldir"), join(vault, "skills", "linked-dir"));
+    mkdirSync(join(vault, "skills", "linked-manifest"));
+    symlinkSync(join(external, "SKILL.md"), join(vault, "skills", "linked-manifest", "SKILL.md"));
+    const externalBefore = snapshot(external);
+
+    const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const report = JSON.parse(r.stdout).reports.find((x) => x.productId === "wicked-vault");
+    // hooks: the linked manifest was never read — nothing from it reached settings.json, no payload copied
+    assert.deepEqual(JSON.parse(readFileSync(join(cfg, "settings.json"), "utf8")), { theme: "kept" }, "settings.json untouched");
+    assert.ok(!existsSync(join(cfg, "wicked-installer", "products", "wicked-vault")), "no hooks payload copied");
+    const hookRefusal = report.actions.find((a) => a.kind === "merge-hook" && a.result === "skipped");
+    assert.ok(hookRefusal && /refused: source manifest .*hooks[\\/]hooks\.json: is a symlink/.test(hookRefusal.detail), JSON.stringify(report.actions));
+    // skills: the linked ones are skipped and named; the real one installs
+    const skipped = report.actions.filter((a) => a.kind === "copy-skill" && a.result === "skipped").map((a) => a.target).sort();
+    assert.deepEqual(skipped, ["skills/linked-dir", "skills/linked-manifest/SKILL.md"]);
+    assert.ok(existsSync(join(cfg, "skills", "wicked-vault-good", "SKILL.md")), "the real skill installed");
+    assert.ok(!existsSync(join(cfg, "skills", "wicked-vault-evil")) && !existsSync(join(cfg, "skills", "wicked-vault-evil2")), "nothing named after an external manifest");
+    assert.ok(!existsSync(join(cfg, "skills", "linked-dir")) && !existsSync(join(cfg, "skills", "linked-manifest")));
+    assert.deepEqual(snapshot(external), externalBefore, "externals byte-identical");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("install-claude.js: a refused backup fails the write it protects, for EVERY product touching the file — nothing is remembered as backed up", () => {
+  const sb = sandbox();
+  try {
+    const cfg = sb.cfg;
+    mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+    const settingsBytes = JSON.stringify({ theme: "kept" });
+    writeFileSync(join(cfg, "settings.json"), settingsBytes);
+    const external = join(sb.tmp, "external-backups");
+    mkdirSync(external);
+    symlinkSync(external, join(cfg, "wicked-installer", "backups")); // planted PARENT link: every backup is refused
+    for (const [id, script] of [["wicked-vault", "hello.sh"], ["wicked-bus", "hi.sh"]]) {
+      const src = join(sb.srcRoot, id);
+      mkdirSync(join(src, "hooks"), { recursive: true });
+      if (!existsSync(join(src, "package.json"))) writeFileSync(join(src, "package.json"), JSON.stringify({ name: id, version: "0.0.0-test" }));
+      writeFileSync(join(src, "hooks", "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `\${CLAUDE_PLUGIN_ROOT}/hooks/${script}` }] }] } }));
+      writeFileSync(join(src, "hooks", script), "#!/bin/sh\n", { mode: 0o755 });
+    }
+    const externalBefore = snapshot(external);
+    const r = runScript(sb, ["wicked-vault", "wicked-bus", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(readFileSync(join(cfg, "settings.json"), "utf8"), settingsBytes, "settings.json was not modified by either product");
+    assert.deepEqual(snapshot(external), externalBefore, "nothing was written through the planted backups link");
+    const reports = JSON.parse(r.stdout).reports;
+    for (const id of ["wicked-vault", "wicked-bus"]) {
+      const rep = reports.find((x) => x.productId === id);
+      assert.equal(rep.success, false, `${id} failed`);
+      assert.match(rep.message, /settings\.json: not written — backup refused: .*wicked-installer[\\/]backups: is a symlink/, id);
+      const failed = rep.actions.filter((a) => a.kind === "merge-hook" && a.result === "failed");
+      assert.ok(failed.length >= 1 && failed.every((a) => /backup refused/.test(a.detail)), `${id}: ${JSON.stringify(rep.actions)}`);
+    }
+    assert.ok(lstatSync(join(cfg, "wicked-installer", "backups")).isSymbolicLink(), "the planted link is untouched");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("install-claude.js destination links: a symlinked skill destination dir is refused, a file-leaf link inside an owned payload is unlinked never followed, a symlinked settings.json is refused — externals byte-identical", () => {
+  const sb = sandbox();
+  try {
+    const external = join(sb.tmp, "external");
+    mkdirSync(join(external, "skilldir"), { recursive: true });
+    writeFileSync(join(external, "skilldir", "keep.md"), "keep");
+    writeFileSync(join(external, "victim.json"), JSON.stringify({ victim: true }));
+    writeFileSync(join(external, "settings.json"), JSON.stringify({ external: true }));
+    const vault = join(sb.srcRoot, "wicked-vault");
+    mkdirSync(join(vault, "skills", "wicked-vault-core"), { recursive: true });
+    writeFileSync(join(vault, "skills", "wicked-vault-core", "SKILL.md"), "---\nname: wicked-vault-core\n---\nvault\n");
+    mkdirSync(join(vault, "hooks"));
+    writeFileSync(join(vault, "hooks", "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "${CLAUDE_PLUGIN_ROOT}/hooks/hello.sh" }] }] } }));
+    writeFileSync(join(vault, "hooks", "hello.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const externalBefore = snapshot(external);
+
+    // (a) destination DIRECTORY link at skills/<name> → refused, the product fails, nothing followed
+    const a = join(sb.tmp, "cfg-dir-link");
+    mkdirSync(join(a, "skills"), { recursive: true });
+    writeFileSync(join(a, "settings.json"), "{}");
+    symlinkSync(join(external, "skilldir"), join(a, "skills", "wicked-vault-core"));
+    const ra = runScript(sb, ["wicked-vault", "--claude-home", a, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+    assert.equal(ra.status, 1, ra.stdout + ra.stderr);
+    const repA = JSON.parse(ra.stdout).reports.find((x) => x.productId === "wicked-vault");
+    assert.match(repA.message, /skills[\\/]wicked-vault-core: is a symlink — refusing to follow it/);
+    assert.ok(lstatSync(join(a, "skills", "wicked-vault-core")).isSymbolicLink(), "the link is untouched");
+    assert.deepEqual(snapshot(external), externalBefore, "(a) external byte-identical");
+
+    // (b) destination FILE-LEAF link inside an owned payload root → the payload is replaced; the link is
+    //     unlinked, never followed; the fresh file is a regular file with the source bytes
+    const b = join(sb.tmp, "cfg-leaf-link");
+    mkdirSync(join(b, "wicked-installer", "products", "wicked-vault", "hooks"), { recursive: true });
+    writeFileSync(join(b, "settings.json"), "{}");
+    symlinkSync(join(external, "victim.json"), join(b, "wicked-installer", "products", "wicked-vault", "hooks", "hello.sh"));
+    const rb = runScript(sb, ["wicked-vault", "--claude-home", b, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+    assert.equal(rb.status, 0, rb.stdout + rb.stderr);
+    const leaf = join(b, "wicked-installer", "products", "wicked-vault", "hooks", "hello.sh");
+    assert.ok(lstatSync(leaf).isFile() && !lstatSync(leaf).isSymbolicLink(), "a regular file now");
+    assert.equal(readFileSync(leaf, "utf8"), "#!/bin/sh\nexit 0\n");
+    assert.deepEqual(snapshot(external), externalBefore, "(b) external byte-identical");
+
+    // (c) a symlinked settings.json (file leaf on the write path) → refused, named, nothing written through it
+    const c = join(sb.tmp, "cfg-settings-link");
+    mkdirSync(c);
+    symlinkSync(join(external, "settings.json"), join(c, "settings.json"));
+    const rc = runScript(sb, ["wicked-vault", "--claude-home", c, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+    const repC = JSON.parse(rc.stdout).reports.find((x) => x.productId === "wicked-vault");
+    const refusal = repC.actions.find((x) => x.kind === "merge-hook" && x.result === "failed");
+    assert.ok(refusal && /refused: .*is a symlink/.test(refusal.detail), JSON.stringify(repC.actions));
+    assert.ok(lstatSync(join(c, "settings.json")).isSymbolicLink(), "still a link");
+    assert.deepEqual(snapshot(external), externalBefore, "(c) external byte-identical");
   } finally {
     cleanup(sb);
   }

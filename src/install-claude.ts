@@ -764,11 +764,10 @@ function pruneBackups(backupsDir: string, base: string): void {
 
 function backupConfigFile(configDir: string, root: string, filePath: string, options: Options): void {
   if (options.dryRun) return;
+  if (backedUpThisRun.has(filePath)) return; // set ONLY after a successful exclusive copy (below)
   const source = chainUnder(root, filePath);
   if (!source.exists) return;
   if (source.kind !== "file") throw new UnsafePathError(filePath, "not a regular file");
-  if (backedUpThisRun.has(filePath)) return;
-  backedUpThisRun.add(filePath);
   const backupsDir = join(configDir, "wicked-installer", "backups");
   const backups = lstatChainNoFollow(configDir, join("wicked-installer", "backups"));
   if (!backups.exists) mkdirSync(backupsDir, { recursive: true });
@@ -794,7 +793,32 @@ function backupConfigFile(configDir: string, root: string, filePath: string, opt
   }
   if (leaf === undefined) throw new UnsafePathError(join(backupsDir, `${base}.${stamp}.bak`), "no free backup name after 8 attempts");
   copyFileSync(filePath, leaf, fsConstants.COPYFILE_EXCL);
+  backedUpThisRun.add(filePath); // a refused or failed backup never marks the file as backed up
   pruneBackups(backupsDir, base);
+}
+
+/**
+ * Back up, then write, a config file. A refused backup (a link or non-regular entry anywhere
+ * in the backups chain, at the leaf, or at the source) FAILS the write it protects: nothing is
+ * written, the `ok` actions that described this write are flipped to `failed` naming the
+ * refusal, and the error propagates so the product is reported failed — a later product that
+ * touches the same file goes through the very same check (nothing is remembered as backed up).
+ */
+function backupThenWrite(target: Target, file: string, data: unknown, options: Options, actions: Action[], describes: (a: Action) => boolean): void {
+  try {
+    backupConfigFile(target.dir, rootFor(target, file), file, options);
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    const detail = `not written — backup refused: ${err.message}`;
+    for (const a of actions) {
+      if (describes(a) && a.result === "ok") {
+        a.result = "failed";
+        a.detail = detail;
+      }
+    }
+    throw new Error(`${file}: ${detail}`);
+  }
+  atomicWriteJson(rootFor(target, file), file, data, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,10 +1116,10 @@ function stageProduct(product: Product, options: Options): PackageSource | undef
 }
 
 function readStagedVersion(root: string): string | undefined {
-  const p = join(root, "package.json");
-  if (!existsSync(p)) return undefined;
   try {
-    return (JSON.parse(readFileSync(p, "utf8")) as { version?: string }).version;
+    const manifest = lstatChainNoFollow(root, "package.json"); // no-follow: a symlinked manifest is not read
+    if (!manifest.exists || manifest.kind !== "file") return undefined;
+    return (JSON.parse(readFileSync(manifest.abs, "utf8")) as { version?: string }).version;
   } catch {
     return undefined;
   }
@@ -1193,40 +1217,65 @@ function rewriteCopiedSkillName(root: string, dest: string, originalName: string
 // Prefer platform/<cli>/ content over the generic skill body when present (§7.1).
 // A skill ships skills/<skill>/platform/claude/ with files that REPLACE the generic
 // equivalents; when absent, the generic content is used as-is.
-function skillCopyRoot(skillRoot: string): string {
+function skillCopyRoot(root: string, skillRoot: string): { dir: string; refused?: string } {
   const override = join(skillRoot, "platform", "claude");
-  if (existsSync(join(override, "SKILL.md"))) return override;
-  return skillRoot;
+  try {
+    const manifest = lstatChainNoFollow(root, relative(root, join(override, "SKILL.md")));
+    return { dir: manifest.exists && manifest.kind === "file" ? override : skillRoot };
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    return { dir: skillRoot, refused: err.message };
+  }
 }
 
-function findSkillRoots(skillsDir: string): string[] {
-  if (!existsSync(skillsDir)) return [];
-  const roots: string[] = [];
-  for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-    const direct = join(skillsDir, entry.name);
-    if (existsSync(join(direct, "SKILL.md"))) {
-      roots.push(direct);
-      continue;
-    }
-    roots.push(...findSkillRootsRecursive(direct));
-  }
-  return roots;
+interface SkillDiscovery {
+  roots: string[];
+  /** Source paths behind a symlink (or a non-regular manifest): never read, never copied — reported. */
+  refused: string[];
 }
 
-function findSkillRootsRecursive(dir: string): string[] {
-  const roots: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name.startsWith(".")) continue;
-    const full = join(dir, entry.name);
-    if (!entry.isDirectory()) continue;
-    if (existsSync(join(full, "SKILL.md"))) {
-      roots.push(full);
-    } else {
-      roots.push(...findSkillRootsRecursive(full));
-    }
+/**
+ * Skill roots under `<root>/skills`, walked NO-FOLLOW from the staged source root down: a
+ * symlinked skill dir, a symlinked `SKILL.md` (or one behind a symlinked parent) is refused —
+ * its external contents are never parsed for a name or copied — and reported to the caller.
+ */
+function findSkillRoots(root: string): SkillDiscovery {
+  const out: SkillDiscovery = { roots: [], refused: [] };
+  const skillsDir = join(root, "skills");
+  let top: ChainResult;
+  try {
+    top = lstatChainNoFollow(root, "skills");
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    out.refused.push(skillsDir);
+    return out;
   }
-  return roots;
+  if (!top.exists || top.kind !== "dir") return out;
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith(".")) continue;
+      const full = join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        out.refused.push(full);
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+      const manifestPath = join(full, "SKILL.md");
+      let manifest: ChainResult;
+      try {
+        manifest = lstatChainNoFollow(root, relative(root, manifestPath));
+      } catch (err) {
+        if (!(err instanceof UnsafePathError)) throw err;
+        out.refused.push(manifestPath);
+        continue;
+      }
+      if (manifest.exists && manifest.kind === "file") out.roots.push(full);
+      else if (!manifest.exists) walk(full);
+      else out.refused.push(manifestPath);
+    }
+  };
+  walk(skillsDir);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,17 +1325,26 @@ function installSkills(
   mp: MarkerProduct,
 ): number {
   const skillsDir = join(root, "skills");
-  const roots = findSkillRoots(skillsDir);
+  const discovery = findSkillRoots(root);
+  for (const refused of discovery.refused) {
+    actions.push({ kind: "copy-skill", target: normalizeSlash(relative(root, refused)), result: "skipped", detail: "refused: behind a symlink in the source tree — not read, not copied" });
+  }
+  const roots = discovery.roots;
   let count = 0;
 
   for (const skillRoot of roots) {
     const rel = relative(skillsDir, skillRoot);
-    const originalName = readSkillName(skillRoot);
+    const originalName = readSkillName(skillRoot, root);
     const nextName = claudeSkillName(product.id, originalName ?? "", rel);
     const destName = sanitizePathPart(nextName);
     const dest = join(target.dir, "skills", destName);
     const markerPathRel = toMarkerPath(target.dir, dest);
-    const copyFrom = skillCopyRoot(skillRoot);
+    const copySource = skillCopyRoot(root, skillRoot);
+    if (copySource.refused) {
+      actions.push({ kind: "copy-skill", target: normalizeSlash(relative(root, skillRoot)), result: "skipped", detail: `refused: ${copySource.refused} — skill not read, not copied` });
+      continue;
+    }
+    const copyFrom = copySource.dir;
 
     // Walk the destination no-follow: a symlinked skills/ or dest is refused (UnsafePathError
     // fails this product's install closed), a non-directory entry is a foreign collision.
@@ -1479,8 +1537,7 @@ function wireMcp(
 
   if (changed) {
     obj.mcpServers = serverMap;
-    backupConfigFile(target.dir, rootFor(target, file), file, options);
-    atomicWriteJson(rootFor(target, file), file, obj, options);
+    backupThenWrite(target, file, obj, options, actions, (a) => a.kind === "write-json-key" && a.target.startsWith(fileMarker));
   }
 
   return count;
@@ -1510,8 +1567,24 @@ function wireHooks(
   notes: string[],
   mp: MarkerProduct,
 ): number {
+  // The source manifest is walked NO-FOLLOW from the staged source root: a symlinked
+  // hooks.json (or a symlinked hooks/ parent) is never read — its external contents would
+  // otherwise be parsed and written into settings.json — and is reported instead.
   const hooksJson = join(root, "hooks", "hooks.json");
-  if (!existsSync(hooksJson)) return 0;
+  let hooksState: ChainResult;
+  try {
+    hooksState = lstatChainNoFollow(root, join("hooks", "hooks.json"));
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    actions.push({ kind: "merge-hook", target: `${product.id}/hooks/hooks.json`, result: "skipped", detail: `refused: source manifest ${err.message} — not read, hooks not wired` });
+    notes.push(`${product.id}: hooks/hooks.json in the source is behind a symlink — refused, nothing read or wired`);
+    return 0;
+  }
+  if (!hooksState.exists) return 0;
+  if (hooksState.kind !== "file") {
+    actions.push({ kind: "merge-hook", target: `${product.id}/hooks/hooks.json`, result: "skipped", detail: "refused: source manifest is not a regular file — not read, hooks not wired" });
+    return 0;
+  }
 
   // 1. Copy the product payload to an owned root (replace-on-install) — walked no-follow first.
   const payloadRoot = join(target.dir, "wicked-installer", "products", product.id);
@@ -1596,8 +1669,8 @@ function wireHooks(
 
   if (count > 0) {
     settings.hooks = settingsHooks;
-    backupConfigFile(target.dir, target.dir, settingsFile, options);
-    atomicWriteJson(target.dir, settingsFile, settings, options);
+    const settingsMarker = toMarkerPath(target.dir, settingsFile);
+    backupThenWrite(target, settingsFile, settings, options, actions, (a) => a.kind === "merge-hook" && a.target.startsWith(`${settingsMarker}#`));
   }
 
   return count;
@@ -1714,10 +1787,56 @@ function purgeStaleArtifacts(
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 
-/** A v2 marker: `markerVersion: 2` with a `products` map whose values are objects (what every consumer indexes). */
+/**
+ * Structural validation of a v2 marker, field by field, for everything install / status /
+ * uninstall consume: every product record (`installedAt`, `lastResult`, optional `version` /
+ * `source` / `assets`, `files`, `notes`) and every file record (`dir`/`file` → `path`;
+ * `json-key` → `file`, `pointer`, `wroteHash`; `hooks-entry` → `file`, `event`,
+ * `ownerMatch.commandContains`). Returns the first problem, or undefined when the marker is
+ * sound — a malformed record makes the whole marker unusable (fail closed) rather than
+ * something a consumer trips over after the run has started writing.
+ */
+function markerV2Problem(value: unknown): string | undefined {
+  if (!isPlainObject(value) || value.markerVersion !== 2) return "not a markerVersion 2 object";
+  if (value.cli !== undefined && value.cli !== "claude") return "cli: not \"claude\"";
+  if (value.configDir !== undefined && typeof value.configDir !== "string") return "configDir: not a string";
+  if (!isPlainObject(value.products)) return "products: not an object map";
+  const str = (v: unknown): v is string => typeof v === "string";
+  for (const [id, rec] of Object.entries(value.products)) {
+    const at = `products.${id}`;
+    if (!isPlainObject(rec)) return `${at}: not an object`;
+    if (rec.version !== undefined && !str(rec.version)) return `${at}.version: not a string`;
+    if (!str(rec.installedAt)) return `${at}.installedAt: missing or not a string`;
+    if (rec.source !== undefined && rec.source !== "local" && rec.source !== "npm-pack" && rec.source !== "git") return `${at}.source: unknown value`;
+    if (rec.lastResult !== "installed" && rec.lastResult !== "partial" && rec.lastResult !== "failed") return `${at}.lastResult: unknown value`;
+    if (rec.assets !== undefined && !(isPlainObject(rec.assets) && Object.values(rec.assets).every((n) => typeof n === "number"))) return `${at}.assets: not a map of numbers`;
+    if (!Array.isArray(rec.notes) || !rec.notes.every(str)) return `${at}.notes: missing or not an array of strings`;
+    if (!Array.isArray(rec.files)) return `${at}.files: missing or not an array`;
+    for (let i = 0; i < rec.files.length; i += 1) {
+      const f: unknown = rec.files[i];
+      const fat = `${at}.files[${i}]`;
+      if (!isPlainObject(f)) return `${fat}: not an object`;
+      switch (f.kind) {
+        case "dir":
+        case "file":
+          if (!str(f.path)) return `${fat}.path: missing or not a string`;
+          break;
+        case "json-key":
+          if (!str(f.file) || !str(f.pointer) || !str(f.wroteHash)) return `${fat}: json-key needs string file, pointer, wroteHash`;
+          break;
+        case "hooks-entry":
+          if (!str(f.file) || !str(f.event) || !isPlainObject(f.ownerMatch) || !str(f.ownerMatch.commandContains)) return `${fat}: hooks-entry needs string file, event, ownerMatch.commandContains`;
+          break;
+        default:
+          return `${fat}.kind: unknown record kind ${JSON.stringify(f.kind)}`;
+      }
+    }
+  }
+  return undefined;
+}
+
 function isMarkerV2(value: unknown): value is MarkerV2 {
-  if (!isPlainObject(value) || value.markerVersion !== 2) return false;
-  return isPlainObject(value.products) && Object.values(value.products).every(isPlainObject);
+  return markerV2Problem(value) === undefined;
 }
 
 /** A v1 marker: an object whose optional `products` is an array of objects carrying a string `id`. */
@@ -1748,7 +1867,11 @@ function readMarkerRaw(dir: string): MarkerRaw {
   } catch (err) {
     return { corrupt: true, reason: err instanceof Error ? err.message : String(err) };
   }
-  if (isMarkerV2(parsed)) return { v2: parsed, corrupt: false };
+  if (isPlainObject(parsed) && parsed.markerVersion === 2) {
+    const problem = markerV2Problem(parsed);
+    if (problem !== undefined) return { corrupt: true, reason: `malformed v2 marker: ${problem}` };
+    return { v2: parsed as unknown as MarkerV2, corrupt: false };
+  }
   // Any other valid JSON must be a v1 marker of the shape consumers index; anything else
   // (`{"products": {}}`, an array, a string, a `markerVersion: 2` without a products map …)
   // would crash a consumer instead of failing closed — so it is unusable, like invalid JSON.
@@ -2189,8 +2312,11 @@ function removeMarkerEntry(
         actions.push({ kind: "remove", target: disp, result: options.dryRun ? "planned" : "ok" });
       }
       if (!options.dryRun) {
-        backupConfigFile(target.dir, rootFor(target, abs), abs, options);
-        atomicWriteJson(rootFor(target, abs), abs, obj, options);
+        try {
+          backupThenWrite(target, abs, obj, options, actions, (a) => a.kind === "remove" && a.target === disp);
+        } catch {
+          continue; // the `remove` action now reads `failed` with the refusal; nothing was written
+        }
       }
     } else if (f.kind === "hooks-entry") {
       const abs = fromMarkerPath(target.dir, f.file);
@@ -2222,8 +2348,11 @@ function removeMarkerEntry(
       settings.hooks = hooksObj;
       actions.push({ kind: "remove", target: disp, result: options.dryRun ? "planned" : "ok" });
       if (!options.dryRun) {
-        backupConfigFile(target.dir, rootFor(target, abs), abs, options);
-        atomicWriteJson(rootFor(target, abs), abs, settings, options);
+        try {
+          backupThenWrite(target, abs, settings, options, actions, (a) => a.kind === "remove" && a.target === disp);
+        } catch {
+          continue; // as above: action flipped to `failed`, nothing written
+        }
       }
     }
   }
