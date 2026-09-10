@@ -198,6 +198,22 @@ test("install-claude.js status: a registered plugin reads current; one whose pay
   }
 });
 
+test("install-claude.js: an invalid explicit --source-root fails BEFORE any config dir or marker is created", () => {
+  const sb = sandbox();
+  const bogus = join(sb.tmp, "not-a-checkout");
+  mkdirSync(bogus);
+  try {
+    const r = runScript(sb, ["wicked-garden", "--claude-home", sb.cfg, "--source-root", bogus, "--skip-binaries", "--json"]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /no \.claude-plugin\/marketplace\.json under/);
+    assert.equal(r.stdout.trim(), "", "no report is emitted: the run never started");
+    assert.ok(!existsSync(sb.cfg), "no config dir (and so no marker) was created");
+    assert.ok(!existsSync(sb.stubLog), "claude was never invoked");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("install-claude.js: a set-but-empty CLAUDE_CONFIG_DIR is rejected (no --claude-home given)", () => {
   const sb = sandbox();
   try {

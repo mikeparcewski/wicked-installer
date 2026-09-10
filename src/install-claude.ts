@@ -1771,6 +1771,14 @@ function runInstall(options: Options, registry: Registry): number {
   const products = resolveProducts(registry, options.productIds, options.all);
   const resolution = resolveTargets(options);
 
+  // Fail fast on an explicit --source-root that holds no marketplace for a claude-plugin
+  // product — BEFORE any config dir or marker is created, so a typo leaves no state behind.
+  if (options.sourceRootExplicit) {
+    for (const product of products) {
+      if (product.type === "claude-plugin") resolveMarketplaceSource(claudePluginSpec(product), options.sourceRoot);
+    }
+  }
+
   if (!resolution.cliPresent && resolution.targets[0].origin === "fallback") {
     log(options, `Claude command/home not detected; creating ${resolution.primary} because Claude was selected.`);
   }

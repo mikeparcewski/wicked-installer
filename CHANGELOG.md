@@ -55,5 +55,5 @@ All notable changes to wicked-installer are documented here. The format follows
   install record no longer counts, so the product list agrees with the registration detail.
 - `--source-root` without Claude Code fails instead of silently installing the published package
   through the `npx` fallback, and a root without `.claude-plugin/marketplace.json` fails fast even
-  under `--dry-run`. On Windows, a `.cmd`-shim `claude` is refused `%`/`!`-bearing arguments (cmd.exe
+  under `--dry-run` — in `install-claude.js` before any config dir or marker is created. On Windows, a `.cmd`-shim `claude` is refused `%`/`!`-bearing arguments (cmd.exe
   would expand them; INTERFACE.md §1.1) rather than passing a rewritten path to Claude Code.
