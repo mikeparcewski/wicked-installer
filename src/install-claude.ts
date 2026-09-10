@@ -2,6 +2,7 @@
 import {
   accessSync,
   chmodSync,
+  copyFileSync,
   constants as fsConstants,
   cpSync,
   existsSync,
@@ -772,9 +773,27 @@ function backupConfigFile(configDir: string, root: string, filePath: string, opt
   const backups = lstatChainNoFollow(configDir, join("wicked-installer", "backups"));
   if (!backups.exists) mkdirSync(backupsDir, { recursive: true });
   else if (backups.kind !== "dir") throw new UnsafePathError(backupsDir, "not a directory");
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  // The destination LEAF is validated too, never handed to a copy blindly: the predictable
+  // `<base>.<stamp>.bak` is used only when genuinely absent. A link at that leaf (dangling or not)
+  // is neither followed nor replaced, and an existing regular file is not overwritten — either
+  // way a fresh unique name is chosen and validated the same way. A link or other problem in a
+  // PARENT component is refused outright. The copy itself is exclusive (COPYFILE_EXCL).
+  const stamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
   const base = basename(filePath);
-  cpSync(filePath, join(backupsDir, `${base}.${stamp}.bak`), { force: true });
+  let leaf: string | undefined;
+  for (let attempt = 0; attempt < 8 && leaf === undefined; attempt += 1) {
+    const name = attempt === 0 ? `${base}.${stamp}.bak` : `${base}.${stamp}.${randomBytes(4).toString("hex")}.bak`;
+    const candidate = join(backupsDir, name);
+    try {
+      const state = lstatChainNoFollow(configDir, join("wicked-installer", "backups", name));
+      if (!state.exists) leaf = candidate; // occupied (regular file, dir, …) ⇒ next name
+    } catch (err) {
+      if (!(err instanceof UnsafePathError) || err.path !== candidate) throw err;
+      // a link (or an unstat-able entry) AT the leaf ⇒ left alone, next name
+    }
+  }
+  if (leaf === undefined) throw new UnsafePathError(join(backupsDir, `${base}.${stamp}.bak`), "no free backup name after 8 attempts");
+  copyFileSync(filePath, leaf, fsConstants.COPYFILE_EXCL);
   pruneBackups(backupsDir, base);
 }
 
@@ -1092,13 +1111,47 @@ function shouldCopy(src: string): boolean {
   return !parts.some((part) => COPY_SKIP_SEGMENTS.has(part));
 }
 
-function copyTree(src: string, dest: string, options: Options): void {
+/**
+ * Copy a source tree (staging / checkout — outside the config dir) to `dest` below `root`
+ * (the config dir). EVERY destination path — each directory and each file leaf — is walked
+ * no-follow through lstatChainNoFollow before it is created or written: a link anywhere is
+ * refused (UnsafePathError), an existing directory is reused, an existing regular file is
+ * unlinked and re-created exclusively (COPYFILE_EXCL). Source symlinks are never copied — a
+ * link is never planted inside the config dir — and are returned so the caller can report them.
+ */
+function copyTree(root: string, src: string, dest: string, options: Options): { skippedLinks: string[] } {
+  const skippedLinks: string[] = [];
   if (options.dryRun) {
     log(options, `  dry-run: copy ${src} -> ${dest}`);
-    return;
+    return { skippedLinks };
   }
-  mkdirSync(dirname(dest), { recursive: true });
-  cpSync(src, dest, { recursive: true, force: true, filter: shouldCopy });
+  const parent = chainUnder(root, dirname(dest));
+  if (!parent.exists) mkdirSync(dirname(dest), { recursive: true }); // every existing component verified real above
+  else if (parent.kind !== "dir") throw new UnsafePathError(dirname(dest), "not a directory");
+
+  const copyEntry = (from: string, to: string): void => {
+    if (!shouldCopy(from)) return;
+    const st = lstatSync(from);
+    if (st.isSymbolicLink()) {
+      skippedLinks.push(from);
+      return;
+    }
+    const state = chainUnder(root, to);
+    if (st.isDirectory()) {
+      if (!state.exists) mkdirSync(to);
+      else if (state.kind !== "dir") throw new UnsafePathError(to, "not a directory");
+      for (const entry of readdirSync(from, { withFileTypes: true })) copyEntry(join(from, entry.name), join(to, entry.name));
+      return;
+    }
+    if (!st.isFile()) return; // sockets, fifos, devices: never copied
+    if (state.exists) {
+      if (state.kind !== "file") throw new UnsafePathError(to, "not a regular file");
+      rmSync(to, { force: true });
+    }
+    copyFileSync(from, to, fsConstants.COPYFILE_EXCL);
+  };
+  copyEntry(src, dest);
+  return { skippedLinks };
 }
 
 function readSkillName(skillDir: string, root?: string): string | undefined {
@@ -1268,7 +1321,10 @@ function installSkills(
       }
     }
 
-    copyTree(copyFrom, dest, options);
+    const copied = copyTree(target.dir, copyFrom, dest, options);
+    if (copied.skippedLinks.length > 0) {
+      actions.push({ kind: "copy-skill", target: markerPathRel, result: "skipped", detail: `symlinks in the source were not copied (a link is never planted in the config dir): ${copied.skippedLinks.map((l) => relative(copyFrom, l)).join(", ")}` });
+    }
     rewriteCopiedSkillName(target.dir, dest, originalName, nextName, options);
     mp.files.push({ kind: "dir", path: markerPathRel });
     actions.push({ kind: "copy-skill", target: markerPathRel, result: options.dryRun ? "planned" : "ok" });
@@ -1477,7 +1533,11 @@ function wireHooks(
   }
   for (const sibling of ["hooks", "lib", "scenarios", "schemas", "scripts", "bin"]) {
     const src = join(root, sibling);
-    if (existsSync(src)) copyTree(src, join(payloadRoot, sibling), options);
+    if (!existsSync(src)) continue;
+    const copied = copyTree(target.dir, src, join(payloadRoot, sibling), options);
+    if (copied.skippedLinks.length > 0) {
+      notes.push(`${product.id}: symlinks in the source were not copied into ${payloadRoot} (a link is never planted in the config dir): ${copied.skippedLinks.map((l) => relative(root, l)).join(", ")}`);
+    }
   }
   mp.files.push({ kind: "dir", path: toMarkerPath(target.dir, payloadRoot) });
   actions.push({ kind: "merge-hook", target: toMarkerPath(target.dir, payloadRoot), result: options.dryRun ? "planned" : "ok", detail: "payload copied" });

@@ -546,3 +546,90 @@ test("dispatch: with no legacy copy nothing is reported as legacy, and a fresh c
     cleanup(sb);
   }
 });
+
+test("install-claude.js never writes through a link: a planted backup leaf is left alone (fresh name), source symlinks are never planted, externals byte-identical", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const cfg = sb.cfg;
+    const external = join(sb.tmp, "external");
+    mkdirSync(external);
+    writeFileSync(join(external, "victim.json"), JSON.stringify({ victim: true }));
+    mkdirSync(join(external, "victim-dir"));
+    writeFileSync(join(external, "victim-dir", "inner.txt"), "inner");
+
+    // The vault source ships a skill (copied to skills/) and a hook (merged into settings.json, which
+    // is therefore backed up). Both trees carry symlinks pointing at the external files.
+    const vault = join(sb.srcRoot, "wicked-vault");
+    const skill = join(vault, "skills", "wicked-vault-core");
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(skill, "SKILL.md"), "---\nname: wicked-vault-core\n---\nvault\n");
+    writeFileSync(join(skill, "real.md"), "real");
+    symlinkSync(join(external, "victim.json"), join(skill, "linked-file.json"));
+    symlinkSync(join(external, "victim-dir"), join(skill, "linked-dir"));
+    mkdirSync(join(vault, "hooks"));
+    writeFileSync(join(vault, "hooks", "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "${CLAUDE_PLUGIN_ROOT}/hooks/hello.sh" }] }] } }));
+    writeFileSync(join(vault, "hooks", "hello.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    symlinkSync(join(external, "victim.json"), join(vault, "hooks", "linked.sh"));
+
+    // A settings.json to back up, and a symlink pre-planted at EVERY predictable backup leaf the
+    // run could pick (second-resolution stamp, a generous window), each pointing at the external file.
+    mkdirSync(cfg, { recursive: true });
+    writeFileSync(join(cfg, "settings.json"), JSON.stringify({ theme: "kept" }));
+    const backups = join(cfg, "wicked-installer", "backups");
+    mkdirSync(backups, { recursive: true });
+    const planted = [];
+    const start = Date.now();
+    for (let sec = -5; sec <= 120; sec += 1) {
+      const stamp = new Date(start + sec * 1000).toISOString().slice(0, 19).replace(/:/g, "-");
+      const leaf = join(backups, `settings.json.${stamp}.bak`);
+      symlinkSync(join(external, "victim.json"), leaf);
+      planted.push(leaf);
+    }
+    const externalBefore = snapshot(external);
+
+    const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(Date.now() - start < 120_000, "the run finished inside the planted window");
+
+    // 1. Backup leaf: no planted link was followed or replaced; the backup went to a fresh unique name.
+    assert.deepEqual(snapshot(external), externalBefore, "the external targets are byte-identical");
+    for (const leaf of planted) assert.ok(lstatSync(leaf).isSymbolicLink(), `${leaf} is still the planted link`);
+    const regularBackups = readdirSync(backups, { withFileTypes: true }).filter((e) => e.isFile());
+    assert.equal(regularBackups.length, 1, "exactly one real backup was written");
+    assert.match(regularBackups[0].name, /^settings\.json\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.[0-9a-f]{8}\.bak$/, "under a fresh unique name");
+    assert.equal(readFileSync(join(backups, regularBackups[0].name), "utf8"), JSON.stringify({ theme: "kept" }), "holding the pre-install settings.json bytes");
+    const settings = JSON.parse(readFileSync(join(cfg, "settings.json"), "utf8"));
+    assert.equal(settings.theme, "kept");
+    assert.ok(Array.isArray(settings.hooks?.SessionStart) && settings.hooks.SessionStart.length === 1, "the hook was merged");
+
+    // 2. copyTree: real files copied, source symlinks never planted, no link anywhere under cfg.
+    const skillDest = join(cfg, "skills", "wicked-vault-core");
+    assert.equal(readFileSync(join(skillDest, "real.md"), "utf8"), "real");
+    assert.ok(existsSync(join(skillDest, "SKILL.md")));
+    assert.ok(!existsSync(join(skillDest, "linked-file.json")) && !lstatSyncSafe(join(skillDest, "linked-file.json")), "file link not planted");
+    assert.ok(!lstatSyncSafe(join(skillDest, "linked-dir")), "dir link not planted");
+    const payloadHooks = join(cfg, "wicked-installer", "products", "wicked-vault", "hooks");
+    assert.equal(readFileSync(join(payloadHooks, "hello.sh"), "utf8"), "#!/bin/sh\nexit 0\n");
+    assert.ok((lstatSync(join(payloadHooks, "hello.sh")).mode & 0o111) !== 0, "exec bit preserved");
+    assert.ok(!lstatSyncSafe(join(payloadHooks, "linked.sh")), "hook link not planted");
+    const linksUnderCfg = snapshot(cfg).filter((l) => l.includes("[link") && !l.startsWith("wicked-installer/backups/"));
+    assert.deepEqual(linksUnderCfg, [], "no symlink anywhere under the config dir besides the pre-planted backup leaves");
+    const report = JSON.parse(r.stdout);
+    const text = JSON.stringify(report);
+    assert.match(text, /symlinks in the source were not copied/, "the skipped links are reported");
+    assert.match(text, /linked-file\.json/);
+    assert.match(text, /linked\.sh/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+/** lstat that reports absence as false instead of throwing (a dangling link is still "present"). */
+function lstatSyncSafe(p) {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}

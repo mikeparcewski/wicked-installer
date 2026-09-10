@@ -62,6 +62,11 @@ All notable changes to wicked-installer are documented here. The format follows
   `installed_plugins.json` entry that is not an object is reported as a malformed, unhealthy record
   (`partially registered`) instead of being dropped as "not installed"; path-segment validation also
   rejects DEL and C1 control characters.
+- The same no-follow walk now covers the two copy paths: the backup file's exact destination leaf
+  (a link or an existing file at the predictable `<name>.<stamp>.bak` is left alone and a fresh
+  unique name is used; the copy is exclusive) and every directory and file `copyTree` creates under
+  the config dir (a link anywhere is refused; symlinks in a product's source tree are never copied
+  into the config dir and are reported instead).
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is
