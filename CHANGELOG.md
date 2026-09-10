@@ -44,9 +44,11 @@ All notable changes to wicked-installer are documented here. The format follows
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is
   lstat'd, so a symlinked `plugins/`, `cache/`, `<marketplace>/`, `<plugin>/`, `<version>/`,
   `plugin.json` or state file makes the registration `unreadable` (error, exit 1) rather than
-  merely partial; any selected install record without a real version makes the dir `partial`
-  ("install record has no version (<scope> scope)") regardless of other entries — never completed
-  with a placeholder.
+  merely partial; the recorded `installPath` must be the exact expected cache path (an alias that
+  merely resolves to it is `partial`); any selected install record without a real version makes the
+  dir `partial` ("install record has no version (<scope> scope)") regardless of other entries — never
+  completed with a placeholder. The dry-run plan applies the same launch-shape validation as the
+  live spawn (a `.cmd`-shim `claude` with `%`/`!` in an argument fails the plan too).
 - `CLAUDE_CONFIG_DIR` that is set but names no directory ("", blanks, a bare `:`/`,`) is an error
   (exit 1, nothing written) instead of a silent fall-through to `~/.claude` — in the installer and
   in `install-claude.js`.

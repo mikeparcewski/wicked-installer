@@ -377,6 +377,26 @@ test("the guard itself trips on a non-probe spawn and passes `claude --version` 
     assert.equal(allowed.status, 0, allowed.stderr);
     assert.match(allowed.stdout, /9\.9\.9 \(Claude Code stub\)/, "the allowed probe really ran");
     assert.deepEqual(guardEntries(log).map((e) => e.allowed), [true]);
+
+    // The allow-list is an EXACT basename match: a look-alike executable or a node script that
+    // merely contains "claude" in its name is blocked before it can run.
+    for (const [cmd, args] of [
+      ["evil-claude", ["--version"]],
+      ["/tmp/claude-writer", ["--version"]],
+      [process.execPath, ["/tmp/claude-writer.mjs", "--version"]],
+      [process.execPath, [join(__dirname, "claude-stub.mjs"), "plugin", "list", "--json"]],
+    ]) {
+      rmSync(log, { force: true });
+      const blocked = spawnSync(
+        process.execPath,
+        ["--require", GUARD, "--input-type=module", "-e",
+          "import { spawnSync } from 'node:child_process'; spawnSync(process.argv[1], process.argv.slice(2));",
+          cmd, ...args],
+        { encoding: "utf8", cwd: ROOT, env: { ...process.env, SPAWN_GUARD_LOG: log, NODE_OPTIONS: "" }, timeout: 30_000 },
+      );
+      assert.notEqual(blocked.status, 0, `${cmd} ${args.join(" ")} must be blocked`);
+      assert.deepEqual(guardEntries(log).map((e) => e.allowed), [false], `${cmd} ${args.join(" ")} must be recorded as disallowed`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

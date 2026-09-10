@@ -12,6 +12,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const {
   claudePluginSpec,
   describeVerdict,
+  planClaudePlugin,
   planForDir,
   prepareClaudeSpawn,
   probeClaude,
@@ -317,6 +318,20 @@ test("readRegistration: symlinked registration files and escapes are refused and
     assert.equal(v.state, "unreadable", JSON.stringify(reg));
     assert.ok(reg.errors.some((e) => /wicked-garden[\\/]1\.0\.0: is a symlink — refusing to follow it/.test(e)), JSON.stringify(reg.errors));
 
+    // A record reaching the real payload through a symlinked ALIAS of the marketplace dir is not
+    // the expected path: realpath-equivalence is not enough — the recorded path must be exact.
+    const aliased = join(d, "aliased");
+    const al = configDir(aliased, { marketplace: true, payload: true });
+    const aliasDir = join(al.plugins, "cache", "wicked-garden-alias");
+    symlinkSync(join(al.plugins, "cache", "wicked-garden"), aliasDir);
+    writeFileSync(join(al.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: join(aliasDir, "wicked-garden", "1.0.0"), version: "1.0.0" }] },
+    }));
+    reg = readRegistration(aliased, spec);
+    v = registrationVerdict(reg);
+    assert.equal(v.state, "partial", JSON.stringify(reg));
+    assert.match(v.problems[0], /payload recorded at .*wicked-garden-alias.* is not the expected cache path/);
+
     // Ancestors too: a symlinked `plugins/` or `<marketplace>/` component — even one resolving
     // elsewhere INSIDE the config dir — makes the state unreadable.
     const linkedPlugins = join(d, "linked-plugins");
@@ -378,6 +393,32 @@ test("planForDir: commands follow the on-disk state exactly (add only when absen
     plan = planForDir(local, spec, "mikeparcewski/wicked-garden");
     assert.deepEqual(plan.commands.map((c) => c.args[1]), ["update"]);
     assert.match(plan.probes[0], /registered \(directory:\/somewhere\/wicked-garden\)$/);
+  } finally {
+    rm(d);
+  }
+});
+
+test("planClaudePlugin: the dry-run plan refuses what the live spawn would refuse (a .cmd-shim claude with %/! in an argument)", () => {
+  const d = tmp();
+  try {
+    const cmdShim = join(d, "claude.cmd");
+    writeFileSync(cmdShim, "");
+    const cfg = join(d, "cfg");
+    mkdirSync(cfg);
+    const spawner = () => ({ status: 0, stdout: "9.9.9 (Claude Code)\n", stderr: "" });
+    const env = { WICKED_CLAUDE_BIN: cmdShim };
+    const configDirs = { dirs: [cfg], origin: "env" };
+    // A checkout under %TEMP% cannot be passed through cmd.exe unchanged: the plan fails as the live run would.
+    assert.throws(
+      () => planClaudePlugin(spec, { configDirs, source: "C:\\%TEMP%\\wicked-garden", env, spawner, platform: "win32" }),
+      /refusing to route .* through cmd\.exe/,
+    );
+    // The same source is fine when the binary is a native exe (no shell involved).
+    const exe = join(d, "claude.exe");
+    writeFileSync(exe, "");
+    const plan = planClaudePlugin(spec, { configDirs, source: "C:\\%TEMP%\\wicked-garden", env: { WICKED_CLAUDE_BIN: exe }, spawner, platform: "win32" });
+    assert.equal(plan.claudeDetected, true);
+    assert.ok(plan.plans[0].commands.some((c) => c.args[2] === "add"));
   } finally {
     rm(d);
   }

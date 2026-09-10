@@ -20,12 +20,17 @@ function record(entry) {
   if (log) fs.appendFileSync(log, JSON.stringify(entry) + "\n");
 }
 
-// `claude --version` in any launch shape: `claude --version`, `claude.cmd --version`, or
-// `node <…claude-stub.mjs> --version` (the WICKED_CLAUDE_BIN seam).
+const basename = (p) => String(p).split(/[\\/]/).pop().toLowerCase();
+const CLAUDE_BINARIES = new Set(["claude", "claude.cmd", "claude.exe", "claude.bat"]);
+
+// Exactly `claude --version`, in its two launch shapes — the executable's basename is matched
+// exactly (never a substring, so `evil-claude` or `claude-writer.mjs` do not qualify):
+//   <…/claude|claude.cmd|claude.exe|claude.bat> --version
+//   <node> <…/claude-stub.mjs> --version            (the WICKED_CLAUDE_BIN test seam)
 function isAllowedProbe(cmd, args) {
-  const argv = [String(cmd), ...args];
-  if (argv[argv.length - 1] !== "--version" || argv.length > 3) return false;
-  return argv.slice(0, -1).some((a) => /claude/i.test(a));
+  if (args.length === 1 && args[0] === "--version" && CLAUDE_BINARIES.has(basename(cmd))) return true;
+  if (args.length === 2 && args[1] === "--version" && String(cmd) === process.execPath && basename(args[0]) === "claude-stub.mjs") return true;
+  return false;
 }
 
 for (const name of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]) {

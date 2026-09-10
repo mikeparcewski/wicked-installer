@@ -441,19 +441,16 @@ function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, i
     if (dir.missing) return { ok: false, problem: `payload dir missing: ${installPath}` };
     return { ok: false, problem: dir.error, error: dir.error }; // symlink / escape / permission
   }
-  // The payload must be THE cache path Claude Code (and crew) read for the recorded version —
-  // a record pointing anywhere else, even at a valid-looking plugin, is not a registration.
+  // Every component of the expected payload chain must be a real directory/file — no symlink anywhere.
   const expected = join(cacheRoot(configDir, spec), recordVersion);
-  let atExpectedPath = false;
-  try {
-    atExpectedPath = realpathSync(installPath) === realpathSync(expected);
-  } catch {
-    atExpectedPath = false;
-  }
-  if (!atExpectedPath) return { ok: false, problem: `payload recorded at ${installPath} is not the expected cache path ${expected}` };
-  // Every component of the payload chain must be a real directory/file — no symlink anywhere.
   const chain = symlinkInChain(configDir, ["plugins", "cache", spec.marketplaceName, spec.pluginName, recordVersion, ".claude-plugin", "plugin.json"]);
   if (chain) return { ok: false, problem: chain, error: chain };
+  // The payload must be THE cache path Claude Code (and crew) read for the recorded version —
+  // the exact path, not an alias that merely resolves to it through a symlinked ancestor. A
+  // record pointing anywhere else, even at a valid-looking plugin, is not a registration.
+  if (resolve(installPath) !== resolve(expected)) {
+    return { ok: false, problem: `payload recorded at ${installPath} is not the expected cache path ${expected}` };
+  }
   const manifest = readOwnedJson(root, join(installPath, ".claude-plugin", "plugin.json"));
   if (manifest.error) return { ok: false, problem: manifest.error, error: manifest.error };
   if (manifest.value === undefined) return { ok: false, problem: `payload has no .claude-plugin/plugin.json: ${installPath}` };
@@ -708,6 +705,8 @@ export interface PlanOptions {
   source: string;
   env?: NodeJS.ProcessEnv;
   spawner?: ClaudeSpawner;
+  /** For the launch-shape validation of planned commands (tests simulate win32). */
+  platform?: NodeJS.Platform;
 }
 
 export interface PlanOutcome {
@@ -733,6 +732,9 @@ export function planClaudePlugin(spec: ClaudePluginSpec, opts: PlanOptions): Pla
   const plans: DirPlan[] = [];
   for (const dir of dirs) {
     const plan = planForDir(dir, spec, opts.source);
+    // The live run would refuse these at spawn time (a .cmd-shim claude with %/! in an
+    // argument); the plan must fail the same way, or dry and live would diverge.
+    for (const c of plan.commands) prepareClaudeSpawn(probe.bin, c.args, opts.platform);
     plans.push(plan);
     lines.push(dir);
     for (const p of plan.probes) lines.push(`probe:   ${p}`);
