@@ -13,7 +13,7 @@ import { promptSelectionMode, promptBundle, promptCustom, promptConfirm, promptC
 import type { CliOption, UserSelection } from "./ui.js";
 import { listProducts, getProduct } from "./registry.js";
 import type { InstallResult, Product } from "./types.js";
-import { LEGACY_CLEANUP_ISSUE, cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, readRegistration, registrationVerdict, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
+import { LEGACY_CLEANUP_ISSUE, cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, detectLegacyCopies, readRegistration, registrationVerdict, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
 import type { RegistrationState } from "./claude-plugin.js";
 
 /**
@@ -198,13 +198,34 @@ function presentWithoutScript(cli: CliOption, flags: DispatchFlags): CliRunResul
  * after the script, so required binaries are already acquired. Legacy copies left by earlier
  * installers are detected and reported, never removed (LEGACY_CLEANUP_ISSUE).
  */
-async function registerPluginViaClaude(id: string, flags: DispatchFlags): Promise<ScriptReportEntry> {
+async function registerPluginViaClaude(id: string, flags: DispatchFlags, preDetectedLegacy: string[]): Promise<ScriptReportEntry> {
   const product = getProduct(id);
   if (!product) return { productId: id, success: false, skipped: false, message: `${id}: unknown product` };
   console.log(`\n${chalk.cyan("→")} ${chalk.bold(product.displayName)} — registered Claude Code plugin${flags.dryRun ? chalk.dim(" [dry-run]") : ""}`);
   // Claude Code is the chosen target here: no `claude` CLI ⇒ a manual step, never the bare copy.
-  const result = await installProduct(product, { ...installOptionsFrom(flags), noFallback: true });
+  const result = await installProduct(product, { ...installOptionsFrom(flags), noFallback: true, preDetectedLegacy });
   return { productId: id, displayName: product.displayName, success: result.success, skipped: result.skipped, message: result.message };
+}
+
+/**
+ * Report legacy (unregistered) copies of each plugin BEFORE the Claude script runs: the script
+ * upgrades a v1 marker to v2 as its first act, and reporting afterwards would read the upgraded
+ * file. Nothing is removed (LEGACY_CLEANUP_ISSUE). Returns the paths per plugin id so the
+ * registration step can carry the count into its result without re-detecting.
+ */
+function reportLegacyCopies(pluginIds: string[], flags: DispatchFlags): Record<string, string[]> {
+  const found: Record<string, string[]> = {};
+  const dirs = [...new Set([...resolveClaudeConfigDirs({ homeFlags: flags.claudeHomes }).dirs, join(homedir(), ".claude")])];
+  for (const id of pluginIds) {
+    const product = getProduct(id);
+    if (!product) continue;
+    const spec = claudePluginSpec(product);
+    found[id] = [...new Set(dirs.flatMap((dir) => detectLegacyCopies(dir, spec)))];
+    for (const path of found[id]) {
+      console.log(chalk.dim(`  legacy ${id} copy detected at ${path} — left in place; removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`));
+    }
+  }
+  return found;
 }
 
 export async function dispatchToClis(
@@ -231,9 +252,11 @@ export async function dispatchToClis(
     // The Claude script never receives plugin products — they are registered below. Other
     // CLIs have no plugin registry, so they still receive them (as skills).
     const forScript = cli.cli === "claude" ? productIds.filter((id) => !pluginIds.includes(id)) : productIds;
+    // Legacy-copy detection must see the marker as it is NOW, before the script may upgrade it.
+    const legacy = cli.cli === "claude" && pluginIds.length > 0 ? reportLegacyCopies(pluginIds, flags) : {};
     const result = forScript.length > 0 ? runCliScript(cli, forScript, flags, skipBinaries) : presentWithoutScript(cli, flags);
     if (cli.cli === "claude") {
-      for (const id of pluginIds) result.entries.push(await registerPluginViaClaude(id, flags));
+      for (const id of pluginIds) result.entries.push(await registerPluginViaClaude(id, flags, legacy[id] ?? []));
     }
     results.push(result);
   }

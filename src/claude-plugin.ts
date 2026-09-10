@@ -423,18 +423,42 @@ export function detectLegacyCopies(configDir: string, spec: ClaudePluginSpec): s
   const markerPath = join(configDir, "wicked-installer", "claude-install.json");
   if (symlinkInChain(configDir, ["wicked-installer", "claude-install.json"])) return found;
   const marker = readOwnedJson(root, markerPath);
-  if (isRecord(marker.value) && isRecord(marker.value.products)) {
-    const entry = marker.value.products[spec.pluginName];
-    if (isRecord(entry) && Array.isArray(entry.files) && entry.files.length > 0) {
-      found.push(`${markerPath} (install-claude.js marker: ${entry.files.length} recorded path(s))`);
+  if (isRecord(marker.value)) {
+    const products = marker.value.products;
+    if (isRecord(products)) {
+      // v2: an object map keyed by product id, each entry with a `files` manifest.
+      const entry = products[spec.pluginName];
+      if (isRecord(entry) && Array.isArray(entry.files) && entry.files.length > 0) {
+        found.push(`${markerPath} (install-claude.js marker: ${entry.files.length} recorded path(s))`);
+      } else if (isRecord(entry) && entry.notes && Array.isArray(entry.notes) && entry.notes.some((n) => typeof n === "string" && n.startsWith("carried forward from a v1 marker"))) {
+        found.push(`${markerPath} (install-claude.js marker: entry carried forward from a v1 marker, no file manifest)`);
+      }
+    } else if (Array.isArray(products)) {
+      // v1: an array of { id, success, skipped, assets, notes } — no file manifest at all.
+      if (products.some((p) => isRecord(p) && p.id === spec.pluginName)) {
+        found.push(`${markerPath} (install-claude.js v1 marker entry)`);
+      }
     }
   }
   return found;
 }
 
+/**
+ * Exactly one path component: non-empty, no `/` or `\\`, no whitespace or control characters,
+ * not `.`/`..`, no leading dot. Used for the recorded version and the marketplace/plugin names,
+ * all of which become components of the expected payload path.
+ */
+const UNSAFE_SEGMENT_CHARS = /[\\/\s\u0000-\u001f]/;
+export function isSafeSegment(value: string): boolean {
+  return value !== "" && value !== "." && value !== ".." && !value.startsWith(".") && !UNSAFE_SEGMENT_CHARS.test(value);
+}
+
 function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, installPath: string, recordVersion: string): PayloadCheck {
   // Never synthesize evidence: a record without a real version cannot be verified against a payload.
   if (!recordVersion) return { ok: false, problem: "install record has no version" };
+  // The version is used as ONE path component of the expected payload path; a value such as
+  // `alias/1.0.0` would smuggle an intermediate component past the chain check.
+  if (!isSafeSegment(recordVersion)) return { ok: false, problem: `record version ${JSON.stringify(recordVersion)} is not a path segment` };
   if (!installPath) return { ok: false, problem: "install record has no installPath" };
   const dir = ownedDir(root, installPath);
   if (!dir.ok) {
@@ -463,6 +487,12 @@ function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, i
 
 export function readRegistration(configDir: string, spec: ClaudePluginSpec): PluginRegistration {
   const reg: PluginRegistration = { configDir, installed: [], cacheVersions: [], errors: [] };
+
+  // The marketplace and plugin names become path components too (registry data).
+  if (!isSafeSegment(spec.marketplaceName) || !isSafeSegment(spec.pluginName)) {
+    reg.errors.push(`plugin id ${JSON.stringify(spec.pluginId)}: marketplace and plugin names must each be a single path segment`);
+    return reg;
+  }
 
   let root: string;
   try {

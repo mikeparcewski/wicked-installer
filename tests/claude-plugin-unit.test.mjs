@@ -12,6 +12,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const {
   claudePluginSpec,
   describeVerdict,
+  detectLegacyCopies,
   planClaudePlugin,
   planForDir,
   prepareClaudeSpawn,
@@ -318,6 +319,44 @@ test("readRegistration: symlinked registration files and escapes are refused and
     assert.equal(v.state, "unreadable", JSON.stringify(reg));
     assert.ok(reg.errors.some((e) => /wicked-garden[\\/]1\.0\.0: is a symlink — refusing to follow it/.test(e)), JSON.stringify(reg.errors));
 
+    // The recorded version is ONE path component: `alias/1.0.0` (with `alias` an in-config symlink
+    // to a real version dir) must not smuggle an intermediate component past the chain check.
+    const smuggled = join(d, "smuggled");
+    const sm = configDir(smuggled, { marketplace: true, payload: true });
+    symlinkSync(join(sm.plugins, "cache", "wicked-garden", "wicked-garden"), join(sm.plugins, "cache", "wicked-garden", "wicked-garden", "alias"));
+    writeFileSync(join(sm.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: join(sm.plugins, "cache", "wicked-garden", "wicked-garden", "alias", "1.0.0"), version: "alias/1.0.0" }] },
+    }));
+    reg = readRegistration(smuggled, spec);
+    v = registrationVerdict(reg);
+    assert.notEqual(v.state, "registered", JSON.stringify(reg));
+    // The symlink inside the cache dir is itself refused by the listing → unreadable (stricter still).
+    assert.equal(v.state, "unreadable");
+    assert.ok(reg.errors.some((e) => /[\\/]alias: is a symlink — refusing to follow it/.test(e)), JSON.stringify(reg.errors));
+    assert.match(reg.installed[0].payload.problem, /record version "alias\/1\.0\.0" is not a path segment/, "and the version was refused as a path segment regardless");
+
+    // The segment rule on its own (no symlink anywhere): a REAL nested directory named by a
+    // multi-component version must still not register — the version is not a path.
+    const nested = join(d, "nested-version");
+    const nv = configDir(nested, { marketplace: true });
+    const nestedPayload = join(nv.plugins, "cache", "wicked-garden", "wicked-garden", "alias", "1.0.0");
+    mkdirSync(join(nestedPayload, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(nestedPayload, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version: "alias/1.0.0" }));
+    writeFileSync(join(nv.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: nestedPayload, version: "alias/1.0.0" }] },
+    }));
+    v = registrationVerdict(readRegistration(nested, spec));
+    assert.equal(v.state, "partial", JSON.stringify(v));
+    assert.match(v.problems[0], /record version "alias\/1\.0\.0" is not a path segment/);
+    for (const bad of ["..", ".", ".hidden", "a\\b", "1.0.0/", "a b"]) {
+      writeFileSync(join(nv.plugins, "installed_plugins.json"), JSON.stringify({
+        version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: nv.installPath, version: bad }] },
+      }));
+      const verdict = registrationVerdict(readRegistration(nested, spec));
+      assert.equal(verdict.state, "partial", `version ${JSON.stringify(bad)} must never register`);
+      assert.match(verdict.problems[0], /is not a path segment/, JSON.stringify(verdict));
+    }
+
     // A record reaching the real payload through a symlinked ALIAS of the marketplace dir is not
     // the expected path: realpath-equivalence is not enough — the recorded path must be exact.
     const aliased = join(d, "aliased");
@@ -419,6 +458,36 @@ test("planClaudePlugin: the dry-run plan refuses what the live spawn would refus
     const plan = planClaudePlugin(spec, { configDirs, source: "C:\\%TEMP%\\wicked-garden", env: { WICKED_CLAUDE_BIN: exe }, spawner, platform: "win32" });
     assert.equal(plan.claudeDetected, true);
     assert.ok(plan.plans[0].commands.some((c) => c.args[2] === "add"));
+  } finally {
+    rm(d);
+  }
+});
+
+test("detectLegacyCopies: reports a bare copy, a v2 marker entry with files, a carried-forward entry, and a v1 (array) marker entry", () => {
+  const d = tmp();
+  try {
+    const cfg = join(d, "cfg");
+    configDir(cfg, { bare: true });
+    let found = detectLegacyCopies(cfg, spec);
+    assert.deepEqual(found, [join(cfg, "plugins", "wicked-garden")]);
+
+    const markerDir = join(cfg, "wicked-installer");
+    mkdirSync(markerDir, { recursive: true });
+    const markerPath = join(markerDir, "claude-install.json");
+    writeFileSync(markerPath, JSON.stringify({ installedAt: "2025-12-01T00:00:00.000Z", claudeHome: cfg, products: [{ id: "wicked-garden", success: true }] }));
+    found = detectLegacyCopies(cfg, spec);
+    assert.equal(found.length, 2);
+    assert.equal(found[1], `${markerPath} (install-claude.js v1 marker entry)`);
+
+    writeFileSync(markerPath, JSON.stringify({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "x", products: { "wicked-garden": { installedAt: "x", lastResult: "installed", files: [{ kind: "dir", path: "skills/wicked-garden-core" }], notes: [] } } }));
+    assert.equal(detectLegacyCopies(cfg, spec)[1], `${markerPath} (install-claude.js marker: 1 recorded path(s))`);
+
+    writeFileSync(markerPath, JSON.stringify({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "x", products: { "wicked-garden": { installedAt: "x", lastResult: "installed", files: [], notes: ["carried forward from a v1 marker: no file manifest"] } } }));
+    assert.equal(detectLegacyCopies(cfg, spec)[1], `${markerPath} (install-claude.js marker: entry carried forward from a v1 marker, no file manifest)`);
+
+    // A marker naming only other products is not a garden legacy copy.
+    writeFileSync(markerPath, JSON.stringify({ installedAt: "x", products: [{ id: "wicked-vault", success: true }] }));
+    assert.equal(detectLegacyCopies(cfg, spec).length, 1);
   } finally {
     rm(d);
   }

@@ -219,6 +219,8 @@ const COPY_SKIP_SEGMENTS = new Set([
 ]);
 // Claude config-dir identity markers (ANY-of). See §11.1 / §11.2.
 const IDENTITY_MARKERS = ["settings.json", "plugins", "projects"];
+// Legacy (unregistered) Claude Code plugin copies are never removed by this script; their removal is tracked here.
+const LEGACY_CLEANUP_ISSUE = "https://github.com/mikeparcewski/wicked-installer/issues/20";
 
 // ---------------------------------------------------------------------------
 // Paths & platform helpers
@@ -1507,15 +1509,28 @@ function readMarkerRaw(dir: string): MarkerRaw {
 function loadOrInitMarker(dir: string): MarkerV2 {
   const raw = readMarkerRaw(dir);
   if (raw.v2) return raw.v2;
-  // Fresh v2 (a pre-existing v1/legacy marker is replaced; its on-disk assets are
-  // reconciled forward as products get re-installed).
+  // Fresh v2. A pre-existing v1/legacy marker is upgraded, not dropped (§10.2): every product
+  // entry it lists is carried forward as a v2 entry with no file manifest — the bookkeeping that
+  // something was installed survives, and nothing is deleted on the strength of the upgrade.
+  const products: Record<string, MarkerProduct> = {};
+  for (const p of raw.legacy?.products ?? []) {
+    if (!p || typeof p.id !== "string") continue;
+    const legacyNotes = Array.isArray(p.notes) ? p.notes.filter((n): n is string => typeof n === "string") : [];
+    products[p.id] = {
+      installedAt: raw.legacy?.installedAt ?? new Date().toISOString(),
+      lastResult: p.success === false ? "failed" : "installed",
+      assets: p.assets && typeof p.assets === "object" && !Array.isArray(p.assets) ? (p.assets as Record<string, number>) : undefined,
+      files: [],
+      notes: [...legacyNotes, "carried forward from a v1 marker: no file manifest (exact uninstall unavailable — re-run install to upgrade bookkeeping)"],
+    };
+  }
   return {
     markerVersion: 2,
     cli: "claude",
     configDir: dir,
     installerVersion: installerVersion(),
     updatedAt: new Date().toISOString(),
-    products: {},
+    products,
   };
 }
 
@@ -1950,6 +1965,37 @@ function heuristicUninstall(
   }
 }
 
+/**
+ * `uninstall <claude-plugin product>`: nothing is removed. The plugin's registration is Claude
+ * Code's (named here as the command to run), and any legacy copy this script's marker records is
+ * left in place — its removal is tracked in LEGACY_CLEANUP_ISSUE. Read-only over the markers.
+ */
+function pluginUninstallNotice(product: Product, resolution: Resolution, markers: Map<string, MarkerRaw>): InstallReport {
+  const pluginId = product.install.pluginId ?? `${product.id}@${product.id}`;
+  const notes = [
+    `the plugin registration is Claude Code's — remove it with: claude plugin uninstall ${pluginId} (with CLAUDE_CONFIG_DIR set to the config dir); check with: npx wicked-installer status`,
+  ];
+  for (const target of resolution.targets) {
+    const m = markers.get(target.dir);
+    const recorded = m?.v2
+      ? m.v2.products[product.id] !== undefined
+      : (m?.legacy?.products?.some((p) => p.id === product.id) ?? false);
+    if (recorded) {
+      notes.push(`${target.dir}: a legacy copy recorded in ${markerPathFor(target.dir)} is left in place — removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`);
+    }
+  }
+  return {
+    productId: product.id,
+    displayName: product.displayName,
+    success: true,
+    skipped: true,
+    message: `${product.displayName}: Claude Code plugin — nothing removed by this script`,
+    assets: { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 },
+    actions: [],
+    notes,
+  };
+}
+
 function runUninstall(options: Options, registry: Registry): number {
   const resolution = resolveTargets(options);
   if (!resolution.cliPresent) {
@@ -1976,7 +2022,18 @@ function runUninstall(options: Options, registry: Registry): number {
   else throw new Error("no products selected; pass product ids or --all");
 
   const reports: InstallReport[] = [];
+  let markersMutated = false;
   for (const id of selected) {
+    // A Claude Code plugin is never this script's to remove: nothing pre-existing — not a legacy
+    // skills/hooks copy, not a marker entry, not a config key — is deleted (LEGACY_CLEANUP_ISSUE
+    // tracks that cleanup). Only the external command that removes the registration is named.
+    // Short-circuited BEFORE any deletion or marker mutation below.
+    const pluginProduct = byId.get(id);
+    if (pluginProduct?.type === "claude-plugin") {
+      reports.push(pluginUninstallNotice(pluginProduct, resolution, markers));
+      continue;
+    }
+
     const notes: string[] = [];
     const actions: Action[] = [];
     let heuristic = false;
@@ -1994,6 +2051,7 @@ function runUninstall(options: Options, registry: Registry): number {
         heuristicUninstall(id, target, options, actions, notes);
         if (m.legacy.products) m.legacy.products = m.legacy.products.filter((p) => p.id !== id);
         anyRemoved = true;
+        markersMutated = true;
         continue;
       }
       const entry = m.v2?.products[id];
@@ -2004,17 +2062,7 @@ function runUninstall(options: Options, registry: Registry): number {
       removeMarkerEntry(entry, target, options, actions);
       if (m.v2) delete m.v2.products[id];
       anyRemoved = true;
-    }
-
-    // A Claude Code plugin's registration belongs to Claude Code; this script only ever removes a
-    // legacy skills/hooks copy it recorded itself — say so, and name the command that does the rest.
-    const uninstalling = byId.get(id);
-    if (uninstalling?.type === "claude-plugin") {
-      const pluginId = uninstalling.install.pluginId ?? `${id}@${id}`;
-      notes.push(
-        `Claude Code plugin: this script ${anyRemoved ? "removed only the legacy skills/hooks copy it had recorded" : "recorded no legacy copy to remove"}; ` +
-          `the plugin registration is Claude Code's — remove it with \`claude plugin uninstall ${pluginId}\` (with CLAUDE_CONFIG_DIR set to the config dir), check with \`npx wicked-installer status\``,
-      );
+      markersMutated = true;
     }
 
     if (options.purgeBinaries) {
@@ -2037,8 +2085,9 @@ function runUninstall(options: Options, registry: Registry): number {
     reports.push(report);
   }
 
-  // Write back / delete markers.
-  for (const target of resolution.targets) {
+  // Write back / delete markers — only when this run actually removed something. A run that
+  // only emitted plugin notices must leave every marker byte-identical.
+  for (const target of markersMutated ? resolution.targets : []) {
     const m = markers.get(target.dir);
     if (!m) continue;
     if (m.v2) {

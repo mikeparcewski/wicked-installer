@@ -108,8 +108,8 @@ not registered — Claude Code not detected*. On the interactive path, where you
 Code as the target, garden is instead reported as a **manual step** and nothing is copied —
 a copy Claude Code never loads is not an install of what you selected. A Claude Code that is
 present but fails `claude --version` is
-an **error**, never a fallback — and on any failure nothing else is touched (a legacy copy
-is removed only after registration succeeded). `--source-root` never falls back either:
+an **error**, never a fallback — and on any failure nothing else is touched (legacy copies are
+never removed by this version, see issue #20). `--source-root` never falls back either:
 the bare copy would install the published package, not your checkout. `install-claude.js`
 itself never installs a plugin (handed one directly, it reports a manual step and writes
 nothing) and imports nothing outside `node:` builtins.

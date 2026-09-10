@@ -37,15 +37,19 @@ All notable changes to wicked-installer are documented here. The format follows
   not registered — Claude Code not detected"); on the interactive Claude path (Claude Code was the
   chosen target) it is a manual step instead and nothing is copied. A present-but-broken Claude Code
   is an error, and on any failure nothing else is touched. `install-claude.js uninstall
-  wicked-garden` names `claude plugin uninstall wicked-garden@wicked-garden` for the registration
-  it never owned.
+  wicked-garden` removes nothing — it names `claude plugin uninstall wicked-garden@wicked-garden`
+  for the registration it never owned and leaves any legacy copy and its marker record in place,
+  byte-identical (#20). A v1 (array) install marker is upgraded to v2 with every legacy product
+  entry carried forward (no file manifest, noted as such) instead of being dropped, and legacy
+  detection recognises both marker shapes and runs before the script can upgrade the marker.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is
   lstat'd, so a symlinked `plugins/`, `cache/`, `<marketplace>/`, `<plugin>/`, `<version>/`,
   `plugin.json` or state file makes the registration `unreadable` (error, exit 1) rather than
   merely partial; the recorded `installPath` must be the exact expected cache path (an alias that
-  merely resolves to it is `partial`); any selected install record without a real version makes the
+  merely resolves to it is `partial`); the recorded version must be a single path segment (a value
+  such as `alias/1.0.0` is `partial`, never a path); any selected install record without a real version makes the
   dir `partial` ("install record has no version (<scope> scope)") regardless of other entries — never
   completed with a placeholder. The dry-run plan applies the same launch-shape validation as the
   live spawn (a `.cmd`-shim `claude` with `%`/`!` in an argument fails the plan too).

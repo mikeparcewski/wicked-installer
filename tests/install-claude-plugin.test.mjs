@@ -106,6 +106,18 @@ function plantLegacyMarkerCopy(cfg) {
   }));
 }
 
+/** A v1 (array-shaped) install-claude.js marker naming garden, plus the skill copy it made. */
+function plantLegacyV1Marker(cfg) {
+  mkdirSync(join(cfg, "skills", "wicked-garden-core"), { recursive: true });
+  writeFileSync(join(cfg, "skills", "wicked-garden-core", "SKILL.md"), "---\nname: wicked-garden-core\n---\nwicked-garden\n");
+  mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+  writeFileSync(markerPath(cfg), JSON.stringify({
+    installedAt: "2025-12-01T00:00:00.000Z",
+    claudeHome: cfg,
+    products: [{ id: "wicked-garden", success: true, skipped: false, assets: { skills: 40, agents: 0, commands: 0 }, notes: ["assets source: npm-pack"] }],
+  }));
+}
+
 /** A legacy `npx wicked-garden install` bare copy. */
 function plantBareCopy(cfg) {
   mkdirSync(join(cfg, "plugins", "wicked-garden", ".claude-plugin"), { recursive: true });
@@ -165,15 +177,34 @@ test("install-claude.js status does not report plugins, even when a legacy marke
   }
 });
 
-test("install-claude.js uninstall of a plugin names Claude Code's own `claude plugin uninstall`, with or without a legacy marker", () => {
+test("install-claude.js uninstall of a plugin removes NOTHING — legacy assets and the marker stay byte-identical; only `claude plugin uninstall` is named", () => {
   const sb = sandbox();
   mkdirSync(sb.cfg);
   plantLegacyMarkerCopy(sb.cfg);
+  writeFileSync(join(sb.cfg, "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: "mine" }] }] } }));
+  const before = snapshot(sb.cfg);
   try {
     const r = runScript(sb, ["uninstall", "wicked-garden", "--claude-home", sb.cfg, "--json"]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const garden = JSON.parse(r.stdout).reports.find((x) => x.productId === "wicked-garden");
-    assert.ok(garden.notes.some((n) => /removed only the legacy skills\/hooks copy it had recorded.*claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden.notes));
+    assert.equal(garden.skipped, true);
+    assert.match(garden.message, /Claude Code plugin — nothing removed by this script/);
+    assert.deepEqual(garden.actions, []);
+    assert.ok(garden.notes.some((n) => /remove it with: claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden.notes));
+    assert.ok(garden.notes.some((n) => /a legacy copy recorded in .*claude-install\.json is left in place — removal will ship separately \(see .*issues\/20\)/.test(n)), JSON.stringify(garden.notes));
+    assert.deepEqual(snapshot(sb.cfg), before, "legacy skill copy, marker and settings.json are byte-identical after `uninstall wicked-garden`");
+
+    // A v1 (array) marker: same — nothing rewritten, not even the marker's shape.
+    const v1 = join(sb.tmp, "cfg-v1");
+    mkdirSync(v1);
+    plantLegacyV1Marker(v1);
+    const beforeV1 = snapshot(v1);
+    const r1 = runScript(sb, ["uninstall", "wicked-garden", "--claude-home", v1, "--json"]);
+    assert.equal(r1.status, 0, r1.stdout + r1.stderr);
+    const gardenV1 = JSON.parse(r1.stdout).reports.find((x) => x.productId === "wicked-garden");
+    assert.equal(gardenV1.skipped, true);
+    assert.ok(gardenV1.notes.some((n) => /is left in place/.test(n)));
+    assert.deepEqual(snapshot(v1), beforeV1, "a v1 marker and its recorded skill copy are byte-identical too");
 
     const fresh = join(sb.tmp, "cfg-fresh");
     mkdirSync(fresh);
@@ -181,8 +212,10 @@ test("install-claude.js uninstall of a plugin names Claude Code's own `claude pl
     const r2 = runScript(sb, ["uninstall", "wicked-garden", "--claude-home", fresh, "--json"]);
     assert.equal(r2.status, 0, r2.stdout + r2.stderr);
     const garden2 = JSON.parse(r2.stdout).reports.find((x) => x.productId === "wicked-garden");
-    assert.match(garden2.message, /not installed$/);
-    assert.ok(garden2.notes.some((n) => /recorded no legacy copy to remove.*claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden2.notes));
+    assert.match(garden2.message, /nothing removed by this script/);
+    assert.ok(garden2.notes.some((n) => /claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden2.notes));
+    assert.ok(!garden2.notes.some((n) => /is left in place/.test(n)), "no legacy note when nothing is recorded");
+    assert.ok(!existsSync(join(fresh, "wicked-installer")), "no marker was created by a notice-only run");
   } finally {
     cleanup(sb);
   }
@@ -256,6 +289,47 @@ test("dispatch: the Claude script gets the products WITHOUT garden; garden is re
     assert.deepEqual(m.products["wicked-garden"], JSON.parse(legacyBefore.marker).products["wicked-garden"], "the legacy marker entry is preserved");
     assert.ok(m.products["wicked-vault"], "the script's own vault entry was added alongside");
     assert.ok(!existsSync(join(sb.cfg, "wicked-installer", "products", "wicked-garden")), "nothing new was copied for garden");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("dispatch: a v1 (array) marker naming garden is reported BEFORE the script runs, and its garden record is carried forward untouched", { skip }, async () => {
+  const sb = sandbox();
+  mkdirSync(sb.cfg);
+  plantLegacyV1Marker(sb.cfg);
+  const beforeAll = snapshot(sb.cfg);
+  const v1Text = readFileSync(markerPath(sb.cfg), "utf8");
+  try {
+    // Garden alone: the script does not run, so the v1 marker is not even upgraded — byte-identical.
+    let { code, out } = await dispatch(sb, ["wicked-garden"], {});
+    assert.equal(code, 0, out);
+    assert.match(out, new RegExp(`legacy wicked-garden copy detected at ${escapeRe(markerPath(sb.cfg))} \\(install-claude\\.js v1 marker entry\\) — left in place`));
+    const afterGardenOnly = snapshot(sb.cfg).filter((e) => !e.startsWith("plugins/"));
+    assert.deepEqual(afterGardenOnly, beforeAll, "everything but the new plugins/ registration is byte-identical (marker included)");
+    assert.equal(readFileSync(markerPath(sb.cfg), "utf8"), v1Text);
+
+    // Garden + vault: the script runs for vault and upgrades the marker to v2 — the report was
+    // printed BEFORE that, and the v1 garden record is carried forward, not dropped.
+    rmSync(sb.stubLog);
+    ({ code, out } = await dispatch(sb, ["wicked-vault", "wicked-garden"], {}));
+    assert.equal(code, 0, out);
+    const legacyAt = out.indexOf("legacy wicked-garden copy detected at");
+    const scriptAt = out.indexOf("Installing into Claude Code");
+    const registerAt = out.indexOf("— registered Claude Code plugin");
+    assert.ok(legacyAt !== -1 && scriptAt !== -1 && registerAt !== -1, out);
+    assert.ok(scriptAt < legacyAt && legacyAt < registerAt, "legacy report sits between the CLI header and the registration step, i.e. before the script's marker upgrade is used");
+    assert.match(out, /\(install-claude\.js v1 marker entry\)/, "the v1 shape was what detection saw");
+    const m = marker(sb.cfg);
+    assert.equal(m.markerVersion, 2, "the script upgraded the marker for vault");
+    assert.ok(m.products["wicked-vault"], "vault recorded");
+    assert.deepEqual(m.products["wicked-garden"].files, [], "the carried-forward garden record has no file manifest");
+    assert.equal(m.products["wicked-garden"].lastResult, "installed");
+    assert.equal(m.products["wicked-garden"].installedAt, "2025-12-01T00:00:00.000Z");
+    assert.deepEqual(m.products["wicked-garden"].assets, { skills: 40, agents: 0, commands: 0 });
+    assert.ok(m.products["wicked-garden"].notes.includes("assets source: npm-pack"), "legacy notes kept");
+    assert.ok(m.products["wicked-garden"].notes.some((n) => n.startsWith("carried forward from a v1 marker")));
+    assert.equal(readFileSync(join(sb.cfg, "skills", "wicked-garden-core", "SKILL.md"), "utf8"), "---\nname: wicked-garden-core\n---\nwicked-garden\n", "the legacy skill copy is untouched");
   } finally {
     cleanup(sb);
   }

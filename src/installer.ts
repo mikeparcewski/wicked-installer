@@ -20,6 +20,12 @@ export interface InstallOptions {
    * Claude Code never loads is not an install of the thing the user selected.
    */
   noFallback?: boolean;
+  /**
+   * Legacy copies the caller already detected and reported (the picker does so BEFORE the Claude
+   * script runs, since that script's marker upgrade would otherwise hide a v1 entry). When given,
+   * detection and the per-path log lines are skipped; the count still goes into the result message.
+   */
+  preDetectedLegacy?: string[];
   /** Sink for progress and `dry-run:` plan lines (default: console.log). */
   log?: (line: string) => void;
 }
@@ -317,8 +323,10 @@ async function installClaudePlugin(
   const bareCopy = join(homedir(), ".claude", "plugins", id);
   // Legacy, unregistered copies left by earlier installers (bare plugins/<id>, or a skills/hooks
   // copy recorded by an earlier install-claude.js) are reported and LEFT IN PLACE — never removed here.
-  const legacy = [...new Set([...configDirs.dirs, join(homedir(), ".claude")].flatMap((dir) => detectLegacyCopies(dir, spec)))];
-  for (const path of legacy) log(`  legacy ${id} copy detected at ${path} — left in place; removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`);
+  const legacy = options.preDetectedLegacy ?? [...new Set([...configDirs.dirs, join(homedir(), ".claude")].flatMap((dir) => detectLegacyCopies(dir, spec)))];
+  if (options.preDetectedLegacy === undefined) {
+    for (const path of legacy) log(`  legacy ${id} copy detected at ${path} — left in place; removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`);
+  }
   const legacyNote = legacy.length > 0 ? `; ${legacy.length} legacy cop${legacy.length === 1 ? "y" : "ies"} left in place (see ${LEGACY_CLEANUP_ISSUE})` : "";
   const note = (install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "") + legacyNote;
   // A local checkout can only be registered through Claude Code; the npx fallback would install
