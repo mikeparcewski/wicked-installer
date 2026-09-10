@@ -5,6 +5,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-10
+
 ### Fixed
 
 - `--dry-run` is now dry for **every** product type on the direct `install <ids>` path and the
