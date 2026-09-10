@@ -1115,13 +1115,20 @@ function stageProduct(product: Product, options: Options): PackageSource | undef
   }
 }
 
-function readStagedVersion(root: string): string | undefined {
+function readStagedVersion(root: string): { version?: string; refused?: string } {
+  let manifest: ChainResult;
   try {
-    const manifest = lstatChainNoFollow(root, "package.json"); // no-follow: a symlinked manifest is not read
-    if (!manifest.exists || manifest.kind !== "file") return undefined;
-    return (JSON.parse(readFileSync(manifest.abs, "utf8")) as { version?: string }).version;
+    manifest = lstatChainNoFollow(root, "package.json"); // no-follow: a symlinked manifest is not read
+  } catch (err) {
+    if (!(err instanceof UnsafePathError)) throw err;
+    return { refused: err.message };
+  }
+  if (!manifest.exists) return {};
+  if (manifest.kind !== "file") return { refused: `${manifest.abs}: not a regular file` };
+  try {
+    return { version: (JSON.parse(readFileSync(manifest.abs, "utf8")) as { version?: string }).version };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -1392,7 +1399,7 @@ function installSkills(
   // Compat shim: wicked-testing version stamp read by downstream wg-check consumers.
   if (product.id === "wicked-testing") {
     const stampAbs = join(target.dir, "skills", ".wicked-testing-version");
-    const ver = readStagedVersion(root) ?? "";
+    const ver = readStagedVersion(root).version ?? "";
     if (options.dryRun) {
       log(options, `  dry-run: write ${stampAbs}`);
     } else {
@@ -1716,6 +1723,11 @@ function purgeStaleArtifacts(
   const purge = (abs: string, markerPath: string, detail: string): void => {
     const key = normalizeSlash(markerPath);
     if (done.has(key)) return;
+    if (!strictlyInside(target.dir, abs)) {
+      done.add(key);
+      actions.push({ kind: "migrate-removed", target: markerPath, result: "failed", detail: "refused: path is not strictly inside the config dir — nothing removed" });
+      return;
+    }
     if (isSharedDiscoveryDir(target.dir, abs)) return; // never delete a shared discovery dir itself
     let state: ChainResult;
     try {
@@ -1796,7 +1808,53 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => !!va
  * sound — a malformed record makes the whole marker unusable (fail closed) rather than
  * something a consumer trips over after the run has started writing.
  */
-function markerV2Problem(value: unknown): string | undefined {
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const UNSAFE_ID_CHARS = /[\\/\s\u0000-\u001f\u007f]/;
+
+/** A product id as a marker key / v1 `id`: it becomes a path segment (`commands/<id>`, `<id>-*`), so exactly one safe segment. */
+function isSafeMarkerId(value: unknown): value is string {
+  return typeof value === "string" && value !== "" && value !== "." && value !== ".." && !value.startsWith(".") && !UNSAFE_ID_CHARS.test(value);
+}
+
+/**
+ * A marker-recorded path that a removal may act on (`dir`/`file` → `path`): a non-empty RELATIVE
+ * path with no empty, `.` or `..` segment, no leading separator or drive, no `~`, no control
+ * characters, that resolves strictly INSIDE the config dir (checked on the normalized value,
+ * never on a realpath). Anything else — `""`, `skills/..`, `/abs`, `a/../..` — would resolve to
+ * the config dir itself or above it and reach a recursive removal, so it makes the marker unusable.
+ */
+function markerPathProblem(value: unknown, dir: string): string | undefined {
+  if (typeof value !== "string") return "not a string";
+  if (value === "") return "empty";
+  if (CONTROL_CHARS.test(value)) return "contains control characters";
+  // Segments are judged on the RAW value (each `/` or `\\` is a boundary — nothing is collapsed), so
+  // `skills//x`, a leading separator, `.` and `..` are all refused before any normalisation.
+  const segments = value.split(/[\\/]/);
+  if (isAbsolute(value) || /^[A-Za-z]:/.test(value) || value.startsWith("~")) return "not a relative path";
+  if (segments.some((seg) => seg === "" || seg === "." || seg === "..")) return "has an empty, `.` or `..` segment";
+  const rel = relative(dir, resolve(dir, ...segments));
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return "does not resolve strictly inside the config dir";
+  return undefined;
+}
+
+/** A recorded config FILE (`json-key`/`hooks-entry` → `file`): inside the config dir, or exactly the target's MCP state file. */
+function markerFileProblem(value: unknown, dir: string): string | undefined {
+  if (typeof value === "string" && value === toMarkerPath(dir, mcpFileFor(dir))) return undefined;
+  return markerPathProblem(value, dir);
+}
+
+/**
+ * Structural validation of a v2 marker, field by field, for everything install / status /
+ * uninstall consume: every product record (`installedAt`, `lastResult`, optional `version` /
+ * `source` / `assets`, `files`, `notes`) and every file record (`dir`/`file` → `path`;
+ * `json-key` → `file`, `pointer`, `wroteHash`; `hooks-entry` → `file`, `event`,
+ * `ownerMatch.commandContains`), plus every value a removal could act on: product keys are safe
+ * path segments, recorded paths resolve strictly inside `dir`, owner keys are substantive.
+ * Returns the first problem, or undefined when the marker is sound — a malformed record makes
+ * the whole marker unusable (fail closed) rather than something a consumer trips over after the
+ * run has started writing or removing.
+ */
+function markerV2Problem(value: unknown, dir: string): string | undefined {
   if (!isPlainObject(value) || value.markerVersion !== 2) return "not a markerVersion 2 object";
   if (value.cli !== "claude") return "cli: missing or not \"claude\"";
   if (typeof value.configDir !== "string") return "configDir: missing or not a string";
@@ -1805,7 +1863,8 @@ function markerV2Problem(value: unknown): string | undefined {
   if (!isPlainObject(value.products)) return "products: not an object map";
   const str = (v: unknown): v is string => typeof v === "string";
   for (const [id, rec] of Object.entries(value.products)) {
-    const at = `products.${id}`;
+    const at = `products.${JSON.stringify(id)}`;
+    if (!isSafeMarkerId(id)) return `${at}: product id is not a safe path segment`;
     if (!isPlainObject(rec)) return `${at}: not an object`;
     if (rec.version !== undefined && !str(rec.version)) return `${at}.version: not a string`;
     if (!str(rec.installedAt)) return `${at}.installedAt: missing or not a string`;
@@ -1820,15 +1879,27 @@ function markerV2Problem(value: unknown): string | undefined {
       if (!isPlainObject(f)) return `${fat}: not an object`;
       switch (f.kind) {
         case "dir":
-        case "file":
-          if (!str(f.path)) return `${fat}.path: missing or not a string`;
+        case "file": {
+          const problem = markerPathProblem(f.path, dir);
+          if (problem) return `${fat}.path: ${problem}`;
           break;
-        case "json-key":
-          if (!str(f.file) || !str(f.pointer) || !str(f.wroteHash)) return `${fat}: json-key needs string file, pointer, wroteHash`;
+        }
+        case "json-key": {
+          const problem = markerFileProblem(f.file, dir);
+          if (problem) return `${fat}.file: ${problem}`;
+          if (!str(f.pointer) || f.pointer === "" || !f.pointer.startsWith("/") || CONTROL_CHARS.test(f.pointer)) return `${fat}.pointer: not a non-empty JSON pointer`;
+          if (!str(f.wroteHash) || f.wroteHash === "") return `${fat}.wroteHash: missing or empty`;
           break;
-        case "hooks-entry":
-          if (!str(f.file) || !str(f.event) || !isPlainObject(f.ownerMatch) || !str(f.ownerMatch.commandContains)) return `${fat}: hooks-entry needs string file, event, ownerMatch.commandContains`;
+        }
+        case "hooks-entry": {
+          const problem = markerFileProblem(f.file, dir);
+          if (problem) return `${fat}.file: ${problem}`;
+          if (!str(f.event) || f.event === "" || CONTROL_CHARS.test(f.event)) return `${fat}.event: missing or empty`;
+          if (!isPlainObject(f.ownerMatch) || !str(f.ownerMatch.commandContains)) return `${fat}.ownerMatch.commandContains: missing or not a string`;
+          const owner = f.ownerMatch.commandContains;
+          if (owner.length < 8 || CONTROL_CHARS.test(owner)) return `${fat}.ownerMatch.commandContains: too short to identify an owner (min 8 chars)`;
           break;
+        }
         default:
           return `${fat}.kind: unknown record kind ${JSON.stringify(f.kind)}`;
       }
@@ -1837,15 +1908,16 @@ function markerV2Problem(value: unknown): string | undefined {
   return undefined;
 }
 
-function isMarkerV2(value: unknown): value is MarkerV2 {
-  return markerV2Problem(value) === undefined;
+function isMarkerV2(value: unknown, dir: string): value is MarkerV2 {
+  return markerV2Problem(value, dir) === undefined;
 }
 
 /** A v1 marker: an object whose optional `products` is an array of objects carrying a string `id`. */
 function isLegacyMarker(value: unknown): value is LegacyMarker {
   if (!isPlainObject(value) || value.markerVersion !== undefined) return false;
   if (value.products === undefined) return true;
-  return Array.isArray(value.products) && value.products.every((p) => isPlainObject(p) && typeof p.id === "string");
+  // Each `id` becomes a path segment in the heuristic uninstall (`commands/<id>`, `<id>-*`): one safe segment or the marker is unusable.
+  return Array.isArray(value.products) && value.products.every((p) => isPlainObject(p) && isSafeMarkerId(p.id));
 }
 
 function readMarkerRaw(dir: string): MarkerRaw {
@@ -1870,7 +1942,7 @@ function readMarkerRaw(dir: string): MarkerRaw {
     return { corrupt: true, reason: err instanceof Error ? err.message : String(err) };
   }
   if (isPlainObject(parsed) && parsed.markerVersion === 2) {
-    const problem = markerV2Problem(parsed);
+    const problem = markerV2Problem(parsed, dir);
     if (problem !== undefined) return { corrupt: true, reason: `malformed v2 marker: ${problem}` };
     return { v2: parsed as unknown as MarkerV2, corrupt: false };
   }
@@ -1886,8 +1958,12 @@ function readMarkerRaw(dir: string): MarkerRaw {
  * destroy the ownership/uninstall records it holds, and this script never renames or rewrites
  * a file it cannot read. The install fails closed and the bytes stay untouched.
  */
-function corruptMarkerMessage(dir: string, reason?: string): string {
-  return `${markerPathFor(dir)}: install marker is unusable${reason ? ` (${reason})` : ""} — refusing to install: continuing would overwrite it and lose the ownership/uninstall records it holds. Fix or move the file, then re-run. Nothing was written.`;
+function corruptMarkerMessage(dir: string, reason?: string, verb: "install" | "uninstall" = "install"): string {
+  const why = reason ? ` (${reason})` : "";
+  if (verb === "uninstall") {
+    return `${markerPathFor(dir)}: install marker is unusable${why} — refusing to uninstall: the manifest of what this installer wrote cannot be trusted, so nothing was removed anywhere. Fix or move the file, then re-run.`;
+  }
+  return `${markerPathFor(dir)}: install marker is unusable${why} — refusing to install: continuing would overwrite it and lose the ownership/uninstall records it holds. Fix or move the file, then re-run. Nothing was written.`;
 }
 
 function loadOrInitMarker(dir: string): MarkerV2 {
@@ -1974,7 +2050,15 @@ function installOneInstall(
     notes.push(...installProductBinaries(product, options, actions));
 
     source = stageProduct(product, options);
-    version = source ? readStagedVersion(source.root) : undefined;
+    if (source) {
+      const staged = readStagedVersion(source.root);
+      version = staged.version;
+      if (staged.refused) {
+        // Treated like every other refused source manifest: named, never read, the install goes on without a version.
+        actions.push({ kind: "acquire", target: `${product.id}/package.json`, result: "skipped", detail: `refused: source manifest ${staged.refused} — not read, version unknown` });
+        notes.push(`${product.id}: package.json in the source is behind a symlink — refused, version unknown`);
+      }
+    }
 
     let lastSkills = 0;
     let lastMcp = 0;
@@ -2238,6 +2322,17 @@ function runStatus(options: Options, registry: Registry): number {
 // uninstall verb (marker-driven exact removal)
 // ---------------------------------------------------------------------------
 
+/**
+ * Removal guard, independent of the parser: an absolute path a removal is about to act on must
+ * lie strictly INSIDE the config dir — never the dir itself, never above or beside it. Checked on
+ * the resolved path (no realpath) at every removal call site, so a record a future parser lets
+ * through still cannot reach a recursive removal of the config dir.
+ */
+function strictlyInside(configDir: string, abs: string): boolean {
+  const rel = relative(configDir, abs);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
 function isSharedDiscoveryDir(configDir: string, abs: string): boolean {
   const shared = [
     join(configDir, "skills"),
@@ -2250,6 +2345,7 @@ function isSharedDiscoveryDir(configDir: string, abs: string): boolean {
 }
 
 function tryRemoveEmptyDir(root: string, dir: string): void {
+  if (!strictlyInside(root, dir)) return;
   try {
     const state = chainUnder(root, dir); // UnsafePathError ⇒ leave it alone
     if (state.exists && state.kind === "dir" && readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true });
@@ -2263,7 +2359,12 @@ function removeMarkerEntry(
   target: Target,
   options: Options,
   actions: Action[],
-): void {
+): number {
+  let failures = 0;
+  const refuseOutside = (kind: ActionKind, disp: string): void => {
+    actions.push({ kind, target: disp, result: "failed", detail: "refused: recorded path is not strictly inside the config dir — nothing removed" });
+    failures += 1;
+  };
   // Every recorded path is walked no-follow first (chainUnder): a symlink anywhere in the chain,
   // an escape from the root, or a non-regular file is refused — never read, backed up, written or
   // removed. `refusal` returns the reason, or undefined when the path is safe and present.
@@ -2285,6 +2386,10 @@ function removeMarkerEntry(
     if (f.kind === "json-key") {
       const abs = fromMarkerPath(target.dir, f.file);
       const disp = `${f.file}${f.pointer}`;
+      if (abs !== target.mcpFile && !strictlyInside(target.dir, abs)) {
+        refuseOutside("remove", disp);
+        continue;
+      }
       const verdict = refusal(rootFor(target, abs), abs, "file");
       if (verdict && "absent" in verdict) {
         actions.push({ kind: "remove", target: disp, result: "skipped", detail: "file absent" });
@@ -2319,14 +2424,19 @@ function removeMarkerEntry(
       }
       if (!options.dryRun) {
         try {
-          backupThenWrite(target, abs, obj, options, actions, (a) => a.kind === "remove" && a.target === disp);
+          backupThenWrite(target, abs, obj, options, actions, (a) => (a.kind === "remove" || a.kind === "restore-prior") && a.target === disp);
         } catch {
-          continue; // the `remove` action now reads `failed` with the refusal; nothing was written
+          failures += 1; // the `remove`/`restore-prior` action now reads `failed` with the refusal; nothing was written
+          continue;
         }
       }
     } else if (f.kind === "hooks-entry") {
       const abs = fromMarkerPath(target.dir, f.file);
       const disp = `${f.file}#${f.event}`;
+      if (abs !== target.mcpFile && !strictlyInside(target.dir, abs)) {
+        refuseOutside("remove", disp);
+        continue;
+      }
       const verdict = refusal(rootFor(target, abs), abs, "file");
       if (verdict && "absent" in verdict) {
         actions.push({ kind: "remove", target: disp, result: "skipped", detail: "file absent" });
@@ -2357,7 +2467,8 @@ function removeMarkerEntry(
         try {
           backupThenWrite(target, abs, settings, options, actions, (a) => a.kind === "remove" && a.target === disp);
         } catch {
-          continue; // as above: action flipped to `failed`, nothing written
+          failures += 1; // as above: action flipped to `failed`, nothing written
+          continue;
         }
       }
     }
@@ -2366,6 +2477,11 @@ function removeMarkerEntry(
   for (const f of entry.files) {
     if (f.kind !== "dir" && f.kind !== "file") continue;
     const abs = fromMarkerPath(target.dir, f.path);
+    // Independent of the parser: never the config dir itself, never above or beside it.
+    if (!strictlyInside(target.dir, abs)) {
+      refuseOutside("remove", f.path);
+      continue;
+    }
     if (isSharedDiscoveryDir(target.dir, abs)) {
       actions.push({ kind: "remove", target: f.path, result: "skipped", detail: "shared discovery dir preserved" });
       continue;
@@ -2387,6 +2503,7 @@ function removeMarkerEntry(
       actions.push({ kind: "remove", target: f.path, result: "ok" });
     }
   }
+  return failures;
 }
 
 // v1/legacy marker mode: remove only product-prefixed paths this convention would
@@ -2397,9 +2514,15 @@ function heuristicUninstall(
   options: Options,
   actions: Action[],
   notes: string[],
-): void {
+): number {
+  let failures = 0;
   notes.push(`${target.dir}: v1 marker — heuristic removal (shared JSON config left for manual-review)`);
   const removePath = (abs: string): void => {
+    if (!strictlyInside(target.dir, abs)) {
+      actions.push({ kind: "remove", target: toMarkerPath(target.dir, abs), result: "failed", detail: "refused: path is not strictly inside the config dir — nothing removed" });
+      failures += 1;
+      return;
+    }
     let state: ChainResult;
     try {
       state = chainUnder(target.dir, abs);
@@ -2446,6 +2569,7 @@ function heuristicUninstall(
       if (entry.isFile() && entry.name.startsWith(`${id}-`)) removePath(join(agentsDir, entry.name));
     }
   }
+  return failures;
 }
 
 /**
@@ -2491,6 +2615,14 @@ function runUninstall(options: Options, registry: Registry): number {
   const markers = new Map<string, MarkerRaw>();
   for (const target of resolution.targets) markers.set(target.dir, readMarkerRaw(target.dir));
 
+  // Fail closed BEFORE any removal or purge anywhere: an unusable marker in ANY selected target
+  // means the manifest of what this installer wrote cannot be trusted — the other targets are
+  // not touched either (also under --dry-run).
+  for (const target of resolution.targets) {
+    const m = markers.get(target.dir);
+    if (m?.corrupt) throw new Error(corruptMarkerMessage(target.dir, m.reason, "uninstall"));
+  }
+
   const idsPresent = new Set<string>();
   for (const target of resolution.targets) {
     const m = markers.get(target.dir);
@@ -2506,6 +2638,7 @@ function runUninstall(options: Options, registry: Registry): number {
 
   const reports: InstallReport[] = [];
   let markersMutated = false;
+  let anyFailed = false;
   for (const id of selected) {
     // A Claude Code plugin is never this script's to remove: nothing pre-existing — not a legacy
     // skills/hooks copy, not a marker entry, not a config key — is deleted (LEGACY_CLEANUP_ISSUE
@@ -2521,17 +2654,20 @@ function runUninstall(options: Options, registry: Registry): number {
     const actions: Action[] = [];
     let heuristic = false;
     let anyRemoved = false;
+    let failures = 0;
 
     for (const target of resolution.targets) {
       const m = markers.get(target.dir);
       if (!m) continue;
-      if (m.corrupt) {
-        notes.push(`${target.dir}: corrupt marker; skipped`);
-        continue;
-      }
       if (m.legacy && !m.v2) {
         heuristic = true;
-        heuristicUninstall(id, target, options, actions, notes);
+        const refused = heuristicUninstall(id, target, options, actions, notes);
+        if (refused > 0) {
+          // Something this run had to refuse: the record stays so the uninstall can be re-run.
+          failures += refused;
+          notes.push(`${target.dir}: ${refused} removal(s) refused — the marker record for ${id} is kept`);
+          continue;
+        }
         if (m.legacy.products) m.legacy.products = m.legacy.products.filter((p) => p.id !== id);
         anyRemoved = true;
         markersMutated = true;
@@ -2542,11 +2678,19 @@ function runUninstall(options: Options, registry: Registry): number {
         notes.push(`${target.dir}: not installed`);
         continue;
       }
-      removeMarkerEntry(entry, target, options, actions);
+      const refused = removeMarkerEntry(entry, target, options, actions);
+      if (refused > 0) {
+        // A refused backup or a refused path: the entry is KEPT (the manifest still describes
+        // what is on disk), the product is reported failed and the run exits non-zero.
+        failures += refused;
+        notes.push(`${target.dir}: ${refused} removal(s) refused — the marker record for ${id} is kept`);
+        continue;
+      }
       if (m.v2) delete m.v2.products[id];
       anyRemoved = true;
       markersMutated = true;
     }
+    if (failures > 0) anyFailed = true;
 
     if (options.purgeBinaries) {
       const product = byId.get(id);
@@ -2557,9 +2701,11 @@ function runUninstall(options: Options, registry: Registry): number {
     const report: InstallReport = {
       productId: id,
       displayName: display,
-      success: true,
+      success: failures === 0,
       skipped: false,
-      message: `${display}: ${anyRemoved ? (options.dryRun ? "would remove" : "removed") : "not installed"}`,
+      message: failures > 0
+        ? `${display}: failed: ${failures} removal(s) refused — see actions; nothing refused was removed, the marker record is kept`
+        : `${display}: ${anyRemoved ? (options.dryRun ? "would remove" : "removed") : "not installed"}`,
       assets: { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 },
       actions,
       notes,
@@ -2602,7 +2748,7 @@ function runUninstall(options: Options, registry: Registry): number {
   }
 
   emitReport(options, "uninstall", resolution, reports);
-  return 0;
+  return anyFailed ? 1 : 0;
 }
 
 function purgeProductBinary(product: Product, options: Options, actions: Action[], notes: string[]): void {

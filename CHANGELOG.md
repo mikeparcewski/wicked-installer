@@ -86,6 +86,15 @@ All notable changes to wicked-installer are documented here. The format follows
   list them. A v2 marker must carry all five top-level fields and non-negative integer asset counts
   (a v1 upgrade drops anything else); a trailing `\` in a recorded plugin path is not forgiven on
   POSIX.
+- Uninstall hardening: every recorded path is validated at parse time to be a non-empty relative
+  path with no empty/`.`/`..` segment, no leading separator, no control characters, resolving
+  strictly inside the config dir (`""`, `skills/..`, `/abs`, `a/../..` make the marker unusable —
+  they would have reached a recursive removal of the config dir); owner keys must be substantive
+  (≥ 8 chars), product ids/keys must be single safe segments; every removal call site additionally
+  refuses anything not strictly inside the target. `uninstall` fails closed before removing anything
+  anywhere when ANY selected target's marker is unusable, and a refused backup fails the config
+  write it protects, the product and the run — the marker record is kept. A symlinked source
+  `package.json` is refused and named (version unknown) like the other source manifests.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is

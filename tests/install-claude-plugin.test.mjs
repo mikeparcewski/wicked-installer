@@ -196,7 +196,9 @@ test("install-claude.js fails closed on an unparseable marker: exit 1 before any
       assert.deepEqual(report.reports, [], `${args.join(" ")}: no product-derived lines from an unparseable marker`);
     }
     const un = runScript(sb, ["uninstall", "wicked-vault", "--claude-home", sb.cfg, "--json"]);
-    assert.equal(un.status, 0, un.stdout + un.stderr);
+    assert.equal(un.status, 1, un.stdout + un.stderr);
+    assert.match(un.stderr, /install marker is unusable \(.+\) — refusing to uninstall: .*nothing was removed anywhere/);
+    assert.equal(un.stdout.trim(), "", "no report");
     assert.deepEqual(snapshot(sb.cfg), before, "status and uninstall leave the corrupt marker exactly as it was");
 
     // A marker PATH that is a symlink — dangling, or pointing at perfectly valid JSON — is never
@@ -920,6 +922,180 @@ test("install-claude.js collapses a repeated --claude-home (and CLAUDE_CONFIG_DI
     const env = runScript(sb, ["status", "--json"], { env: { CLAUDE_CONFIG_DIR: `${cfg}:${cfg}` } });
     assert.equal(env.status, 0, env.stdout + env.stderr);
     assert.deepEqual(JSON.parse(env.stdout).configDirs, [cfg]);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+/** A sound v2 marker for wicked-vault owning skills/wicked-vault-core plus a SessionStart hook in settings.json, with those assets present. */
+function plantVaultInstall(cfg, { files } = {}) {
+  mkdirSync(join(cfg, "skills", "wicked-vault-core"), { recursive: true });
+  writeFileSync(join(cfg, "skills", "wicked-vault-core", "SKILL.md"), "---\nname: wicked-vault-core\n---\nvault\n");
+  mkdirSync(join(cfg, "wicked-installer", "products", "wicked-vault", "hooks"), { recursive: true });
+  writeFileSync(join(cfg, "wicked-installer", "products", "wicked-vault", "hooks", "hello.sh"), "#!/bin/sh\n");
+  const owner = "wicked-installer/products/wicked-vault";
+  writeFileSync(join(cfg, "settings.json"), JSON.stringify({ theme: "kept", hooks: { SessionStart: [{ hooks: [{ type: "command", command: `${cfg}/${owner}/hooks/hello.sh` }] }, { hooks: [{ type: "command", command: "/usr/bin/true" }] }] } }));
+  writeFileSync(markerPath(cfg), JSON.stringify({
+    markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "2026-01-01T00:00:00.000Z",
+    products: { "wicked-vault": { installedAt: "2026-01-01T00:00:00.000Z", lastResult: "installed", version: "0.0.0-test", source: "local", notes: [],
+      files: files ?? [
+        { kind: "dir", path: "skills/wicked-vault-core" },
+        { kind: "dir", path: "wicked-installer/products/wicked-vault" },
+        { kind: "hooks-entry", file: "settings.json", event: "SessionStart", ownerMatch: { commandContains: owner } },
+      ] } },
+  }));
+}
+
+test("uninstall: a marker whose records could resolve to the config dir itself (or above) — or an empty owner key, or an unsafe id — is unusable: exit 1, nothing removed", () => {
+  const sb = sandbox();
+  try {
+    const good = { installedAt: "2026-01-01T00:00:00.000Z", lastResult: "installed", notes: [] };
+    const hook = (owner) => ({ kind: "hooks-entry", file: "settings.json", event: "SessionStart", ownerMatch: { commandContains: owner } });
+    const cases = {
+      "path-empty": { files: [{ kind: "dir", path: "" }] },
+      "path-dotdot": { files: [{ kind: "dir", path: "skills/.." }] },
+      "path-abs": { files: [{ kind: "dir", path: "/abs" }] },
+      "path-climb": { files: [{ kind: "file", path: "a/../.." }] },
+      "path-dot-segment": { files: [{ kind: "dir", path: "skills/./x" }] },
+      "path-tilde": { files: [{ kind: "dir", path: "~/x" }] },
+      "path-double-slash": { files: [{ kind: "dir", path: "skills//x" }] },
+      "path-control": { files: [{ kind: "dir", path: "skills/x\ty" }] },
+      "owner-empty": { files: [hook("")] },
+      "owner-short": { files: [hook("short")] },
+      "file-outside": { files: [{ kind: "hooks-entry", file: "../settings.json", event: "SessionStart", ownerMatch: { commandContains: "wicked-installer/products/wicked-vault" } }] },
+      "pointer-empty": { files: [{ kind: "json-key", file: ".claude.json", pointer: "", wroteHash: "abc" }] },
+    };
+    for (const [name, { files }] of Object.entries(cases)) {
+      const cfg = join(sb.tmp, `cfg-${name}`);
+      mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+      mkdirSync(join(cfg, "skills", "wicked-vault-core"), { recursive: true });
+      writeFileSync(join(cfg, "skills", "wicked-vault-core", "SKILL.md"), "x");
+      writeFileSync(join(cfg, "settings.json"), JSON.stringify({ theme: "kept", hooks: { SessionStart: [{ hooks: [{ type: "command", command: "/usr/bin/true" }] }] } }));
+      writeFileSync(markerPath(cfg), JSON.stringify({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "t", products: { "wicked-vault": { ...good, files } } }));
+      const before = snapshot(cfg);
+      for (const args of [["uninstall", "wicked-vault"], ["uninstall", "--all"]]) {
+        const r = runScript(sb, [...args, "--claude-home", cfg, "--json"]);
+        assert.equal(r.status, 1, `${name} ${args.join(" ")}: ${r.stdout}${r.stderr}`);
+        assert.match(r.stderr, /install marker is unusable \(malformed v2 marker: products\."wicked-vault"\.files\[0\]\.(path|file|pointer|ownerMatch\.commandContains): .*\) — refusing to uninstall/, name);
+        assert.equal(r.stdout.trim(), "", `${name}: no report`);
+        assert.deepEqual(snapshot(cfg), before, `${name}: the config dir is byte-identical`);
+      }
+    }
+    // Unsafe ids: a v2 product key and a v1 entry id that would become `commands/..`.
+    for (const [name, marker] of [
+      ["v2-key-dotdot", (cfg) => ({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "t", products: { "..": { ...good, files: [] } } })],
+      ["v2-key-slash", (cfg) => ({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "t", products: { "a/b": { ...good, files: [] } } })],
+      ["v1-id-dotdot", () => ({ products: [{ id: ".." }] })],
+      ["v1-id-slash", () => ({ products: [{ id: "../x" }] })],
+    ]) {
+      const cfg = join(sb.tmp, `cfg-${name}`);
+      mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+      mkdirSync(join(cfg, "commands", "x"), { recursive: true });
+      writeFileSync(join(cfg, "settings.json"), "{}");
+      writeFileSync(markerPath(cfg), JSON.stringify(marker(cfg)));
+      const before = snapshot(cfg);
+      const r = runScript(sb, ["uninstall", "--all", "--claude-home", cfg, "--json"]);
+      assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /install marker is unusable \((malformed v2 marker: products\.".*": product id is not a safe path segment|unrecognised marker shape.*)\) — refusing to uninstall/, name);
+      assert.deepEqual(snapshot(cfg), before, `${name}: byte-identical`);
+    }
+    // And a sound marker with the same shapes done right still uninstalls cleanly.
+    const ok = join(sb.tmp, "cfg-ok");
+    plantVaultInstall(ok);
+    const r = runScript(sb, ["uninstall", "wicked-vault", "--claude-home", ok, "--json"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(!existsSync(join(ok, "skills", "wicked-vault-core")), "the owned skill dir was removed");
+    const settings = JSON.parse(readFileSync(join(ok, "settings.json"), "utf8"));
+    assert.deepEqual(settings.hooks.SessionStart, [{ hooks: [{ type: "command", command: "/usr/bin/true" }] }], "only the owned hook entry was removed");
+    assert.ok(!existsSync(markerPath(ok)), "the last record gone ⇒ marker removed");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("uninstall: a refused backup fails the config write it protects, the product and the run; the marker record is kept", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const cfg = sb.cfg;
+    mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
+    plantVaultInstall(cfg);
+    const external = join(sb.tmp, "external-backups");
+    mkdirSync(external);
+    symlinkSync(external, join(cfg, "wicked-installer", "backups")); // planted PARENT link ⇒ every backup refused
+    const settingsBytes = readFileSync(join(cfg, "settings.json"));
+    const markerBytes = readFileSync(markerPath(cfg));
+    const externalBefore = snapshot(external);
+    const r = runScript(sb, ["uninstall", "wicked-vault", "--claude-home", cfg, "--json"]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.ok(readFileSync(join(cfg, "settings.json")).equals(settingsBytes), "settings.json byte-identical — the owned hook was NOT removed without a backup");
+    assert.ok(readFileSync(markerPath(cfg)).equals(markerBytes), "the marker (and its wicked-vault record) is untouched");
+    assert.deepEqual(snapshot(external), externalBefore, "nothing written through the planted link");
+    const rep = JSON.parse(r.stdout).reports.find((x) => x.productId === "wicked-vault");
+    assert.equal(rep.success, false);
+    assert.match(rep.message, /failed: 1 removal\(s\) refused/);
+    const failed = rep.actions.find((a) => a.kind === "remove" && a.target === "settings.json#SessionStart");
+    assert.ok(failed && failed.result === "failed" && /backup refused: .*wicked-installer[\\/]backups: is a symlink/.test(failed.detail), JSON.stringify(rep.actions));
+    assert.ok(rep.notes.some((n) => /the marker record for wicked-vault is kept/.test(n)), JSON.stringify(rep.notes));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("uninstall: an unusable marker in ANY selected target fails the whole run before anything is removed anywhere (two dirs, one corrupt)", () => {
+  const sb = sandbox();
+  try {
+    const a = join(sb.tmp, "cfg-a");
+    mkdirSync(join(a, "wicked-installer"), { recursive: true });
+    plantVaultInstall(a);
+    const b = join(sb.tmp, "cfg-b");
+    mkdirSync(join(b, "wicked-installer"), { recursive: true });
+    writeFileSync(join(b, "settings.json"), "{}");
+    writeFileSync(markerPath(b), "{ nope");
+    const beforeA = snapshot(a);
+    const beforeB = snapshot(b);
+    for (const args of [["uninstall", "wicked-vault"], ["uninstall", "--all"], ["uninstall", "wicked-vault", "--dry-run"]]) {
+      const r = runScript(sb, [...args, "--claude-home", a, "--claude-home", b, "--json"]);
+      assert.equal(r.status, 1, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`${escapeRe(markerPath(b))}: install marker is unusable \\(.+\\) — refusing to uninstall: .*nothing was removed anywhere`));
+      assert.equal(r.stdout.trim(), "", "no report");
+      assert.deepEqual(snapshot(a), beforeA, `${args.join(" ")}: the VALID target is untouched too`);
+      assert.deepEqual(snapshot(b), beforeB, `${args.join(" ")}: the corrupt target is untouched`);
+    }
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("install: a symlinked source package.json is refused and NAMED (version unknown), a symlinked platform override skips that skill — externals byte-identical", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const cfg = sb.cfg;
+    mkdirSync(cfg, { recursive: true });
+    const external = join(sb.tmp, "external");
+    mkdirSync(join(external, "override"), { recursive: true });
+    writeFileSync(join(external, "package.json"), JSON.stringify({ name: "wicked-vault", version: "9.9.9-external" }));
+    writeFileSync(join(external, "override", "SKILL.md"), "---\nname: wicked-vault-evil\n---\nevil\n");
+    const vault = join(sb.srcRoot, "wicked-vault");
+    rmSync(join(vault, "package.json"));
+    symlinkSync(join(external, "package.json"), join(vault, "package.json"));
+    mkdirSync(join(vault, "skills", "good"), { recursive: true });
+    writeFileSync(join(vault, "skills", "good", "SKILL.md"), "---\nname: wicked-vault-good\n---\ngood\n");
+    mkdirSync(join(vault, "skills", "overridden", "platform"), { recursive: true });
+    writeFileSync(join(vault, "skills", "overridden", "SKILL.md"), "---\nname: wicked-vault-overridden\n---\ngeneric\n");
+    symlinkSync(join(external, "override"), join(vault, "skills", "overridden", "platform", "claude"));
+    const externalBefore = snapshot(external);
+    const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const rep = JSON.parse(r.stdout).reports.find((x) => x.productId === "wicked-vault");
+    assert.equal(rep.version, undefined, "no version read through the link");
+    const refusedManifest = rep.actions.find((a) => a.kind === "acquire" && a.target === "wicked-vault/package.json");
+    assert.ok(refusedManifest && /refused: source manifest .*package\.json: is a symlink/.test(refusedManifest.detail), JSON.stringify(rep.actions));
+    const skipped = rep.actions.filter((a) => a.kind === "copy-skill" && a.result === "skipped");
+    assert.deepEqual(skipped.map((a) => a.target), ["skills/overridden"]);
+    assert.match(skipped[0].detail, /refused: .*platform[\\/]claude(?:[\\/]SKILL\.md)?: is a symlink/);
+    assert.ok(existsSync(join(cfg, "skills", "wicked-vault-good", "SKILL.md")), "the untouched skill installs");
+    assert.ok(!existsSync(join(cfg, "skills", "wicked-vault-overridden")) && !existsSync(join(cfg, "skills", "wicked-vault-evil")), "the overridden skill was not copied from either source");
+    assert.deepEqual(snapshot(external), externalBefore);
   } finally {
     cleanup(sb);
   }
