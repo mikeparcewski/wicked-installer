@@ -13,7 +13,7 @@ import { promptSelectionMode, promptBundle, promptCustom, promptConfirm, promptC
 import type { CliOption, UserSelection } from "./ui.js";
 import { listProducts, getProduct } from "./registry.js";
 import type { InstallResult, Product } from "./types.js";
-import { cacheRoot, claudePluginSpec, describeOrigin, readRegistration, resolveClaudeConfigDirs } from "./claude-plugin.js";
+import { cacheRoot, claudePluginSpec, describeOrigin, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const { version: VERSION } = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
@@ -473,8 +473,10 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
 
 /**
  * Per active Claude config dir: is wicked-garden REGISTERED with Claude Code (marketplace +
- * install record + cache payload), or merely copied? Read from disk only — even
- * `claude plugin list` writes <configDir>/.claude.json, so status never invokes the CLI.
+ * install record + cache payload — registrationVerdict), broken, or merely copied? Read from
+ * disk only: even `claude plugin list` writes <configDir>/.claude.json, so status runs no
+ * `claude plugin` command. (CLI detection above still runs `claude --version`, which writes
+ * nothing — verified against an empty config dir.)
  */
 function renderPluginRegistration(flags: DispatchFlags): void {
   const garden = getProduct("wicked-garden");
@@ -483,7 +485,7 @@ function renderPluginRegistration(flags: DispatchFlags): void {
   const { dirs, origin } = resolveClaudeConfigDirs({ homeFlags: flags.claudeHomes });
 
   console.log(chalk.bold(`\nClaude Code plugin registration (${spec.pluginId}):`));
-  console.log(chalk.dim(`  config dir(s) from ${describeOrigin(origin)}; read from disk — the claude CLI is not invoked`));
+  console.log(chalk.dim(`  config dir(s) from ${describeOrigin(origin)}; registration read from disk — no \`claude plugin\` command is run`));
 
   for (const dir of dirs) {
     const reg = readRegistration(dir, spec);
@@ -495,11 +497,14 @@ function renderPluginRegistration(flags: DispatchFlags): void {
       console.log(`    bare copy:   ${chalk.yellow(`${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it`)}`);
     }
     for (const w of reg.warnings) console.log(chalk.red(`    ! ${w}`));
-    const state = reg.installed.length > 0
+    const verdict = registrationVerdict(reg);
+    const state = verdict.state === "registered"
       ? chalk.green("✓ registered")
-      : reg.bareCopy
-        ? chalk.yellow("~ copy only (unregistered)")
-        : chalk.dim("  not installed");
+      : verdict.state === "broken"
+        ? chalk.red(`✗ broken registration — ${verdict.problems.join("; ")}`)
+        : verdict.state === "copy-only"
+          ? chalk.yellow("~ copy only (unregistered)")
+          : chalk.dim("  not installed");
     console.log(`    state:       ${state}`);
   }
 
@@ -530,7 +535,8 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
 
   console.log(chalk.bold("\nwicked-* products:"));
   for (const p of products) {
-    const installed = isProductInstalled(p.id);
+    // Same --claude-home target set as the registration section below, so the two agree.
+    const installed = isProductInstalled(p.id, new Set(), flags.claudeHomes);
     // A `manual` product is not installed DIRECTLY — it arrives inside something else
     // (wicked-studio ships in wicked-crew). Both facts matter and neither replaces the other:
     // "is it here?" and "how would I get it?" are different questions, and until detection was

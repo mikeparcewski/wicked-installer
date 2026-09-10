@@ -231,6 +231,26 @@ test("--dry-run fails fast on a --source-root with no marketplace manifest (and 
   }
 });
 
+test("--dry-run with a valid --source-root but no Claude Code fails instead of planning the remote npx fallback", () => {
+  // The npx fallback would install the PUBLISHED package — not the checkout --source-root named.
+  const sb = sandbox({ withClaude: false });
+  try {
+    const root = join(sb.tmp, "checkouts");
+    mkdirSync(join(root, "fake-plugin", ".claude-plugin"), { recursive: true });
+    writeFileSync(join(root, "fake-plugin", ".claude-plugin", "marketplace.json"), "{}");
+    const before = snapshot(sb.home);
+    const r = runDry(sb, ["fake-plugin", "--source-root", root]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stdout, /--source-root .* has no fallback/);
+    // The refusal names the command it is NOT running; only a `dry-run:` line would be a plan to run it.
+    assert.doesNotMatch(r.stdout, /dry-run: npx fake-plugin-pkg install/, "no silent fallback to the published package");
+    assert.ok(!existsSync(r.guardLog), "still no spawns");
+    assert.deepEqual(snapshot(sb.home), before, "still no writes");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("the shipped registry: `install wicked-garden --dry-run` plans vault + registration and runs nothing", () => {
   const registry = JSON.parse(readFileSync(join(ROOT, "registry.json"), "utf8"));
   const sb = sandbox({ withClaude: true, registry });

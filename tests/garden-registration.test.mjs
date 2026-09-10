@@ -181,6 +181,24 @@ test("--source-root registers the local checkout <root>/wicked-garden as the mar
   }
 });
 
+test("--source-root without Claude Code fails rather than silently installing the published package", { skip }, () => {
+  const sb = sandbox();
+  const cfg = join(sb.tmp, "cfg");
+  const root = join(sb.tmp, "checkouts");
+  mkdirSync(cfg);
+  mkdirSync(join(root, "wicked-garden", ".claude-plugin"), { recursive: true });
+  writeFileSync(join(root, "wicked-garden", ".claude-plugin", "marketplace.json"), "{}");
+  try {
+    const r = run(sb, ["install", "wicked-garden", "--source-root", root], { configDir: cfg, claude: false });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /--source-root .* has no fallback/);
+    assert.deepEqual(lines(sb.npmLog), ["npm install -g wicked-vault"], "the dependency installs; the npx fallback does not run");
+    assert.ok(!existsSync(join(cfg, "plugins")), "nothing claims to be registered");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("without Claude Code the installer falls back to the bare copy and says it is unregistered", { skip }, () => {
   const sb = sandbox();
   const cfg = join(sb.tmp, "cfg");
@@ -221,10 +239,17 @@ test("status reports the registration per config dir and flags a bare copy as co
   const registered = join(sb.tmp, "cfg-registered");
   const bare = join(sb.tmp, "cfg-bare");
   const empty = join(sb.tmp, "cfg-empty");
+  const broken = join(sb.tmp, "cfg-broken");
   mkdirSync(registered);
   mkdirSync(join(bare, "plugins", "wicked-garden", ".claude-plugin"), { recursive: true });
   writeFileSync(join(bare, "plugins", "wicked-garden", ".claude-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version: "12.0.0" }));
   mkdirSync(empty);
+  // A leftover install record with no marketplace entry and no payload on disk.
+  mkdirSync(join(broken, "plugins"), { recursive: true });
+  writeFileSync(join(broken, "plugins", "installed_plugins.json"), JSON.stringify({
+    version: 2,
+    plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: cacheDir(broken, "9.9.9"), version: "9.9.9" }] },
+  }));
   try {
     assert.equal(run(sb, ["install", "wicked-garden"], { configDir: registered }).status, 0);
     const statusLog = join(sb.tmp, "status-stub.log");
@@ -244,11 +269,19 @@ test("status reports the registration per config dir and flags a bare copy as co
     assert.match(b.stdout, /installed:\s+not installed/);
     assert.match(b.stdout, /bare copy:\s+.*plugins[\\/]wicked-garden \(v12\.0\.0\) — copy only \(unregistered\)/);
     assert.match(b.stdout, /state:\s+~ copy only \(unregistered\)/);
+    assert.match(b.stdout, /not installed\s+wicked-garden/, "a bare copy is not 'installed' in the product list: Claude Code cannot load it");
 
     const c = run(sb, ["status"], { configDir: empty, env: { CLAUDE_STUB_LOG: statusLog } });
     assert.equal(c.status, 0, c.stdout + c.stderr);
     assert.match(c.stdout, /state:\s+not installed/);
     assert.match(c.stdout, /not installed\s+wicked-garden/);
+
+    // A stale install record is a BROKEN registration, and the product list agrees.
+    const e = run(sb, ["status"], { configDir: broken, env: { CLAUDE_STUB_LOG: statusLog } });
+    assert.equal(e.status, 0, e.stdout + e.stderr);
+    assert.match(e.stdout, /installed:\s+9\.9\.9 \(user\)/);
+    assert.match(e.stdout, /state:\s+✗ broken registration — marketplace entry missing.*; payload missing/);
+    assert.match(e.stdout, /not installed\s+wicked-garden/, "a stale record is not 'installed' in the product list either");
 
     // --claude-home works for status too, and a multi-dir env renders every dir.
     const d = run(sb, ["status", "--claude-home", registered], { configDir: empty, env: { CLAUDE_STUB_LOG: statusLog } });

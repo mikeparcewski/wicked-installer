@@ -66,9 +66,9 @@ always into `~/.claude` whatever `CLAUDE_CONFIG_DIR` says) is loaded by nothing.
 
 So when the `claude` CLI is present, `install wicked-garden` (and the interactive
 zero-CLI path) resolves the active config dir(s) exactly like the Claude install
-script does — `--claude-home` → `CLAUDE_CONFIG_DIR` (":"/","-separated, exclusive
-when set) → `~/.claude` — and for **each** of them runs Claude Code's own mechanism
-with `CLAUDE_CONFIG_DIR=<target>`:
+script does — `--claude-home` flags, else `CLAUDE_CONFIG_DIR` (a list split on `:`
+or `,`; on Windows on `;` or `,` — exclusive when set), else `~/.claude` — and for
+**each** of them runs Claude Code's own mechanism with `CLAUDE_CONFIG_DIR=<target>`:
 
 ```
 claude plugin marketplace list --json                 # idempotent: add only when absent
@@ -87,9 +87,15 @@ install` and says so: *copied to ~/.claude/plugins/wicked-garden; not registered
 Claude Code not detected*.
 
 `status` prints, per active config dir, the marketplace (and its source), the
-installed version/scope, the cached versions, and flags a bare copy as
-**copy only (unregistered)**. It reads the registration from disk and never
-invokes the `claude` CLI (even `claude plugin list` writes `<configDir>/.claude.json`).
+installed version/scope, the cached versions, and a verdict: **registered** only when
+the marketplace entry, the install record and the cache payload all exist; **broken
+registration** (with the reason) when a record survives without its marketplace or
+payload; **copy only (unregistered)** for a bare `plugins/wicked-garden` copy. The
+product list's "installed" for wicked-garden means *registered* — a bare or broken
+install is not something Claude Code can load. The registration is read from disk;
+`status` runs no `claude plugin …` command (even `claude plugin list` writes
+`<configDir>/.claude.json`) — its CLI detection runs only `claude --version`, which
+writes nothing.
 
 ---
 

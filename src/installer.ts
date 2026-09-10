@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { execa } from "execa";
 import type { Product, InstallResult } from "./types.js";
-import { claudePluginSpec, planClaudePlugin, registerClaudePlugin, resolveClaudeConfigDirs } from "./claude-plugin.js";
+import { claudePluginSpec, planClaudePlugin, registerClaudePlugin, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
 
 const SKIP_BINARY_EXTS = /\.(md|txt|sha256|sha512|asc|json|toml|yaml|yml|xml|html|css|js|ts)$/i;
 
@@ -299,6 +299,9 @@ async function installClaudePlugin(
   const { id, displayName, install } = product;
   const spec = claudePluginSpec(product);
   const configDirs = resolveClaudeConfigDirs({ homeFlags: options.claudeHomes });
+  // Validate --source-root up front — also under --dry-run, and whether or not Claude Code is
+  // present: a wrong root must fail, and a right one must never be silently ignored.
+  const source = resolveMarketplaceSource(spec, options.sourceRoot);
   const fallbackArgs = install.type === "npm-run" && install.package
     ? [install.package, install.command ?? "install", ...(install.args ?? [])]
     : undefined;
@@ -306,12 +309,17 @@ async function installClaudePlugin(
   // What the fallback writes — always ~/.claude, whatever CLAUDE_CONFIG_DIR says.
   const bareCopy = join(homedir(), ".claude", "plugins", id);
   const note = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
+  // A local checkout can only be registered through Claude Code; the npx fallback would install
+  // the PUBLISHED package instead of `source`, which is not what --source-root asked for.
+  const noFallbackForSourceRoot = (reason: string): Error =>
+    new Error(`Claude Code not detected (${reason}); --source-root ${options.sourceRoot} registers ${source} through Claude Code and has no fallback — not running ${fallbackCmd ?? "the bare-copy install"}, which would install the published package instead`);
 
   if (options.dryRun) {
     const planned = planClaudePlugin(spec, { configDirs, sourceRoot: options.sourceRoot });
     if (planned.claudeDetected) {
       return plan(planned.lines, `would register ${spec.pluginId} with Claude Code in ${configDirs.dirs.join(", ")}`);
     }
+    if (options.sourceRoot) throw noFallbackForSourceRoot("claude is not on PATH");
     const lines = ["Claude Code CLI not detected on PATH — would fall back to the bare copy:"];
     if (fallbackCmd) lines.push(`${fallbackCmd}    (copies to ${bareCopy}; not registered — Claude Code would not load it)`);
     else lines.push(`nothing to run: ${id} has no fallback install command`);
@@ -332,6 +340,7 @@ async function installClaudePlugin(
     };
   }
 
+  if (options.sourceRoot) throw noFallbackForSourceRoot(outcome.reason);
   if (!fallbackArgs || !fallbackCmd) {
     return {
       productId: id, success: false, skipped: false,

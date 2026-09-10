@@ -171,29 +171,52 @@ function winQuote(arg: string): string {
   return `${out}"`;
 }
 
+export interface PreparedSpawn {
+  cmd: string;
+  argv: string[];
+  shell: boolean;
+}
+
+/**
+ * How to launch `bin`: a .js/.mjs file goes through node (never rely on a shebang —
+ * Windows); a Windows .cmd/.bat shim must go through cmd.exe with cmd-quoted args.
+ * cmd.exe expands %VAR% (and !VAR!) even inside quotes and there is no escape for
+ * them (INTERFACE.md §1.1), so a %/!-bearing argument — e.g. a `--source-root`
+ * checkout under `%TEMP%` — would be rewritten before Claude Code ever saw it. Such
+ * arguments are refused rather than silently changed. Pure, so it is unit-testable
+ * for win32 from any platform.
+ */
+export function prepareClaudeSpawn(bin: string, args: string[], platform: NodeJS.Platform = process.platform): PreparedSpawn {
+  if (/\.(mjs|cjs|js)$/i.test(bin)) return { cmd: process.execPath, argv: [bin, ...args], shell: false };
+  if (platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
+    const unsafe = [bin, ...args].filter((a) => /[%!]/.test(a));
+    if (unsafe.length > 0) {
+      throw new Error(
+        `refusing to route ${unsafe.map((a) => JSON.stringify(a)).join(", ")} through cmd.exe: ` +
+          "% and ! cannot be quoted for a .cmd shim (INTERFACE.md §1.1) — use a path without them, or a native claude.exe",
+      );
+    }
+    return { cmd: winQuote(bin), argv: args.map(winQuote), shell: true };
+  }
+  return { cmd: bin, argv: args, shell: false };
+}
+
 /**
  * Run the Claude Code CLI once with CLAUDE_CONFIG_DIR=<configDir>. `capture` pipes
  * stdout/stderr (for `--json` queries); `inherit` streams them so marketplace clones
  * and install progress — and any consent prompt Claude Code raises — reach the user.
- * Never relies on a shebang (Windows): a .js/.mjs binary is run through node.
  */
 export const spawnClaude: ClaudeSpawner = (bin, args, configDir, mode) => {
-  const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir };
-  let cmd = bin;
-  let argv = args;
-  let shell = false;
-  if (/\.(mjs|cjs|js)$/i.test(bin)) {
-    cmd = process.execPath;
-    argv = [bin, ...args];
-  } else if (process.platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
-    shell = true;
-    cmd = winQuote(bin);
-    argv = args.map(winQuote);
+  let prepared: PreparedSpawn;
+  try {
+    prepared = prepareClaudeSpawn(bin, args);
+  } catch (err) {
+    return { status: null, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
   }
-  const res = spawnSync(cmd, argv, {
-    env,
+  const res = spawnSync(prepared.cmd, prepared.argv, {
+    env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
     encoding: "utf8",
-    shell,
+    shell: prepared.shell,
     stdio: mode === "capture" ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (res.error) return { status: null, stdout: "", stderr: res.error.message };
@@ -302,6 +325,36 @@ export function readRegistration(configDir: string, spec: ClaudePluginSpec): Plu
 /** The directory Claude Code loads the plugin from once registered. */
 export function cacheRoot(configDir: string, spec: ClaudePluginSpec): string {
   return join(configDir, "plugins", "cache", spec.marketplaceName, spec.pluginName);
+}
+
+export type RegistrationState = "registered" | "broken" | "copy-only" | "absent";
+
+export interface RegistrationVerdict {
+  state: RegistrationState;
+  /** Why a `broken` registration is broken (empty otherwise). */
+  problems: string[];
+}
+
+/**
+ * An installed_plugins.json record alone is not a registration. Claude Code (and crew)
+ * load the plugin from the record's installPath under plugins/cache/, and updates go
+ * through the marketplace entry — so `registered` requires all three: the marketplace
+ * entry, the install record, and the payload (its plugin manifest) on disk. A record
+ * whose payload or marketplace is gone is `broken`; a bare plugins/<plugin>/ copy with
+ * no record is `copy-only`.
+ */
+export function registrationVerdict(reg: PluginRegistration): RegistrationVerdict {
+  if (reg.installed.length === 0) return { state: reg.bareCopy ? "copy-only" : "absent", problems: [] };
+  const problems: string[] = [];
+  if (!reg.marketplace) problems.push("marketplace entry missing from known_marketplaces.json (updates would fail)");
+  const payload = reg.installed.find(
+    (e) => e.installPath !== "" && existsSync(join(e.installPath, ".claude-plugin", "plugin.json")),
+  );
+  if (!payload) {
+    const onDisk = reg.cacheVersions.length > 0 ? reg.cacheVersions.join(", ") : "none";
+    problems.push(`payload missing: no recorded installPath holds .claude-plugin/plugin.json (cache versions on disk: ${onDisk})`);
+  }
+  return { state: problems.length > 0 ? "broken" : "registered", problems };
 }
 
 // ---------------------------------------------------------------------------
@@ -451,15 +504,17 @@ export function registerClaudePlugin(spec: ClaudePluginSpec, opts: RegisterOptio
       run(["plugin", "install", spec.pluginId], dir, "inherit");
     }
 
-    // Re-derive from disk: Claude Code exiting 0 is a claim; the cache payload is the evidence.
+    // Re-derive from disk: Claude Code exiting 0 is a claim; a full registration (marketplace
+    // entry + install record + payload) is the evidence.
     const reg = readRegistration(dir, spec);
-    const version = reg.installed[0]?.version;
-    const cacheDir = version ? join(cacheRoot(dir, spec), version) : undefined;
-    if (!version || !cacheDir || !existsSync(cacheDir)) {
-      throw new Error(`${spec.pluginId}: claude reported success but ${cacheRoot(dir, spec)}/<version> is missing — Claude Code would not load it`);
+    const verdict = registrationVerdict(reg);
+    if (verdict.state !== "registered") {
+      const why = verdict.problems.length > 0 ? ` — ${verdict.problems.join("; ")}` : "";
+      throw new Error(`${spec.pluginId}: claude reported success but the registration in ${dir} is ${verdict.state}${why} — Claude Code would not load it`);
     }
+    const { version, installPath } = reg.installed[0];
     versions[dir] = version;
-    opts.log(`    registered ${spec.pluginId} ${version} → ${cacheDir}`);
+    opts.log(`    registered ${spec.pluginId} ${version} → ${installPath}`);
   }
 
   return { claudeDetected: true, versions };

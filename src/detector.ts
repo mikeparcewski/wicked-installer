@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import type { DetectedCli, Product } from "./types.js";
 import { loadRegistry } from "./registry.js";
-import { claudePluginSpec, readRegistration, resolveClaudeConfigDirs } from "./claude-plugin.js";
+import { claudePluginSpec, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
 
 interface CliSpec {
   id: string;
@@ -280,7 +280,12 @@ export function discoverCliScripts(dir: string): CliScript[] {
  *    something that is not installed — and the safe answer to "is this retired thing present" is
  *    about the PACKAGE, not its leftover data. The archive is deliberately not consulted.
  */
-export function isProductInstalled(productId: string, seen: ReadonlySet<string> = new Set()): boolean {
+export function isProductInstalled(
+  productId: string,
+  seen: ReadonlySet<string> = new Set(),
+  // `--claude-home` dirs: the same target set `status` renders, so the two never disagree.
+  claudeHomes: string[] = [],
+): boolean {
   // The `manual` arm recurses through `requires`, and requires comes from registry.json — data
   // that ships in the package and can be hand-edited or corrupted, exactly like the binary names
   // guarded above. A self-reference (`requires: ["itself"]`) or a cycle (A→B→A) would recurse
@@ -296,23 +301,22 @@ export function isProductInstalled(productId: string, seen: ReadonlySet<string> 
       return existsSync(join(home, ".claude", "skills", "wicked-testing-acceptance-testing")) ||
              existsSync(join(home, ".claude", "skills", "wicked-testing:acceptance-testing"));
     case "wicked-garden": {
-      // A plugin, not a CLI — the evidence is its REGISTRATION with Claude Code (installed_plugins.json
-      // + the cache payload) in any active config dir, or failing that the bare `plugins/wicked-garden`
-      // copy the pre-registration installer wrote. The bare copy always went to ~/.claude, so that dir
-      // is checked even when CLAUDE_CONFIG_DIR points elsewhere; `status` labels it "copy only".
+      // A plugin, not a CLI — "installed" means Claude Code can LOAD it: fully registered
+      // (marketplace entry + install record + cache payload, see registrationVerdict) in one of
+      // the active config dirs. A bare `plugins/wicked-garden` copy (what the pre-registration
+      // installer wrote) or a stale install record whose payload is gone is NOT installed —
+      // `status` explains which it is, and this answer agrees with that detail.
       const garden = loadRegistry().products.find((p) => p.id === productId);
       const spec = claudePluginSpec(garden ?? { id: productId, install: {} });
-      const dirs = new Set([...resolveClaudeConfigDirs().dirs, join(home, ".claude")]);
-      return [...dirs].some((dir) => {
-        const reg = readRegistration(dir, spec);
-        return reg.installed.length > 0 || reg.bareCopy !== undefined;
-      });
+      return resolveClaudeConfigDirs({ homeFlags: claudeHomes }).dirs.some(
+        (dir) => registrationVerdict(readRegistration(dir, spec)).state === "registered",
+      );
     }
     case "wicked-brain":
       // Retired. `~/.wicked-brain` is a frozen archive, NOT an install — see the header.
       return commandExists("wicked-brain");
     default:
-      return installedPerRegistry(productId, chain);
+      return installedPerRegistry(productId, chain, claudeHomes);
   }
 }
 
@@ -335,7 +339,7 @@ function commandExistsSafe(name: string): boolean {
 }
 
 /** Detection derived from the product's own `install` spec, so a new product needs no new branch. */
-function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boolean {
+function installedPerRegistry(productId: string, seen: ReadonlySet<string>, claudeHomes: string[]): boolean {
   const product: Product | undefined = loadRegistry().products.find((p) => p.id === productId);
   if (product === undefined) return false;
   const install = product.install;
@@ -370,7 +374,7 @@ function installedPerRegistry(productId: string, seen: ReadonlySet<string>): boo
       // Bad data yields a safe `false`; it never yields an exception.
       const requires = product.requires;
       if (!Array.isArray(requires) || requires.length === 0) return false;
-      return requires.every((r) => typeof r === "string" && isProductInstalled(r, seen));
+      return requires.every((r) => typeof r === "string" && isProductInstalled(r, seen, claudeHomes));
     }
     default:
       return false;

@@ -28,14 +28,21 @@ All notable changes to wicked-installer are documented here. The format follows
 ### Added
 
 - `status` prints, per active Claude config dir, wicked-garden's registration state — marketplace
-  present (and its source), installed version/scope, cached versions — and marks a bare
-  `plugins/wicked-garden` copy as **copy only (unregistered)**. Read from disk only; the `claude`
-  CLI is never invoked by `status`.
+  present (and its source), installed version/scope, cached versions — with a verdict:
+  **registered** (marketplace entry + install record + cache payload all present), **broken
+  registration** (a record whose marketplace or payload is gone, with the reason), or **copy only
+  (unregistered)** for a bare `plugins/wicked-garden` copy. Read from disk only; `status` runs no
+  `claude plugin` command (its CLI detection still runs `claude --version`, which writes nothing).
 - `--claude-home <dir>` (repeatable) and `--source-root <dir>` on the direct `install` and
   `status` paths (`--source-root <dir>` registers the local checkout `<dir>/wicked-garden` as the
   marketplace instead of GitHub). Both are also passed through to the per-CLI install scripts on
   the interactive path (`--claude-home` to the Claude script only).
 - Registry: optional `install.marketplace` / `install.pluginId` fields for `claude-plugin`
   products (defaults `mikeparcewski/<id>` / `<id>@<id>`).
-- `wicked-garden` detection (`status` product list) now counts a registration in any active config
-  dir, not only a bare copy under `~/.claude`.
+- `wicked-garden` detection (`status` product list) now means *registered with Claude Code* in one of
+  the active config dirs (honouring `--claude-home`) — a bare copy under `~/.claude` or a stale
+  install record no longer counts, so the product list agrees with the registration detail.
+- `--source-root` without Claude Code fails instead of silently installing the published package
+  through the `npx` fallback, and a root without `.claude-plugin/marketplace.json` fails fast even
+  under `--dry-run`. On Windows, a `.cmd`-shim `claude` is refused `%`/`!`-bearing arguments (cmd.exe
+  would expand them; INTERFACE.md §1.1) rather than passing a rewritten path to Claude Code.
