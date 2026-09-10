@@ -175,7 +175,7 @@ test("install-claude.js fails closed on an unparseable marker: exit 1 before any
     for (const extra of [[], ["--dry-run"]]) {
       const r = runScript(sb, ["wicked-vault", "--claude-home", sb.cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json", ...extra]);
       assert.equal(r.status, 1, `${extra.join(" ")}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stderr, new RegExp(`${escapeRe(markerPath(sb.cfg))}: install marker exists but is not valid JSON \\(.+\\) — refusing to install`));
+      assert.match(r.stderr, new RegExp(`${escapeRe(markerPath(sb.cfg))}: install marker is unusable \\(.+\\) — refusing to install`));
       assert.match(r.stderr, /Nothing was written/);
       assert.equal(r.stdout.trim(), "", "no report: the run stopped before doing anything");
       assert.deepEqual(snapshot(sb.cfg), before, `${extra.join(" ")}: marker bytes identical, no other writes in the config dir`);
@@ -190,7 +190,7 @@ test("install-claude.js fails closed on an unparseable marker: exit 1 before any
     for (const args of [["status"], ["status", "--all"]]) {
       const r = runScript(sb, [...args, "--claude-home", sb.cfg, "--json"]);
       assert.equal(r.status, 1, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stderr, new RegExp(`${escapeRe(markerPath(sb.cfg))}: install marker exists but is not valid JSON \\(.+\\) — status cannot describe this config dir`));
+      assert.match(r.stderr, new RegExp(`${escapeRe(markerPath(sb.cfg))}: install marker is unusable \\(.+\\) — status cannot describe this config dir`));
       const report = JSON.parse(r.stdout);
       assert.equal(report.verb, "status");
       assert.deepEqual(report.reports, [], `${args.join(" ")}: no product-derived lines from an unparseable marker`);
@@ -203,20 +203,62 @@ test("install-claude.js fails closed on an unparseable marker: exit 1 before any
     // followed and never replaced: existsSync would call a dangling link "absent" and let install
     // initialise a marker over it. lstat-based detection refuses both as corrupt.
     if (POSIX) {
-      for (const [name, target] of [["dangling", join(sb.tmp, "nowhere.json")], ["valid-target", join(sb.tmp, "valid-marker.json")]]) {
+      for (const name of ["dangling", "valid-target"]) {
         const cfg = join(sb.tmp, `cfg-link-${name}`);
+        const external = join(sb.tmp, `external-${name}`);
+        mkdirSync(external);
+        const target = join(external, name === "dangling" ? "nowhere.json" : "valid-marker.json");
         mkdirSync(join(cfg, "wicked-installer"), { recursive: true });
         writeFileSync(join(cfg, "settings.json"), "{}");
         if (name === "valid-target") writeFileSync(target, JSON.stringify({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "x", products: {} }));
         symlinkSync(target, markerPath(cfg));
-        const snap = snapshot(cfg);
+        const snapCfg = snapshot(cfg);
+        const snapExternal = snapshot(external); // the link TARGET's directory, byte-identity helper (sha256/size/mode/type)
         const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
         assert.equal(r.status, 1, `${name}: ${r.stdout}${r.stderr}`);
-        assert.match(r.stderr, /install marker exists but is not valid JSON \(is a symlink — refusing to follow it\)/);
+        assert.match(r.stderr, /install marker is unusable \(.*claude-install\.json: is a symlink — refusing to follow it\)/);
         assert.equal(r.stdout.trim(), "");
-        assert.deepEqual(snapshot(cfg), snap, `${name}: the link (and its target) are untouched`);
+        assert.deepEqual(snapshot(cfg), snapCfg, `${name}: the config dir (link included) is untouched`);
+        assert.deepEqual(snapshot(external), snapExternal, `${name}: the external target dir is untouched — nothing followed the link`);
         assert.ok(lstatSync(markerPath(cfg)).isSymbolicLink(), `${name}: still a symlink, not replaced by a file`);
-        if (name === "valid-target") assert.equal(readFileSync(target, "utf8"), JSON.stringify({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "x", products: {} }));
+      }
+
+      // A symlinked PARENT (`wicked-installer/` → a dir outside cfg) with a regular or absent marker
+      // behind it: the chain check refuses the parent, so the marker is never created or renamed
+      // THROUGH the link — the external dir stays byte-identical.
+      for (const variant of ["absent-marker", "regular-marker"]) {
+        const cfg = join(sb.tmp, `cfg-parent-${variant}`);
+        const external = join(sb.tmp, `external-parent-${variant}`);
+        mkdirSync(cfg);
+        mkdirSync(external);
+        writeFileSync(join(cfg, "settings.json"), "{}");
+        if (variant === "regular-marker") writeFileSync(join(external, "claude-install.json"), JSON.stringify({ markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "x", products: {} }));
+        symlinkSync(external, join(cfg, "wicked-installer"));
+        const snapCfg = snapshot(cfg);
+        const snapExternal = snapshot(external);
+        const r = runScript(sb, ["wicked-vault", "--claude-home", cfg, "--source-root", sb.srcRoot, "--skip-binaries", "--json"]);
+        assert.equal(r.status, 1, `${variant}: ${r.stdout}${r.stderr}`);
+        assert.match(r.stderr, /install marker is unusable \(.*[\\/]wicked-installer: is a symlink — refusing to follow it\)/);
+        assert.equal(r.stdout.trim(), "");
+        assert.deepEqual(snapshot(cfg), snapCfg, `${variant}: config dir untouched`);
+        assert.deepEqual(snapshot(external), snapExternal, `${variant}: nothing was written at the link target`);
+        assert.ok(!existsSync(join(external, "claude-install.json.wicked-tmp")) && readdirSync(external).every((n) => !n.includes("wicked-tmp")), `${variant}: no temp file leaked through the link`);
+      }
+
+      // Discovery without --claude-home: a DANGLING marker link in a dir with no other identity
+      // must still count as "Claude present" (no exit 2), so plain `status` and `--all` reach the
+      // unusable-marker diagnostic: stderr, pure-JSON stdout, exit 1.
+      const bare = join(sb.tmp, "cfg-dangling-only");
+      mkdirSync(join(bare, "wicked-installer"), { recursive: true });
+      symlinkSync(join(sb.tmp, "nowhere-else.json"), markerPath(bare));
+      for (const args of [["status"], ["status", "--all"]]) {
+        const r = runScript(sb, [...args, "--json"], { env: { CLAUDE_CONFIG_DIR: bare } });
+        assert.equal(r.status, 1, `${args.join(" ")} via CLAUDE_CONFIG_DIR: ${r.stdout}${r.stderr}`);
+        assert.match(r.stderr, /install marker is unusable \(.*is a symlink — refusing to follow it\) — status cannot describe this config dir/);
+        const report = JSON.parse(r.stdout);
+        assert.equal(report.verb, "status");
+        assert.deepEqual(report.reports, []);
+        assert.ok(lstatSync(markerPath(bare)).isSymbolicLink(), "the dangling link is untouched");
       }
     }
   } finally {

@@ -49,6 +49,12 @@ All notable changes to wicked-installer are documented here. The format follows
   named and its bytes left untouched (it used to be silently replaced by an empty v2 marker);
   `status` reports such a marker on stderr and exits 1 regardless of which products are selected
   (a plain `status` or `--all` used to exit 0 because the unparseable marker contributed no ids).
+  One generic mechanism now guards every path `install-claude.js` touches below a config dir
+  (`lstatChainNoFollow`: marker discovery/read/write, `skills/`, `agents/`, `commands/`, the hooks
+  payload, `settings.json`, the MCP state file, backups): every component from the config dir down
+  is lstat'd, a symlink anywhere — a symlinked `wicked-installer/` parent included — is refused
+  with a typed error, and only a genuinely absent component reads as absent; a dangling marker
+  link no longer makes discovery report "Claude not present".
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is
