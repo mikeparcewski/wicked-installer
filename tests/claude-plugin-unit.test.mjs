@@ -456,6 +456,13 @@ test("readRegistration: symlinked registration files and escapes are refused and
     record(dt.installPath + "/");
     v = registrationVerdict(readRegistration(dotted, spec));
     assert.equal(v.state, "registered", "a trailing separator is the only forgiven difference: " + JSON.stringify(v));
+    if (process.platform !== "win32") {
+      // `\\` is a filename character on POSIX — `<expected>\\` is a different path, never forgiven as a separator.
+      record(dt.installPath + "\\");
+      v = registrationVerdict(readRegistration(dotted, spec));
+      assert.equal(v.state, "partial", JSON.stringify(v));
+      assert.match(v.problems[0], /record path .* is not the expected cache path/);
+    }
 
     // Ancestors too: a symlinked `plugins/` or `<marketplace>/` component — even one resolving
     // elsewhere INSIDE the config dir — makes the state unreadable.

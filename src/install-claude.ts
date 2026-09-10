@@ -1798,8 +1798,10 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => !!va
  */
 function markerV2Problem(value: unknown): string | undefined {
   if (!isPlainObject(value) || value.markerVersion !== 2) return "not a markerVersion 2 object";
-  if (value.cli !== undefined && value.cli !== "claude") return "cli: not \"claude\"";
-  if (value.configDir !== undefined && typeof value.configDir !== "string") return "configDir: not a string";
+  if (value.cli !== "claude") return "cli: missing or not \"claude\"";
+  if (typeof value.configDir !== "string") return "configDir: missing or not a string";
+  if (typeof value.updatedAt !== "string") return "updatedAt: missing or not a string";
+  if (value.installerVersion !== undefined && typeof value.installerVersion !== "string") return "installerVersion: not a string";
   if (!isPlainObject(value.products)) return "products: not an object map";
   const str = (v: unknown): v is string => typeof v === "string";
   for (const [id, rec] of Object.entries(value.products)) {
@@ -1809,7 +1811,7 @@ function markerV2Problem(value: unknown): string | undefined {
     if (!str(rec.installedAt)) return `${at}.installedAt: missing or not a string`;
     if (rec.source !== undefined && rec.source !== "local" && rec.source !== "npm-pack" && rec.source !== "git") return `${at}.source: unknown value`;
     if (rec.lastResult !== "installed" && rec.lastResult !== "partial" && rec.lastResult !== "failed") return `${at}.lastResult: unknown value`;
-    if (rec.assets !== undefined && !(isPlainObject(rec.assets) && Object.values(rec.assets).every((n) => typeof n === "number"))) return `${at}.assets: not a map of numbers`;
+    if (rec.assets !== undefined && !(isPlainObject(rec.assets) && Object.values(rec.assets).every((n) => Number.isInteger(n) && (n as number) >= 0))) return `${at}.assets: not a map of non-negative integer counts`;
     if (!Array.isArray(rec.notes) || !rec.notes.every(str)) return `${at}.notes: missing or not an array of strings`;
     if (!Array.isArray(rec.files)) return `${at}.files: missing or not an array`;
     for (let i = 0; i < rec.files.length; i += 1) {
@@ -1902,7 +1904,11 @@ function loadOrInitMarker(dir: string): MarkerV2 {
     products[p.id] = {
       installedAt: raw.legacy?.installedAt ?? new Date().toISOString(),
       lastResult: p.success === false ? "failed" : "installed",
-      assets: p.assets && typeof p.assets === "object" && !Array.isArray(p.assets) ? (p.assets as Record<string, number>) : undefined,
+      // Only non-negative integer counts are carried forward: the upgraded record must itself pass
+      // markerV2Problem on the next run, so a v1 `assets: { skills: "x" }` is dropped, not copied.
+      assets: isPlainObject(p.assets)
+        ? Object.fromEntries(Object.entries(p.assets).filter((kv): kv is [string, number] => Number.isInteger(kv[1]) && (kv[1] as number) >= 0))
+        : undefined,
       files: [],
       notes: [...legacyNotes, "carried forward from a v1 marker: no file manifest (exact uninstall unavailable — re-run install to upgrade bookkeeping)"],
     };

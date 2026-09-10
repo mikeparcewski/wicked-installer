@@ -480,7 +480,9 @@ function checkPayload(root: string, configDir: string, spec: ClaudePluginSpec, i
   // `<expected>/./` is not the expected path even where it resolves to it — and the walk that
   // follows is therefore always over the expected, component-checked path, never over
   // components supplied by the record.
-  const recorded = installPath.replace(/[\\/]+$/, "");
+  // Only the platform's own separators are forgiven at the end: on POSIX a trailing `\\` is a
+  // filename character, so `<expected>\\` is NOT the expected path.
+  const recorded = installPath.replace(process.platform === "win32" ? /[\\/]+$/ : /\/+$/, "");
   if (recorded !== expected) {
     return { ok: false, problem: `record path ${installPath} is not the expected cache path ${expected}` };
   }

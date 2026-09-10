@@ -81,6 +81,11 @@ All notable changes to wicked-installer are documented here. The format follows
   one behind a symlink is never read and the skill / hook set is skipped with a named action; a
   refused backup fails the config write it protects for every product touching that file (nothing
   is remembered as backed up until the exclusive copy succeeded).
+- The interactive picker detects CLIs without starting any process (PATH lookup + home markers; no
+  `command -v`/`where`, no `<bin> --version`), so a dry run never runs the user's other CLIs just to
+  list them. A v2 marker must carry all five top-level fields and non-negative integer asset counts
+  (a v1 upgrade drops anything else); a trailing `\` in a recorded plugin path is not forgiven on
+  POSIX.
 - Printed `claude …` commands (dry-run plan, logs, errors) are shell-quoted per platform — POSIX
   `CLAUDE_CONFIG_DIR='…' claude …`, cmd.exe `set "CLAUDE_CONFIG_DIR=…" && claude …` — so a config
   dir with spaces, `$` or `&` reads back correctly; every path component below the config dir is

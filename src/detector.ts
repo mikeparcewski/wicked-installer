@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import type { DetectedCli, Product } from "./types.js";
 import { loadRegistry } from "./registry.js";
-import { claudePluginSpec, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
+import { claudePluginSpec, findOnPath, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
 
 interface CliSpec {
   id: string;
@@ -198,18 +198,16 @@ export interface CliPresence {
   version?: string;
 }
 
-/** Run the §11.2 two-signal detection for a single CLI slug. */
+/**
+ * Run the §11.2 two-signal detection for a single CLI slug — WITHOUT spawning anything: the
+ * binary is resolved against PATH with filesystem probes only (the same `findOnPath` the Claude
+ * probe uses), the home signal is a marker lookup. No `command -v`/`where`, no `<bin> --version`:
+ * the picker runs this before any selection, also under --dry-run, and a dry run must not start
+ * the user's other CLIs just to list them.
+ */
 export function detectCli(cli: string): CliPresence {
   const spec = DETECT_SPECS[cli] ?? fallbackSpec(cli);
-  let binOnPath = false;
-  let version: string | undefined;
-  for (const bin of spec.bins) {
-    if (commandExists(bin)) {
-      binOnPath = true;
-      version = commandVersion(bin);
-      break;
-    }
-  }
+  const binOnPath = spec.bins.some((bin) => findOnPath(bin) !== undefined);
   const home = homeDetected(spec);
   return {
     cli: spec.cli,
@@ -217,7 +215,6 @@ export function detectCli(cli: string): CliPresence {
     binOnPath,
     homeDetected: home,
     detected: binOnPath || home,
-    version,
   };
 }
 

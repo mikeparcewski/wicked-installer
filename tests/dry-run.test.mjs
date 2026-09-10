@@ -19,7 +19,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, re
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -465,6 +465,29 @@ test("--dry-run routes manual and binary products through the planner: a `dry-ru
     assert.match(r.stdout, /dry-run: manual step, nothing to run: grab the fake binary/);
     assert.deepEqual(guardEntries(r.guardLog), [], "no spawns");
     assert.deepEqual(snapshot(sb.home), before, "no writes");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("picker CLI detection is spawn-free: a `codex` on PATH is detected by filesystem lookup alone — no `command -v`, no `codex --version`", { skip: WIN ? "POSIX fake" : false }, () => {
+  const sb = sandbox({ withClaude: false });
+  try {
+    writeFileSync(join(sb.bin, "codex"), "#!/bin/sh\necho SHOULD-NOT-RUN >&2\nexit 0\n", { mode: 0o755 });
+    const guardLog = join(sb.tmp, "detect-guard.log");
+    const script = `import { detectCli } from ${JSON.stringify(pathToFileURL(join(ROOT, "dist", "detector.js")).href)}; console.log(JSON.stringify([detectCli("codex"), detectCli("claude"), detectCli("opencode")]));`;
+    const r = spawnSync(process.execPath, ["--require", GUARD, "--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: sb.home, USERPROFILE: sb.home, PATH: `${sb.bin}:${dirname(process.execPath)}`, SPAWN_GUARD_LOG: guardLog, NODE_OPTIONS: "", CLAUDE_CONFIG_DIR: sb.cfg },
+    });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stderr, /SHOULD-NOT-RUN/, "the fake codex was never executed");
+    const [codex, claude, opencode] = JSON.parse(r.stdout.trim().split("\n").pop());
+    assert.equal(codex.binOnPath, true);
+    assert.equal(codex.detected, true);
+    assert.equal(claude.binOnPath, false, "no claude on this PATH");
+    assert.equal(opencode.binOnPath, false);
+    assert.deepEqual(guardEntries(guardLog), [], "detection started no process at all");
   } finally {
     cleanup(sb);
   }

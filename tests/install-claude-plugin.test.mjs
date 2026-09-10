@@ -724,19 +724,25 @@ test("install-claude.js validates every v2 product and file record at parse time
   const sb = sandbox();
   try {
     const good = { installedAt: "2026-01-01T00:00:00.000Z", lastResult: "installed", files: [], notes: [] };
+    const top = { markerVersion: 2, cli: "claude", configDir: "cfg", updatedAt: "2026-01-01T00:00:00.000Z" };
     const shapes = {
-      "no-products": { markerVersion: 2 },
-      "products-array": { markerVersion: 2, products: [] },
-      "record-empty": { markerVersion: 2, products: { x: {} } },
-      "record-files-string": { markerVersion: 2, products: { x: { ...good, files: "nope" } } },
-      "record-notes-string": { markerVersion: 2, products: { x: { ...good, notes: "nope" } } },
-      "record-lastResult": { markerVersion: 2, products: { x: { ...good, lastResult: "weird" } } },
-      "record-version-number": { markerVersion: 2, products: { x: { ...good, version: 1 } } },
-      "file-dir-no-path": { markerVersion: 2, products: { x: { ...good, files: [{ kind: "dir" }] } } },
-      "file-string": { markerVersion: 2, products: { x: { ...good, files: ["skills/x"] } } },
-      "file-json-key-no-hash": { markerVersion: 2, products: { x: { ...good, files: [{ kind: "json-key", file: "f", pointer: "/a" }] } } },
-      "file-hooks-no-owner": { markerVersion: 2, products: { x: { ...good, files: [{ kind: "hooks-entry", file: "f", event: "E", ownerMatch: {} }] } } },
-      "file-unknown-kind": { markerVersion: 2, products: { x: { ...good, files: [{ kind: "bogus", path: "x" }] } } },
+      "no-products": { ...top },
+      "products-array": { ...top, products: [] },
+      "no-cli": { markerVersion: 2, configDir: "cfg", updatedAt: "t", products: {} },
+      "no-configDir": { markerVersion: 2, cli: "claude", updatedAt: "t", products: {} },
+      "no-updatedAt": { markerVersion: 2, cli: "claude", configDir: "cfg", products: {} },
+      "assets-negative": { ...top, products: { x: { ...good, assets: { skills: -1 } } } },
+      "assets-fraction": { ...top, products: { x: { ...good, assets: { skills: 1.5 } } } },
+      "record-empty": { ...top, products: { x: {} } },
+      "record-files-string": { ...top, products: { x: { ...good, files: "nope" } } },
+      "record-notes-string": { ...top, products: { x: { ...good, notes: "nope" } } },
+      "record-lastResult": { ...top, products: { x: { ...good, lastResult: "weird" } } },
+      "record-version-number": { ...top, products: { x: { ...good, version: 1 } } },
+      "file-dir-no-path": { ...top, products: { x: { ...good, files: [{ kind: "dir" }] } } },
+      "file-string": { ...top, products: { x: { ...good, files: ["skills/x"] } } },
+      "file-json-key-no-hash": { ...top, products: { x: { ...good, files: [{ kind: "json-key", file: "f", pointer: "/a" }] } } },
+      "file-hooks-no-owner": { ...top, products: { x: { ...good, files: [{ kind: "hooks-entry", file: "f", event: "E", ownerMatch: {} }] } } },
+      "file-unknown-kind": { ...top, products: { x: { ...good, files: [{ kind: "bogus", path: "x" }] } } },
     };
     for (const [name, shape] of Object.entries(shapes)) {
       const cfg = join(sb.tmp, `cfg-v2-${name}`);

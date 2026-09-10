@@ -20,7 +20,7 @@ function record(entry) {
   if (log) fs.appendFileSync(log, JSON.stringify(entry) + "\n");
 }
 
-const basename = (p) => String(p).split(/[\\/]/).pop().toLowerCase();
+const basename = (p) => String(p).replace(/^"(.*)"$/, "$1").split(/[\\/]/).pop().toLowerCase(); // a quoted "C:\…\claude.cmd" is still claude.cmd
 const CLAUDE_BINARIES = new Set(["claude", "claude.cmd", "claude.exe", "claude.bat"]);
 
 // Exactly `claude --version`, in its two launch shapes — the executable's basename is matched
