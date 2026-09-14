@@ -5,7 +5,10 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
-<!-- fixall L10 -->
+## [0.4.2] - 2026-09-14
+
+### Added
+
 - `wicked-core` in the registry (wicked-core #405, F-009 / F-SMOKE-006 — FIX-IT-ALL L10-9): the
   execution engine + the per-tool-call governance hook binary, as a `manual` entry that `requires`
   `wicked-crew` — installed exactly when crew is, like `wicked-studio`, because core-ts >= 0.7.26 ships
