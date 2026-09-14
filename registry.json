@@ -169,7 +169,7 @@
       "recommended": [],
       "install": {
         "type": "manual",
-        "instructions": "Nothing to install: wicked-core ships inside the wicked-core-ts platform package that wicked-crew pins — `npm i -g wicked-crew` brings the engine and the hook binary for this host. `wicked-crew --version` prints the engine version; GET /api/v1/diagnostics.engineBinaries names the hook binary the daemon found."
+        "instructions": "Nothing to install: wicked-core ships inside the wicked-core-ts platform package that wicked-crew pins — `npm i -g wicked-crew` brings the engine and the hook binary for this host. `wicked-crew --version` prints the wicked-core-ts BINDING version the daemon runs (three lines: wicked-crew, wicked-core-ts, wicked-studio); the hook binary's own engine semver is the `wickedCoreVersion` stamp in that platform package, and `GET /api/v1/diagnostics` → `components.engineBinaries` names the hook binary the daemon found."
       }
     }
   ],

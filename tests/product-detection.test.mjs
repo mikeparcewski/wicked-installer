@@ -105,6 +105,12 @@ test("a manual product is installed exactly when its requirements are", () => {
     isProductInstalled("wicked-crew"),
     "a bundled product's presence must track the thing it is bundled into",
   );
+  // wicked-core rides wicked-crew the same way (wicked-core #405): installed iff crew is.
+  assert.equal(
+    isProductInstalled("wicked-core"),
+    isProductInstalled("wicked-crew"),
+    "wicked-core (manual, requires wicked-crew) must read installed exactly when wicked-crew does",
+  );
 });
 
 test("registry-sourced names are validated before they reach a shell", () => {
