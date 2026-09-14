@@ -66,3 +66,15 @@ test("bus description carries no stale delivery-model claim", () => {
   // "no network transport" is still true (single-host Unix-socket push) — keep it.
   assert.match(bus.description, /no network transport/);
 });
+
+test("wicked-core is a manual entry that rides wicked-crew — never installed on its own, in no bundle (wicked-core #405)", () => {
+  const core = registry.products.find((p) => p.id === "wicked-core");
+  assert.ok(core, "wicked-core must be in the registry — the hook binary ships inside crew's core-ts platform package");
+  assert.equal(core.install.type, "manual", "nothing installs wicked-core directly: it arrives inside wicked-core-ts");
+  assert.deepEqual(core.requires, ["wicked-crew"], "installed exactly when wicked-crew is (the detector's manual arm)");
+  assert.equal(core.standalone, false);
+  assert.equal(core.status, "active");
+  for (const b of registry.bundles) {
+    assert.ok(!b.products.includes("wicked-core"), `bundle ${b.id} must not list wicked-core — crew brings it`);
+  }
+});

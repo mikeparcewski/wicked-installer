@@ -195,6 +195,7 @@ Required dependencies resolve automatically: wicked-garden requires **wicked-vau
 | [wicked-garden](https://github.com/mikeparcewski/wicked-garden) | active | Curated toolkit for what coding agents can't do alone. Claude Code plugin. Includes the 40-specialist QE domain (acceptance testing, evidence-gated, no self-grading). |
 | [wicked-interactive](https://github.com/mikeparcewski/wicked-interactive) | stable | Foundation-plane document & render engine (HTML/PDF/PPTX + version lineage) that wicked-crew spawns and proxies — surfaced through studio, not visited directly. |
 | [wicked-studio](https://github.com/mikeparcewski/wicked-studio) | active | Browser console for wicked-crew — launch/steer governed runs, answer HITL gates, live event streams. Ships bundled inside wicked-crew. |
+| [wicked-core](https://github.com/mikeparcewski/wicked-core) | active | The execution engine + governance hook binary behind wicked-crew. Ships inside the `wicked-core-ts` platform package wicked-crew pins (core-ts >= 0.7.26); nothing to install separately. |
 | [wicked-crew](https://www.npmjs.com/package/wicked-crew) | active | Governed multi-agent execution — drives coding-agent CLIs through durable workflows with deny-dominates dual gates and evidence-re-derived "done". Includes the Studio console. |
 
 > **Dependency, not a product:** `wicked-vault` (npm) is in the registry only so dependency resolution can install it — it is wicked-garden's required evidence backend, not a standalone pick.

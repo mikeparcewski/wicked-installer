@@ -154,6 +154,23 @@
         "type": "npm-global",
         "package": "wicked-crew"
       }
+    },
+    {
+      "id": "wicked-core",
+      "displayName": "Wicked Core",
+      "description": "The execution engine behind wicked-crew and the per-tool-call governance hook binary (`wicked-core gate-hook`). Rust; ships to npm as the `wicked-core-ts` addon plus five `wicked-core-ts-<platform>` packages, each carrying the stripped `wicked-core` binary stamped `wickedCoreVersion` (core-ts >= 0.7.26). Not on crates.io.",
+      "type": "npm-lib",
+      "standalone": false,
+      "opinionated": false,
+      "status": "active",
+      "requires": [
+        "wicked-crew"
+      ],
+      "recommended": [],
+      "install": {
+        "type": "manual",
+        "instructions": "Nothing to install: wicked-core ships inside the wicked-core-ts platform package that wicked-crew pins — `npm i -g wicked-crew` brings the engine and the hook binary for this host. `wicked-crew --version` prints the engine version; GET /api/v1/diagnostics.engineBinaries names the hook binary the daemon found."
+      }
     }
   ],
   "bundles": [
