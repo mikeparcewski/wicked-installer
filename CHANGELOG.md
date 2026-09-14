@@ -5,6 +5,14 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+<!-- fixall L10 -->
+- `wicked-core` in the registry (wicked-core #405, F-009 / F-SMOKE-006 — FIX-IT-ALL L10-9): the
+  execution engine + the per-tool-call governance hook binary, as a `manual` entry that `requires`
+  `wicked-crew` — installed exactly when crew is, like `wicked-studio`, because core-ts >= 0.7.26 ships
+  the stripped `wicked-core` binary inside each `wicked-core-ts-<platform>` package crew pins (stamped
+  `wickedCoreVersion`). `wicked-installer status` now lists it; `install wicked-core` says what to do
+  (install crew). Not standalone, in no bundle, not on crates.io.
+
 ## [0.4.1] - 2026-09-10
 
 ### Fixed
