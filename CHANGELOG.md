@@ -5,7 +5,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
-<!-- fixall L10 -->
+## [0.4.3] - 2026-09-14
+
 ### Changed
 
 - **The default install grounds the daemon: `wicked-crew` now `requires` `wicked-garden` (BC-74,

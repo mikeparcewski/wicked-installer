@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -24,3 +24,22 @@ jobs:
       - run: npm ci
 
       - run: npm publish --provenance --access public
+
+      # GH release ≠ package publish (release-gh-release-vs-package-publish memory): node-release does
+      # this for crew/garden, but installer's bespoke workflow published the tarball and cut NO GitHub
+      # Release (0.4.2's was created by hand). Cut it from the CHANGELOG section, AFTER publish so a
+      # release-cut glitch never blocks the package; idempotent (edit if it already exists).
+      - name: GitHub Release from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          notes="$(awk -v v="$ver" 'index($0,"## ["v"] ")==1{f=1;next} f&&/^## \[/{exit} f' CHANGELOG.md)"
+          [ -n "$notes" ] || notes="wicked-installer $ver"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            printf '%s\n' "$notes" | gh release edit "$GITHUB_REF_NAME" --notes-file -
+          else
+            printf '%s\n' "$notes" | gh release create "$GITHUB_REF_NAME" --title "wicked-installer $ver" --verify-tag --notes-file -
+          fi
