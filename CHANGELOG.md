@@ -5,6 +5,19 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+<!-- fixall L10 -->
+### Changed
+
+- **The default install grounds the daemon: `wicked-crew` now `requires` `wicked-garden` (BC-74,
+  F-W1-102 from the wave-1 gate P1 run).** A crew-only install booted a daemon that refuses every
+  launch under the default `require` base-skill policy until garden's skills are present (crew #605
+  surfaces that as a health warning naming the installer command; the better outcome is never landing
+  there). The dependency is a property of crew, so it lives on `crew.requires` — every path that
+  installs crew (the `quick-start` and `creative` bundles, `full`, and a bare `install wicked-crew`)
+  now pulls garden; `quick-start.products` is unchanged (garden arrives through `requires`, expressed
+  once). Garden moves from crew's `recommended` to `requires`. The `quick-start` description names the
+  next step, `wicked-crew serve`.
+
 ## [0.4.2] - 2026-09-14
 
 ### Added

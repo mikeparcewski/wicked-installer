@@ -148,8 +148,8 @@
       "standalone": true,
       "opinionated": false,
       "status": "active",
-      "requires": [],
-      "recommended": ["wicked-estate", "wicked-bus", "wicked-garden"],
+      "requires": ["wicked-garden"],
+      "recommended": ["wicked-estate", "wicked-bus"],
       "install": {
         "type": "npm-global",
         "package": "wicked-crew"
@@ -177,7 +177,7 @@
     {
       "id": "quick-start",
       "displayName": "Quick Start",
-      "description": "Crew + Bus — the fastest way to run a governed multi-agent session. Install crew, start the daemon, open the Studio console, and launch a run in under five minutes.",
+      "description": "Crew + Bus — the fastest way to run a governed multi-agent session. Install crew, start the daemon, open the Studio console, and launch a run in under five minutes. After install, start the daemon with `wicked-crew serve` — it opens the Studio console.",
       "products": ["wicked-bus", "wicked-crew"]
     },
     {
