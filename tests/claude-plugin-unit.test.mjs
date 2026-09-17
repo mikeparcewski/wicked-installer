@@ -566,6 +566,23 @@ test("planForDir: commands follow the on-disk state exactly (add only when absen
     assert.match(plan.commands[0].because, /installed 1\.0\.0 \(user\)/);
     assert.match(plan.commands[1].because, /installed 1\.0\.0 \(project\)/);
 
+    // D1: a SINGLE healthy non-user-scope record → update --scope <scope>, never scopeless.
+    // A scopeless update resolves to user scope only and silently no-ops project/managed records (issue #21 item 1).
+    for (const scope of ["project", "managed"]) {
+      const sdir = join(d, `single-${scope}-update`);
+      const sc = configDir(sdir, { marketplace: true, payload: true });
+      const rec = { scope, installPath: sc.installPath, version: "1.0.0" };
+      if (scope === "project") rec.projectPath = "/p";
+      writeFileSync(join(sc.plugins, "installed_plugins.json"), JSON.stringify({
+        version: 2, plugins: { "wicked-garden@wicked-garden": [rec] },
+      }));
+      plan = planForDir(sdir, spec, "mikeparcewski/wicked-garden");
+      assert.deepEqual(plan.commands.map((c) => c.args), [
+        ["plugin", "update", "wicked-garden@wicked-garden", "--scope", scope],
+      ], `single ${scope}-scope: must use --scope, not scopeless`);
+      assert.match(plan.commands[0].because, new RegExp(`installed 1\.0\.0 \\(${scope}\\)`));
+    }
+
     // D3: a malformed entry is labelled [malformed] in the probe, not "(no version)".
     const malformedRec = join(d, "malformed-rec");
     const mr = configDir(malformedRec, { marketplace: true });

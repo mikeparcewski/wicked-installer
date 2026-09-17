@@ -7,11 +7,12 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ### Fixed
 
-- **D1 — multi-scope `plugin update` now issues one `update --scope <scope>` per record.**
-  A single healthy record still uses the scopeless form (backward-compatible); two or more scopes
-  (user + project, or user + managed) each get their own targeted command, so project/managed
-  records are not silently skipped by a bare `update` that only touches user scope
-  (`src/claude-plugin.ts` `planForDir`).
+- **D1 — `plugin update` now passes `--scope <scope>` whenever the record is not user-scope.**
+  A single user-scope record continues to use the scopeless form (backward-compatible). A single
+  project- or managed-scope record, and all multi-scope cases, each get one targeted
+  `update --scope <scope>` command per record — a scopeless update resolves to the user record
+  only and silently no-ops any project/managed record (`src/claude-plugin.ts` `planForDir`,
+  issue #21 item 1).
 
 - **D2 — rollback always attempts `plugin uninstall` before `marketplace remove`.**
   Previously the catch block only ran `marketplace remove` (when `addedMarketplace` was true),

@@ -799,10 +799,11 @@ export function planForDir(dir: string, spec: ClaudePluginSpec, source: string):
   // project/managed record whose payload is missing, so anything less is an `install` (repair).
   const unhealthy = records.filter((e) => !e.version || !e.payload.ok);
   if (records.length > 0 && unhealthy.length === 0) {
-    // A single record needs no --scope (the real CLI's default is user, and a bare `update` is
-    // idempotent for any one scope). Multiple scopes need one update per scope: a scopeless update
-    // only touches the user record and silently no-ops the project/managed ones.
-    if (records.length === 1) {
+    // A scopeless `update` resolves to the user record only — a single project/managed record
+    // silently no-ops without --scope. Use the scopeless form only for the one case where it is
+    // correct: a single user-scope record. Every other case (single non-user, or multiple records)
+    // gets one targeted `update --scope <scope>` per record.
+    if (records.length === 1 && records[0].scope === "user") {
       commands.push(command(["plugin", "update", spec.pluginId], `installed ${records[0].version} (${records[0].scope})`));
     } else {
       for (const e of records) {
