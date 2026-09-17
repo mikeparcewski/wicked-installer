@@ -168,16 +168,20 @@ function fallbackSpec(cli: string): CliDetectSpec {
 }
 
 function resolveHomeRoots(spec: CliDetectSpec): string[] {
-  const roots = spec.homeRoots.map((r) => join(homedir(), r));
   const envVal = spec.homeEnv ? process.env[spec.homeEnv] : undefined;
-  if (envVal) {
-    // CLAUDE_CONFIG_DIR-style vars may list multiple paths (path.delimiter or ",").
+  if (envVal !== undefined) {
+    // CLAUDE_CONFIG_DIR-style vars are EXCLUSIVE when set: use ONLY the listed dirs,
+    // mirroring resolveClaudeConfigDirs' policy so ~/.claude is not checked when the user
+    // has steered Claude Code elsewhere. An empty/blank value (misconfigured) falls back to
+    // the defaults so detection still works — this function is read-only, not a config target.
+    const envRoots: string[] = [];
     for (const raw of envVal.split(delimiter).flatMap((s) => s.split(","))) {
       const trimmed = raw.trim();
-      if (trimmed) roots.push(expandTilde(trimmed));
+      if (trimmed) envRoots.push(expandTilde(trimmed));
     }
+    if (envRoots.length > 0) return envRoots;
   }
-  return roots;
+  return spec.homeRoots.map((r) => join(homedir(), r));
 }
 
 function homeDetected(spec: CliDetectSpec): boolean {

@@ -5,6 +5,52 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **D1 — multi-scope `plugin update` now issues one `update --scope <scope>` per record.**
+  A single healthy record still uses the scopeless form (backward-compatible); two or more scopes
+  (user + project, or user + managed) each get their own targeted command, so project/managed
+  records are not silently skipped by a bare `update` that only touches user scope
+  (`src/claude-plugin.ts` `planForDir`).
+
+- **D2 — rollback always attempts `plugin uninstall` before `marketplace remove`.**
+  Previously the catch block only ran `marketplace remove` (when `addedMarketplace` was true),
+  leaving a partial install record in `installed_plugins.json` when install/update succeeded
+  but the post-install verdict check failed.  The uninstall is best-effort (it exits non-zero
+  gracefully when no record exists, e.g. a failed install) and always precedes the marketplace
+  rollback (`src/claude-plugin.ts` `registerClaudePlugin`).
+
+- **D3 — malformed install records are labelled `[malformed]` in the `planForDir` probe.**
+  `describeRecord` previously used the same `(no version)` format for malformed entries as for
+  records missing a version, giving no indication that the entry was structurally invalid.
+  Malformed entries now render as `[malformed] (unknown); install record is malformed (not an
+  object)` in the probe line (`src/claude-plugin.ts` `planForDir`).
+
+- **D4 — `probe.bin` is shell-quoted in plan and log lines.**
+  A binary path containing spaces was interpolated raw, splitting the `probe: <bin> --version`
+  display line at the space.  Both `planClaudePlugin` and `registerClaudePlugin` now pass
+  `shellQuote(probe.bin, opts.platform)` (`src/claude-plugin.ts`).
+
+- **D5 — marketplace-present / no-install-record → `"partial"`, not `"absent"`.**
+  `registrationVerdict` returned `"absent"` when `installed` was empty, even when a
+  `known_marketplaces.json` entry existed.  The marketplace entry is evidence of a half-done
+  registration, so the state is now `"partial"` with problem `"install record missing from
+  installed_plugins.json"` (`src/claude-plugin.ts` `registrationVerdict`).
+
+- **D6 — `detectLegacyCopies` accepts an explicit `productId` parameter.**
+  The v1 and v2 install-marker lookups were keyed by `spec.pluginName` (the part of `pluginId`
+  before `@`), which diverges from `product.id` when `install.pluginId` is set explicitly
+  (e.g. `"custom@wicked-garden"` → `pluginName = "custom"` but marker key `"wicked-garden"`).
+  Callers may now pass `productId` as a third argument; it defaults to `spec.pluginName` so
+  existing call sites are unaffected (`src/claude-plugin.ts` `detectLegacyCopies`).
+
+- **D7 — `CLAUDE_CONFIG_DIR` is exclusive in home-root detection.**
+  `resolveHomeRoots` previously appended env-specified dirs to `["~/.claude"]`, so a
+  `CLAUDE_CONFIG_DIR` pointing elsewhere still triggered `homeDetected` when `~/.claude`
+  happened to carry markers from a prior install.  When the env var is set and resolves to at
+  least one path, only those paths are checked — mirroring `resolveClaudeConfigDirs`' exclusive
+  policy (`src/detector.ts` `resolveHomeRoots`).
+
 ## [0.4.3] - 2026-09-14
 
 ### Changed

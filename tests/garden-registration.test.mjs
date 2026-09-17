@@ -312,10 +312,14 @@ test("a failing install after THIS run's marketplace add rolls the add back (mar
     assert.match(r.stdout, /1 installation\(s\) failed/);
     assert.ok(!existsSync(cacheDir(cfg)), "nothing claims to be installed");
     // The marketplace this run added is removed again — no half-registration left behind.
+    // D2: a `plugin uninstall` is attempted before the marketplace rollback to clean up any
+    // partial install record (it exits non-zero here because the install never wrote a record,
+    // but the best-effort attempt is still made and recorded).
     assert.deepEqual(calls(sb).map(([, argv]) => argv), [
       "--version",
       "plugin marketplace add mikeparcewski/wicked-garden",
       "plugin install wicked-garden@wicked-garden",
+      "plugin uninstall wicked-garden@wicked-garden",
       "plugin marketplace remove wicked-garden",
     ]);
     assert.match(r.stdout, new RegExp(`rolled back this run's marketplace add: CLAUDE_CONFIG_DIR=${escapeRe(cfg)} claude plugin marketplace remove wicked-garden`));
@@ -336,7 +340,12 @@ test("a failing install does NOT remove a marketplace that was already registere
     rmSync(sb.stubLog);
     const r = run(sb, ["install", "wicked-garden"], { configDir: cfg, env: { CLAUDE_STUB_FAIL: "install" } });
     assert.equal(r.status, 1, r.stdout + r.stderr);
-    assert.deepEqual(calls(sb).map(([, argv]) => argv), ["--version", "plugin install wicked-garden@wicked-garden"], "no add this run ⇒ no remove");
+    // D2: uninstall is attempted even when the marketplace was pre-existing (best-effort cleanup).
+    assert.deepEqual(calls(sb).map(([, argv]) => argv), [
+      "--version",
+      "plugin install wicked-garden@wicked-garden",
+      "plugin uninstall wicked-garden@wicked-garden",
+    ], "no add this run ⇒ no remove; uninstall is still attempted");
     const known = JSON.parse(readFileSync(join(cfg, "plugins", "known_marketplaces.json"), "utf8"));
     assert.ok("wicked-garden" in known, "the pre-existing marketplace registration is kept");
   } finally {

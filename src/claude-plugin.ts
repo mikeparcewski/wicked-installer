@@ -36,6 +36,13 @@ export interface ClaudePluginSpec {
   marketplaceName: string;
   /** What `claude plugin marketplace add` receives by default: GitHub `owner/repo`. */
   source: string;
+  /**
+   * The originating `product.id` from the registry. Equals `pluginName` when `install.pluginId`
+   * is absent (the common case), but diverges when an explicit `pluginId` changes the name part
+   * (e.g. `pluginId = "custom@mkt"` → `pluginName = "custom"`, `productId = "wicked-garden"`).
+   * Legacy-marker lookups key on this, not `pluginName`.
+   */
+  productId: string;
 }
 
 export const DEFAULT_MARKETPLACE_OWNER = "mikeparcewski";
@@ -56,6 +63,7 @@ export function claudePluginSpec(product: { id: string; install: { marketplace?:
     pluginName,
     marketplaceName,
     source: product.install.marketplace ?? `${DEFAULT_MARKETPLACE_OWNER}/${product.id}`,
+    productId: product.id,
   };
 }
 
@@ -423,6 +431,7 @@ export function cacheRoot(configDir: string, spec: ClaudePluginSpec): string {
  * here (see LEGACY_CLEANUP_ISSUE). Read-only, never follows symlinks.
  */
 export function detectLegacyCopies(configDir: string, spec: ClaudePluginSpec): string[] {
+  const productId = spec.productId;
   const found: string[] = [];
   const reg = readRegistration(configDir, spec);
   if (reg.bareCopy) found.push(reg.bareCopy.path);
@@ -439,7 +448,7 @@ export function detectLegacyCopies(configDir: string, spec: ClaudePluginSpec): s
     const products = marker.value.products;
     if (isRecord(products)) {
       // v2: an object map keyed by product id, each entry with a `files` manifest.
-      const entry = products[spec.pluginName];
+      const entry = products[productId];
       if (isRecord(entry) && Array.isArray(entry.files) && entry.files.length > 0) {
         found.push(`${markerPath} (install-claude.js marker: ${entry.files.length} recorded path(s))`);
       } else if (isRecord(entry) && entry.notes && Array.isArray(entry.notes) && entry.notes.some((n) => typeof n === "string" && n.startsWith("carried forward from a v1 marker"))) {
@@ -447,7 +456,7 @@ export function detectLegacyCopies(configDir: string, spec: ClaudePluginSpec): s
       }
     } else if (Array.isArray(products)) {
       // v1: an array of { id, success, skipped, assets, notes } — no file manifest at all.
-      if (products.some((p) => isRecord(p) && p.id === spec.pluginName)) {
+      if (products.some((p) => isRecord(p) && p.id === productId)) {
         found.push(`${markerPath} (install-claude.js v1 marker entry)`);
       }
     }
@@ -638,7 +647,11 @@ export interface RegistrationVerdict {
  */
 export function registrationVerdict(reg: PluginRegistration): RegistrationVerdict {
   if (reg.errors.length > 0) return { state: "unreadable", problems: [...reg.errors] };
-  if (reg.installed.length === 0) return { state: reg.bareCopy ? "copy-only" : "absent", problems: [] };
+  if (reg.installed.length === 0) {
+    if (reg.bareCopy) return { state: "copy-only", problems: [] };
+    if (reg.marketplace) return { state: "partial", problems: ["install record missing from installed_plugins.json"] };
+    return { state: "absent", problems: [] };
+  }
   const problems: string[] = [];
   if (!reg.marketplace) problems.push("marketplace entry missing from known_marketplaces.json");
   // Every selected record must carry a real version, whatever the other entries say: one that
@@ -769,8 +782,10 @@ export function planForDir(dir: string, spec: ClaudePluginSpec, source: string):
     throw new Error(`${dir}: registration state unreadable — ${registration.errors.join("; ")}`);
   }
   const records = registration.installed;
-  const describeRecord = (e: InstalledEntry): string =>
-    `${e.version || "(no version)"} (${e.scope})${e.payload.ok ? "" : `; ${e.payload.problem}`}`;
+  const describeRecord = (e: InstalledEntry): string => {
+    if (e.malformed) return `[malformed] (${e.scope}); ${e.payload.problem ?? "install record is malformed"}`;
+    return `${e.version || "(no version)"} (${e.scope})${e.payload.ok ? "" : `; ${e.payload.problem}`}`;
+  };
   const probes = [
     `${join(dir, "plugins", "known_marketplaces.json")} → marketplace ${spec.marketplaceName}: ${registration.marketplace ? `registered (${registration.marketplace.source})` : "not registered"}`,
     `${join(dir, "plugins", "installed_plugins.json")} → ${spec.pluginId}: ${records.length > 0 ? records.map(describeRecord).join(", ") : "not installed"}`,
@@ -784,7 +799,16 @@ export function planForDir(dir: string, spec: ClaudePluginSpec, source: string):
   // project/managed record whose payload is missing, so anything less is an `install` (repair).
   const unhealthy = records.filter((e) => !e.version || !e.payload.ok);
   if (records.length > 0 && unhealthy.length === 0) {
-    commands.push(command(["plugin", "update", spec.pluginId], `installed ${records.map((e) => `${e.version} (${e.scope})`).join(", ")}`));
+    // A single record needs no --scope (the real CLI's default is user, and a bare `update` is
+    // idempotent for any one scope). Multiple scopes need one update per scope: a scopeless update
+    // only touches the user record and silently no-ops the project/managed ones.
+    if (records.length === 1) {
+      commands.push(command(["plugin", "update", spec.pluginId], `installed ${records[0].version} (${records[0].scope})`));
+    } else {
+      for (const e of records) {
+        commands.push(command(["plugin", "update", spec.pluginId, "--scope", e.scope], `installed ${e.version} (${e.scope})`));
+      }
+    }
   } else if (records.length > 0) {
     const why = unhealthy.map((e) => `${e.scope} scope: ${e.version || e.malformed ? e.payload.problem : "no version"}`).join("; ");
     commands.push(command(["plugin", "install", spec.pluginId], `install record present but ${why}`));
@@ -827,7 +851,7 @@ export function planClaudePlugin(spec: ClaudePluginSpec, opts: PlanOptions): Pla
   const probe = probeClaude(dirs[0], opts);
   if (!probe) return { claudeDetected: false, lines: [], plans: [], failures: [] };
   const lines: string[] = [
-    `probe: ${probe.bin} --version → ${probe.version}`,
+    `probe: ${shellQuote(probe.bin, opts.platform)} --version → ${probe.version}`,
     `Claude Code detected; would register ${spec.pluginId} in ${dirs.length} config dir(s) from ${describeOrigin(origin)}:`,
   ];
   const plans: DirPlan[] = [];
@@ -882,7 +906,7 @@ export function registerClaudePlugin(spec: ClaudePluginSpec, opts: RegisterOptio
 
   const probe = probeClaude(dirs[0], opts);
   if (!probe) return { claudeDetected: false };
-  opts.log(`  probe: ${probe.bin} --version → ${probe.version}`);
+  opts.log(`  probe: ${shellQuote(probe.bin, opts.platform)} --version → ${probe.version}`);
   opts.log(`  registering ${spec.pluginId} in ${dirs.length} config dir(s) from ${describeOrigin(origin)}`);
 
   const versions: Record<string, string> = {};
@@ -917,6 +941,18 @@ export function registerClaudePlugin(spec: ClaudePluginSpec, opts: RegisterOptio
       opts.log(`    registered ${spec.pluginId} ${version} → ${installPath}`);
     } catch (err) {
       let message = err instanceof Error ? err.message : String(err);
+      const cleanupRan: string[] = [];
+      // Best-effort: uninstall any partial install record this run left behind, regardless of
+      // whether we added the marketplace — a failed update or a failed post-install verdict check
+      // can leave a record whose payload is missing or mismatched.
+      const uninstallArgs = ["plugin", "uninstall", spec.pluginId];
+      const uninstallRender = renderClaudeCommand(dir, uninstallArgs);
+      opts.log(`    cleaning up partial install: ${uninstallRender}`);
+      const unRes = spawner(probe.bin, uninstallArgs, dir, "capture");
+      cleanupRan.push(uninstallRender);
+      if (unRes.status === 0) {
+        message += ` — uninstalled partial record: ${uninstallRender}`;
+      }
       if (addedMarketplace) {
         const rollback = ["plugin", "marketplace", "remove", spec.marketplaceName];
         const rendered = renderClaudeCommand(dir, rollback);
@@ -928,8 +964,9 @@ export function registerClaudePlugin(spec: ClaudePluginSpec, opts: RegisterOptio
           const detail = res.stderr.trim() || res.stdout.trim();
           message += ` — rollback FAILED (exit ${res.status ?? "?"}${detail ? `: ${detail}` : ""}): ${rendered}`;
         }
-        ran[dir] = [...executed, rendered];
+        cleanupRan.push(rendered);
       }
+      ran[dir] = [...executed, ...cleanupRan];
       opts.log(`    failed: ${message}`);
       failures.push(`${dir}: ${message}`);
     }
