@@ -64,16 +64,21 @@ function configDir(base, { marketplace = false, record = false, payload = false,
   return { plugins, installPath };
 }
 
-test("claudePluginSpec: registry fields win; ids default to <id>@<id> / mikeparcewski/<id>", () => {
+test("claudePluginSpec: registry fields win; ids default to <id>@<id> / mikeparcewski/<id>; productId always equals product.id", () => {
   assert.deepEqual(spec, {
     pluginId: "wicked-garden@wicked-garden",
     pluginName: "wicked-garden",
     marketplaceName: "wicked-garden",
     source: "mikeparcewski/wicked-garden",
+    productId: "wicked-garden",
   });
   assert.deepEqual(claudePluginSpec({ id: "acme", install: {} }), {
-    pluginId: "acme@acme", pluginName: "acme", marketplaceName: "acme", source: "mikeparcewski/acme",
+    pluginId: "acme@acme", pluginName: "acme", marketplaceName: "acme", source: "mikeparcewski/acme", productId: "acme",
   });
+  // D6: when install.pluginId has a different name part, pluginName ≠ productId.
+  const alt = claudePluginSpec({ id: "wicked-garden", install: { pluginId: "custom@wicked-garden" } });
+  assert.equal(alt.pluginName, "custom");
+  assert.equal(alt.productId, "wicked-garden", "productId always carries product.id, not the pluginId name part");
 });
 
 test("prepareClaudeSpawn: a .cmd shim on win32 goes through cmd.exe with cmd-quoted args", () => {
@@ -160,6 +165,14 @@ test("registrationVerdict: registered needs marketplace + record + matching payl
     v = registrationVerdict(readRegistration(bare, spec));
     assert.equal(v.state, "copy-only");
     assert.equal(describeVerdict(v), "copy only (unregistered)");
+
+    // D5: marketplace registered but no install record — this is partial, not absent.
+    const marketplaceOnly = join(d, "marketplace-only");
+    configDir(marketplaceOnly, { marketplace: true });
+    v = registrationVerdict(readRegistration(marketplaceOnly, spec));
+    assert.equal(v.state, "partial");
+    assert.deepEqual(v.problems, ["install record missing from installed_plugins.json"]);
+    assert.match(describeVerdict(v), /^partially registered \(install record missing/);
 
     const recordOnly = join(d, "record-only");
     configDir(recordOnly, { record: true });
@@ -535,6 +548,52 @@ test("planForDir: commands follow the on-disk state exactly (add only when absen
     assert.match(plan.commands[0].because, /managed scope: no version/);
     assert.match(plan.probes[1], /1\.0\.0 \(user\), 2\.0\.0 \(project\); payload dir missing.*\(no version\) \(managed\)/, "the probe lists every record");
 
+    // D1: multiple healthy scopes → one update --scope per scope, not one scopeless update.
+    const multiScope = join(d, "multi-scope-update");
+    const ms = configDir(multiScope, { marketplace: true, payload: true });
+    writeFileSync(join(ms.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2,
+      plugins: { "wicked-garden@wicked-garden": [
+        { scope: "user",    installPath: ms.installPath, version: "1.0.0" },
+        { scope: "project", projectPath: "/p", installPath: ms.installPath, version: "1.0.0" },
+      ] },
+    }));
+    plan = planForDir(multiScope, spec, "mikeparcewski/wicked-garden");
+    assert.deepEqual(plan.commands.map((c) => c.args), [
+      ["plugin", "update", "wicked-garden@wicked-garden", "--scope", "user"],
+      ["plugin", "update", "wicked-garden@wicked-garden", "--scope", "project"],
+    ], "multi-scope: one update --scope per record");
+    assert.match(plan.commands[0].because, /installed 1\.0\.0 \(user\)/);
+    assert.match(plan.commands[1].because, /installed 1\.0\.0 \(project\)/);
+
+    // D1: a SINGLE healthy non-user-scope record → update --scope <scope>, never scopeless.
+    // A scopeless update resolves to user scope only and silently no-ops project/managed records (issue #21 item 1).
+    for (const scope of ["project", "managed"]) {
+      const sdir = join(d, `single-${scope}-update`);
+      const sc = configDir(sdir, { marketplace: true, payload: true });
+      const rec = { scope, installPath: sc.installPath, version: "1.0.0" };
+      if (scope === "project") rec.projectPath = "/p";
+      writeFileSync(join(sc.plugins, "installed_plugins.json"), JSON.stringify({
+        version: 2, plugins: { "wicked-garden@wicked-garden": [rec] },
+      }));
+      plan = planForDir(sdir, spec, "mikeparcewski/wicked-garden");
+      assert.deepEqual(plan.commands.map((c) => c.args), [
+        ["plugin", "update", "wicked-garden@wicked-garden", "--scope", scope],
+      ], `single ${scope}-scope: must use --scope, not scopeless`);
+      assert.match(plan.commands[0].because, new RegExp(`installed 1\.0\.0 \\(${scope}\\)`));
+    }
+
+    // D3: a malformed entry is labelled [malformed] in the probe, not "(no version)".
+    const malformedRec = join(d, "malformed-rec");
+    const mr = configDir(malformedRec, { marketplace: true });
+    writeFileSync(join(mr.plugins, "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [null] },
+    }));
+    plan = planForDir(malformedRec, spec, "mikeparcewski/wicked-garden");
+    assert.match(plan.probes[1], /\[malformed\] \(unknown\); install record is malformed/, "malformed records are explicitly flagged in the probe");
+    // The plan is `install` (not `update`) — a malformed entry is unhealthy.
+    assert.deepEqual(plan.commands.map((c) => c.args[1]), ["install"]);
+
     // A marketplace registered from ANOTHER source (a local checkout) is kept, not re-added.
     const local = join(d, "local");
     configDir(local, { record: true, payload: true });
@@ -603,6 +662,22 @@ test("detectLegacyCopies: reports a bare copy, a v2 marker entry with files, a c
     // A marker naming only other products is not a garden legacy copy.
     writeFileSync(markerPath, JSON.stringify({ installedAt: "x", products: [{ id: "wicked-vault", success: true }] }));
     assert.equal(detectLegacyCopies(cfg, spec).length, 1);
+
+    // D6: when install.pluginId gives pluginName ≠ product.id, spec.productId carries the right
+    // key and detectLegacyCopies uses it without a third argument — the production call sites
+    // src/installer.ts and src/index.ts call detectLegacyCopies(dir, spec) and now get the fix.
+    // altSpec: pluginName = "custom" (from pluginId = "custom@wicked-garden"), productId = "wicked-garden".
+    const altSpec = claudePluginSpec({ id: "wicked-garden", install: { pluginId: "custom@wicked-garden" } });
+    assert.equal(altSpec.pluginName, "custom");
+    assert.equal(altSpec.productId, "wicked-garden");
+    writeFileSync(markerPath, JSON.stringify({
+      markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "x",
+      products: { "wicked-garden": { installedAt: "x", lastResult: "installed", files: [{ kind: "dir", path: "skills/x" }], notes: [] } },
+    }));
+    // spec.productId = "wicked-garden" → the marker entry is found via the two-argument call.
+    // (The bare copy at plugins/wicked-garden is not found because the bare-copy path uses
+    //  spec.pluginName = "custom", which is a separate issue not fixed here.)
+    assert.equal(detectLegacyCopies(cfg, altSpec).length, 1, "spec.productId finds the marker entry without a third argument");
   } finally {
     rm(d);
   }

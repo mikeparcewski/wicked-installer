@@ -124,12 +124,16 @@ if (sub === "install" || sub === "update") {
     process.stderr.write(`Plugin not installed: ${id}\n`);
     process.exit(1);
   }
+  // Accept --scope <scope> for targeted update; install always writes user scope.
+  const scopeIdx = rest.indexOf("--scope");
+  const scope = sub === "update" && scopeIdx >= 0 ? (rest[scopeIdx + 1] ?? "user") : "user";
   const installPath = join(pluginsDir, "cache", marketplace, name, version);
   mkdirSync(join(installPath, ".claude-plugin"), { recursive: true });
   writeFileSync(join(installPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name, version }));
-  const prior = installed.plugins[id]?.[0];
-  installed.plugins[id] = [{
-    scope: "user",
+  const prior = (installed.plugins[id] ?? []).find((e) => e.scope === scope);
+  const others = sub === "update" ? (installed.plugins[id] ?? []).filter((e) => e.scope !== scope) : [];
+  installed.plugins[id] = [...others, {
+    scope,
     installPath,
     version,
     installedAt: prior?.installedAt ?? now,
@@ -138,8 +142,21 @@ if (sub === "install" || sub === "update") {
   }];
   writeJson(installedFile, installed);
   process.stdout.write(sub === "install"
-    ? `Installing plugin "${id}"...✔ Successfully installed plugin: ${id} (scope: user)\n`
+    ? `Installing plugin "${id}"...✔ Successfully installed plugin: ${id} (scope: ${scope})\n`
     : `✔ ${name} updated to ${version}\n`);
+  process.exit(0);
+}
+
+if (sub === "uninstall") {
+  const id = third;
+  const installed = readJson(installedFile, { version: 2, plugins: {} });
+  if (!id || !installed.plugins[id]) {
+    process.stderr.write(`Plugin not installed: ${id ?? "(none)"}\n`);
+    process.exit(1);
+  }
+  delete installed.plugins[id];
+  writeJson(installedFile, installed);
+  process.stdout.write(`✔ Successfully uninstalled plugin: ${id}\n`);
   process.exit(0);
 }
 

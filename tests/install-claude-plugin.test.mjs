@@ -468,7 +468,9 @@ test("dispatch: a failed install after this run's marketplace add is rolled back
   try {
     const { code, out } = await dispatch(sb, ["wicked-garden"], {}, { env: { CLAUDE_STUB_FAIL: "install" } });
     assert.equal(code, 1, out);
-    assert.deepEqual(stubCalls(sb).map(([, a]) => a), ["--version", "plugin marketplace add mikeparcewski/wicked-garden", "plugin install wicked-garden@wicked-garden", "plugin marketplace remove wicked-garden"]);
+    // D2: uninstall is attempted before the marketplace rollback (best-effort; exits non-zero here
+    // because the install never wrote a record, but the attempt is still recorded).
+    assert.deepEqual(stubCalls(sb).map(([, a]) => a), ["--version", "plugin marketplace add mikeparcewski/wicked-garden", "plugin install wicked-garden@wicked-garden", "plugin uninstall wicked-garden@wicked-garden", "plugin marketplace remove wicked-garden"]);
     assert.match(out, /rolled back this run's marketplace add/);
     const known = JSON.parse(readFileSync(join(sb.cfg, "plugins", "known_marketplaces.json"), "utf8"));
     assert.ok(!("wicked-garden" in known));

@@ -17,7 +17,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, writeFileSync, mkdtempSync, cpSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, cpSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -188,5 +188,58 @@ test("a cyclic or self-referential `requires` cannot hang or crash detection", (
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("D7: detectCli — CLAUDE_CONFIG_DIR is exclusive, so ~/.claude is not checked when the var is set", () => {
+  // resolveHomeRoots previously APPENDED env paths to the defaults, so ~/.claude remained in the
+  // list even when the user steered Claude Code elsewhere via CLAUDE_CONFIG_DIR.  A marker in
+  // ~/.claude then produced a false-positive homeDetected regardless of the env-specified dir.
+  const customDir = mkdtempSync(join(tmpdir(), "wicked-d7-custom-"));
+  const homeDir   = mkdtempSync(join(tmpdir(), "wicked-d7-home-"));
+  try {
+    // Plant a marker in ~/.claude (the default) but NOT in customDir.
+    mkdirSync(join(homeDir, ".claude", "plugins"), { recursive: true });
+    const probe = `
+      const { detectCli } = await import(${JSON.stringify("file://" + join(root, "dist", "detector.js"))});
+      const r = detectCli("claude");
+      // Only report homeDetected — binOnPath is environment-specific (the dev machine may have
+      // a real claude on PATH) and is NOT what D7 is about.
+      process.stdout.write(JSON.stringify({ homeDetected: r.homeDetected }) + "\\n");
+    `;
+    // Run with CLAUDE_CONFIG_DIR → customDir (no markers) and HOME → homeDir (has ~/.claude/plugins).
+    // Expected: homeDetected=false because customDir is the exclusive root and has no markers.
+    // binOnPath is NOT asserted — it depends on whether the test machine has a real claude binary.
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", probe], {
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        CLAUDE_CONFIG_DIR: customDir,
+      },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const result = JSON.parse(r.stdout.trim());
+    assert.equal(result.homeDetected, false, "CLAUDE_CONFIG_DIR is exclusive: ~/.claude must not be checked when the var is set to another dir with no markers");
+
+    // Contrast: without CLAUDE_CONFIG_DIR, homeDetected uses ~/.claude and finds the marker.
+    const r2 = spawnSync(process.execPath, ["--input-type=module", "-e", probe], {
+      env: {
+        PATH: "",           // no binary on PATH so binOnPath is false
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        // CLAUDE_CONFIG_DIR intentionally absent → defaults to ~/.claude
+      },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(r2.status, 0, r2.stderr);
+    const result2 = JSON.parse(r2.stdout.trim());
+    assert.equal(result2.homeDetected, true, "without CLAUDE_CONFIG_DIR, ~/.claude with a marker is detected");
+  } finally {
+    rmSync(customDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    rmSync(homeDir,   { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
