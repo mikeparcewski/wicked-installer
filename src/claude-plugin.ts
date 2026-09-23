@@ -133,14 +133,64 @@ export function resolveClaudeConfigDirs(
 // Locating the Claude Code CLI without spawning
 // ---------------------------------------------------------------------------
 
-function isExecutableFile(path: string, platform: NodeJS.Platform): boolean {
+/**
+ * What a PATH lookup found. `unknown` means a candidate could not be inspected (an I/O or
+ * permission error other than "not there" / "not executable") and nothing else matched — an
+ * inability to check, which callers must never report as a checked negative (#28).
+ */
+export type PathProbe =
+  | { state: "found"; path: string }
+  | { state: "absent" }
+  | { state: "unknown"; reason: string };
+
+// stat errors that mean "no such file at this candidate" — a genuine negative for the lookup.
+const ABSENT_CODES = new Set(["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]);
+
+/** A candidate: found, absent, or (with the error code) could not be checked. */
+function probeCandidate(path: string, platform: NodeJS.Platform): true | false | string {
+  let isFile: boolean;
   try {
-    if (!statSync(path).isFile()) return false;
-    if (platform !== "win32") accessSync(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
+    isFile = statSync(path).isFile();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown error";
+    return ABSENT_CODES.has(code) ? false : code;
   }
+  if (!isFile) return false;
+  if (platform === "win32") return true;
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown error";
+    return code === "EACCES" ? false : code; // EACCES from X_OK = present but not executable
+  }
+}
+
+/**
+ * Resolve `cmd` against PATH (and PATHEXT on Windows) with filesystem probes only — no
+ * subprocess, so no timeout and no sensitivity to host load. `command -v` under a 2 s budget
+ * timed out 24/24 at loadavg 133 and every installed product read "not installed" (#28).
+ */
+export function probeOnPath(
+  cmd: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): PathProbe {
+  const pathValue = env.PATH ?? env.Path ?? "";
+  const dirs = pathValue.split(platform === "win32" ? ";" : ":").filter(Boolean);
+  const exts = platform === "win32"
+    ? ["", ...(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)]
+    : [""];
+  let uncheckable: string | undefined;
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = join(dir, cmd + ext);
+      const r = probeCandidate(candidate, platform);
+      if (r === true) return { state: "found", path: candidate };
+      if (typeof r === "string" && uncheckable === undefined) uncheckable = `${r} on ${candidate}`;
+    }
+  }
+  return uncheckable === undefined ? { state: "absent" } : { state: "unknown", reason: uncheckable };
 }
 
 /** Resolve `cmd` against PATH (and PATHEXT on Windows) with filesystem probes only. */
@@ -149,18 +199,8 @@ export function findOnPath(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
-  const pathValue = env.PATH ?? env.Path ?? "";
-  const dirs = pathValue.split(platform === "win32" ? ";" : ":").filter(Boolean);
-  const exts = platform === "win32"
-    ? ["", ...(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)]
-    : [""];
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = join(dir, cmd + ext);
-      if (isExecutableFile(candidate, platform)) return candidate;
-    }
-  }
-  return undefined;
+  const probe = probeOnPath(cmd, env, platform);
+  return probe.state === "found" ? probe.path : undefined;
 }
 
 /** The Claude Code binary to drive: WICKED_CLAUDE_BIN (tests) or `claude` on PATH. */

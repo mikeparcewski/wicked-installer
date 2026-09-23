@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import type { DetectedCli, Product } from "./types.js";
 import { loadRegistry } from "./registry.js";
-import { claudePluginSpec, findOnPath, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
+import { claudePluginSpec, findOnPath, probeOnPath, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
 
 interface CliSpec {
   id: string;
@@ -34,17 +34,17 @@ function commandVersion(cmd: string): string | undefined {
   }
 }
 
-function commandExists(cmd: string): boolean {
-  try {
-    if (process.platform === "win32") {
-      execSync(`where ${cmd}`, { timeout: 2000, stdio: "ignore" });
-    } else {
-      execSync(`command -v ${cmd}`, { timeout: 2000, stdio: "ignore" });
-    }
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Is `cmd` on PATH? Answered in-process by walking PATH (`probeOnPath`) — never by spawning
+ * `command -v`/`where`. The spawned probe ran under a 2 s timeout and mapped EVERY exception,
+ * the timeout included, to "absent": at loadavg 133 it timed out 24/24 and `status` reported
+ * installed products as "not installed" while `detectClis` silently dropped present CLIs (#28).
+ */
+type Probe = "found" | "absent" | "unknown";
+
+function commandProbe(cmd: string): { state: Probe; reason?: string } {
+  const p = probeOnPath(cmd);
+  return p.state === "unknown" ? { state: "unknown", reason: p.reason } : { state: p.state };
 }
 
 export function detectClis(): DetectedCli[] {
@@ -53,9 +53,14 @@ export function detectClis(): DetectedCli[] {
 
   for (const spec of CLI_SPECS) {
     let detected = false;
+    let unverified: string | undefined;
 
     if (spec.command) {
-      detected = commandExists(spec.command);
+      // A probe that could not check is surfaced, not dropped: silently omitting a CLI that is
+      // present changes what gets installed with nothing reported (#28).
+      const probe = commandProbe(spec.command);
+      detected = probe.state !== "absent";
+      if (probe.state === "unknown") unverified = probe.reason;
     } else if (spec.homePath) {
       const base = join(home, spec.homePath);
       detected = spec.marker
@@ -64,8 +69,8 @@ export function detectClis(): DetectedCli[] {
     }
 
     if (detected) {
-      const version = spec.command ? commandVersion(spec.command) : undefined;
-      found.push({ id: spec.id, displayName: spec.displayName, version });
+      const version = spec.command && unverified === undefined ? commandVersion(spec.command) : undefined;
+      found.push({ id: spec.id, displayName: spec.displayName, version, ...(unverified ? { unverified } : {}) });
     }
   }
 
@@ -287,20 +292,48 @@ export function isProductInstalled(
   // `--claude-home` dirs: the same target set `status` renders, so the two never disagree.
   claudeHomes: string[] = [],
 ): boolean {
+  return productInstallState(productId, seen, claudeHomes) === "installed";
+}
+
+/**
+ * `installed` / `not-installed`, or `unknown` when a PATH probe could not check (#28). An
+ * inability to check is never folded into "not installed" — `status` renders it as such.
+ */
+export type InstallState = "installed" | "not-installed" | "unknown";
+
+const fromBool = (b: boolean): InstallState => (b ? "installed" : "not-installed");
+
+/** Every one must hold: any checked negative wins, else any unknown, else installed. */
+function allOf(states: InstallState[]): InstallState {
+  if (states.includes("not-installed")) return "not-installed";
+  return states.includes("unknown") ? "unknown" : "installed";
+}
+
+/** Any one suffices: any installed wins, else any unknown, else not installed. */
+function anyOf(states: InstallState[]): InstallState {
+  if (states.includes("installed")) return "installed";
+  return states.includes("unknown") ? "unknown" : "not-installed";
+}
+
+export function productInstallState(
+  productId: string,
+  seen: ReadonlySet<string> = new Set(),
+  claudeHomes: string[] = [],
+): InstallState {
   // The `manual` arm recurses through `requires`, and requires comes from registry.json — data
   // that ships in the package and can be hand-edited or corrupted, exactly like the binary names
   // guarded above. A self-reference (`requires: ["itself"]`) or a cycle (A→B→A) would recurse
   // until the stack blew, turning a corrupt data file into a crash of the status command rather
   // than a wrong answer. A product already on the current chain is treated as NOT satisfied:
   // nothing in a dependency cycle can be shown installed on the strength of the cycle itself.
-  if (seen.has(productId)) return false;
+  if (seen.has(productId)) return "not-installed";
   const chain = new Set(seen).add(productId);
   const home = homedir();
   switch (productId) {
     case "wicked-testing":
       // Retired, and never a binary: it installed skills into Claude Code's skills dir.
-      return existsSync(join(home, ".claude", "skills", "wicked-testing-acceptance-testing")) ||
-             existsSync(join(home, ".claude", "skills", "wicked-testing:acceptance-testing"));
+      return fromBool(existsSync(join(home, ".claude", "skills", "wicked-testing-acceptance-testing")) ||
+             existsSync(join(home, ".claude", "skills", "wicked-testing:acceptance-testing")));
     case "wicked-garden": {
       // A plugin, not a CLI — "installed" means Claude Code can LOAD it: fully registered
       // (marketplace entry + install record + cache payload, see registrationVerdict) in EVERY
@@ -309,46 +342,48 @@ export function isProductInstalled(
       // install record whose payload is gone is NOT installed — `status` explains which it is.
       const garden = loadRegistry().products.find((p) => p.id === productId);
       const spec = claudePluginSpec(garden ?? { id: productId, install: {} });
-      return resolveClaudeConfigDirs({ homeFlags: claudeHomes }).dirs.every(
+      return fromBool(resolveClaudeConfigDirs({ homeFlags: claudeHomes }).dirs.every(
         (dir) => registrationVerdict(readRegistration(dir, spec)).state === "registered",
-      );
+      ));
     }
     case "wicked-brain":
       // Retired. `~/.wicked-brain` is a frozen archive, NOT an install — see the header.
-      return commandExists("wicked-brain");
+      return commandState("wicked-brain");
     default:
       return installedPerRegistry(productId, chain, claudeHomes);
   }
 }
 
 /**
- * A shell-safe executable name.
+ * A plain executable name.
  *
- * `commandExists` interpolates into `execSync`, and these names come from registry.json rather
- * than from source — a file that ships in the package and could be corrupted, hand-edited, or
- * replaced. An entry like `x; rm -rf ~` would otherwise reach a shell. Nothing legitimate needs
- * more than this alphabet, so anything outside it is rejected rather than escaped: a name we would
- * have to quote to make safe is a name we should not be probing.
- *
- * It also removes a quieter failure — a package name carrying a space or a `$` would make
- * `command -v` answer about something other than the thing asked about, and report it as fact.
+ * These names come from registry.json rather than from source — a file that ships in the package
+ * and could be corrupted, hand-edited, or replaced. The probe no longer reaches a shell (#28), but
+ * the name is still joined onto each PATH dir: `../x` or `/abs/path` would answer about a file
+ * outside PATH and report it as fact. Nothing legitimate needs more than this alphabet, so
+ * anything outside it is rejected rather than escaped.
  */
 const SAFE_BINARY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-function commandExistsSafe(name: string): boolean {
-  return SAFE_BINARY.test(name) && commandExists(name);
+function commandState(name: string): InstallState {
+  const { state } = commandProbe(name);
+  return state === "found" ? "installed" : state === "absent" ? "not-installed" : "unknown";
+}
+
+function commandStateSafe(name: string): InstallState {
+  return SAFE_BINARY.test(name) ? commandState(name) : "not-installed";
 }
 
 /** Detection derived from the product's own `install` spec, so a new product needs no new branch. */
-function installedPerRegistry(productId: string, seen: ReadonlySet<string>, claudeHomes: string[]): boolean {
+function installedPerRegistry(productId: string, seen: ReadonlySet<string>, claudeHomes: string[]): InstallState {
   const product: Product | undefined = loadRegistry().products.find((p) => p.id === productId);
-  if (product === undefined) return false;
+  if (product === undefined) return "not-installed";
   const install = product.install;
   switch (install.type) {
     case "npm-global":
     case "npm-run":
       // The binary is conventionally the package name for every wicked-* product.
-      return typeof install.package === "string" && commandExistsSafe(install.package);
+      return typeof install.package === "string" ? commandStateSafe(install.package) : "not-installed";
     case "cargo": {
       // A multi-crate product (install.crates) is installed only when EVERY crate's own
       // binary resolves (each wicked-* crate's [[bin]] is named exactly like the crate) —
@@ -357,13 +392,13 @@ function installedPerRegistry(productId: string, seen: ReadonlySet<string>, clau
       // CLI binary vouch for the missing MCP server. Corrupt entries yield false, never throw.
       if (Array.isArray(install.crates) && install.crates.length > 0) {
         const crates: unknown[] = install.crates;
-        return crates.every((c) => typeof c === "string" && commandExistsSafe(c));
+        return allOf(crates.map((c) => (typeof c === "string" ? commandStateSafe(c) : "not-installed")));
       }
       // Single-crate: the crate may publish a differently-named binary
       // (wicked-estate-mcp ⇒ wicked-estate), so keep the historical fallback.
       const crate = install.crate ?? install.package;
-      if (typeof crate !== "string") return false;
-      return commandExistsSafe(crate) || commandExistsSafe(crate.replace(/-mcp$/, ""));
+      if (typeof crate !== "string") return "not-installed";
+      return anyOf([commandStateSafe(crate), commandStateSafe(crate.replace(/-mcp$/, ""))]);
     }
     case "manual": {
       // Ships inside something else; installed exactly when that thing is.
@@ -374,10 +409,10 @@ function installedPerRegistry(productId: string, seen: ReadonlySet<string>, clau
       // throw and crash `status` for exactly the input the rest of the code is careful about.
       // Bad data yields a safe `false`; it never yields an exception.
       const requires = product.requires;
-      if (!Array.isArray(requires) || requires.length === 0) return false;
-      return requires.every((r) => typeof r === "string" && isProductInstalled(r, seen, claudeHomes));
+      if (!Array.isArray(requires) || requires.length === 0) return "not-installed";
+      return allOf(requires.map((r) => (typeof r === "string" ? productInstallState(r, seen, claudeHomes) : "not-installed")));
     }
     default:
-      return false;
+      return "not-installed";
   }
 }

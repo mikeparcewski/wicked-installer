@@ -648,7 +648,7 @@ function renderPluginRegistration(flags: DispatchFlags): RegistrationState | und
 }
 
 async function runStatus(flags: DispatchFlags): Promise<void> {
-  const { isProductInstalled } = await import("./detector.js");
+  const { productInstallState } = await import("./detector.js");
   const products = listProducts(true);
 
   const clis = detectClis();
@@ -657,22 +657,30 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
     console.log(chalk.dim("  none detected"));
   } else {
     for (const c of clis) {
-      console.log(`  ${chalk.green("✓")} ${c.displayName}${c.version ? chalk.dim(` (${c.version})`) : ""}`);
+      if (c.unverified) {
+        console.log(`  ${chalk.yellow("?")} ${c.displayName}${chalk.dim(` (could not verify: ${c.unverified})`)}`);
+      } else {
+        console.log(`  ${chalk.green("✓")} ${c.displayName}${c.version ? chalk.dim(` (${c.version})`) : ""}`);
+      }
     }
   }
 
   console.log(chalk.bold("\nwicked-* products:"));
   for (const p of products) {
     // Same --claude-home target set as the registration section below, so the two agree.
-    const installed = isProductInstalled(p.id, new Set(), flags.claudeHomes);
+    const state = productInstallState(p.id, new Set(), flags.claudeHomes);
+    const installed = state === "installed";
     // A `manual` product is not installed DIRECTLY — it arrives inside something else
     // (wicked-studio ships in wicked-crew). Both facts matter and neither replaces the other:
     // "is it here?" and "how would I get it?" are different questions, and until detection was
     // fixed this line could only ever answer the second, because `isProductInstalled` returned
     // false for every product it had not been taught about.
     const manual = p.install.type === "manual";
+    // `unknown` = a PATH probe could not check. It is not a negative and must not read as one (#28).
     const statusIcon = installed
       ? chalk.green("✓ installed") + (manual ? chalk.dim(" (bundled)") : "")
+      : state === "unknown"
+        ? chalk.yellow("? could not verify")
       : manual
         ? chalk.yellow("~ manual")
         : chalk.dim("  not installed");

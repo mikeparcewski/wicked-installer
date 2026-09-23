@@ -63,6 +63,8 @@ export interface DetectedCli {
   id: string;
   displayName: string;
   version?: string;
+  /** Set when the PATH probe could not check (an fs error, not "absent") — shown, never dropped (#28). */
+  unverified?: string;
 }
 
 /**
