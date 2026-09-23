@@ -7,6 +7,13 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ### Fixed
 
+- **`status` no longer reports installed products as "not installed" on a loaded host (#28).**
+  Binary detection spawned `command -v` under a 2 s timeout and mapped every exception, the
+  timeout included, to "absent" — at loadavg 133 it timed out 24/24. PATH is now walked
+  in-process (stat + X_OK, PATHEXT on Windows): no subprocess, no timeout. A probe that still
+  cannot check (an fs error other than "not there") renders as `? could not verify`, never as
+  "not installed", and `detectClis` lists such a CLI as unverified instead of silently dropping it.
+
 - **D1 — `plugin update` now passes `--scope <scope>` whenever the record is not user-scope.**
   A single user-scope record continues to use the scopeless form (backward-compatible). A single
   project- or managed-scope record, and all multi-scope cases, each get one targeted

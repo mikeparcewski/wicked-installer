@@ -38,8 +38,8 @@ test("every registry product gets a real answer, not a default-false", async () 
   // checking the SOURCE has no blanket default for known products, and that each id resolves
   // without throwing.
   for (const p of registry.products) {
-    // Called ONCE and captured: this spawns `command -v`, so a second call is both slow and a
-    // second chance for the environment to differ between the two assertions.
+    // Called ONCE and captured: a second call is a second chance for the environment to differ
+    // between the two assertions.
     let answer;
     assert.doesNotThrow(() => {
       answer = isProductInstalled(p.id);
@@ -113,15 +113,14 @@ test("a manual product is installed exactly when its requirements are", () => {
   );
 });
 
-test("registry-sourced names are validated before they reach a shell", () => {
-  // `commandExists` interpolates into execSync, and these names come from registry.json — a file
-  // that ships in the package and can be corrupted, hand-edited, or replaced. An entry like
-  // `x; rm -rf ~` would otherwise reach a shell. Rejected rather than escaped: a name that needs
-  // quoting to be safe is a name we should not probe. It also kills a quieter failure — a name
-  // carrying a space or `$` makes `command -v` answer about something else and report it as fact.
+test("registry-sourced names are validated before they are probed", () => {
+  // These names come from registry.json — a file that ships in the package and can be corrupted,
+  // hand-edited, or replaced. The probe walks PATH in-process (#28) and joins the name onto each
+  // dir, so `../x` or an absolute path would answer about a file outside PATH and report it as
+  // fact. Rejected rather than escaped: a name that needs quoting is a name we should not probe.
   const src = readFileSync(join(root, "src", "detector.ts"), "utf8");
   assert.match(src, /const SAFE_BINARY = \/\^/, "a binary-name allowlist must exist");
-  assert.match(src, /function commandExistsSafe/, "the guarded wrapper must exist");
+  assert.match(src, /function commandStateSafe/, "the guarded wrapper must exist");
 
   // Every registry-sourced probe must go through the guarded wrapper, never commandExists direct.
   const body = src.slice(src.indexOf("function installedPerRegistry"));
@@ -129,8 +128,8 @@ test("registry-sourced names are validated before they reach a shell", () => {
   assert.ok(end > 0, "installedPerRegistry must be delimited to be asserted about");
   const fn = body.slice(0, end);
   assert.ok(
-    !/[^e]commandExists\(/.test(fn.replace(/commandExistsSafe\(/g, "SAFE(")),
-    "installedPerRegistry must call commandExistsSafe, never commandExists directly",
+    !/commandState\(|commandProbe\(|probeOnPath\(/.test(fn.replace(/commandStateSafe\(/g, "SAFE(")),
+    "installedPerRegistry must call commandStateSafe, never an unguarded probe",
   );
 
   // And the allowlist must actually reject a metacharacter payload.
