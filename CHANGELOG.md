@@ -5,6 +5,15 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`status` says when a CLI's `--version` probe timed out instead of silently dropping the
+  version (#34).** The display-only probe keeps its 3 s bound; a timeout now renders as
+  `(version unknown — --version timed out)`. Detection itself was already load-safe (#28). The
+  `garden-registration` status test accepts either rendering, and its invocation count is now an
+  upper bound, since a killed probe may never reach the stub's log. Both checks were flaky on a
+  loaded host.
+
 ## [0.6.0] - 2026-10-08
 
 ### Added

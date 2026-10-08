@@ -377,7 +377,8 @@ test("status: per-dir verdict (registered / partial / copy only / not installed)
 
     const a = status(registered);
     assert.equal(a.status, 0, a.stdout + a.stderr);
-    assert.match(a.stdout, /Detected CLIs:[\s\S]*Claude Code \(9\.9\.9 \(Claude Code stub\)\)/, "CLI detection sees the PATH stub");
+    // The version probe is display-only and bounded (3 s); on a loaded host it reports the timeout instead (#34).
+    assert.match(a.stdout, /Detected CLIs:[\s\S]*Claude Code \((9\.9\.9 \(Claude Code stub\)|version unknown — --version timed out)\)/, "CLI detection sees the PATH stub");
     assert.match(a.stdout, /Claude Code plugin registration \(wicked-garden@wicked-garden\)/);
     assert.match(a.stdout, /marketplace: wicked-garden ← github:mikeparcewski\/wicked-garden/);
     assert.match(a.stdout, /installed:\s+0\.0\.1-stub \(user\)/);
@@ -427,7 +428,10 @@ test("status: per-dir verdict (registered / partial / copy only / not installed)
     // Exactly which claude invocations `status` made: one `--version` per run (CLI detection),
     // and never a `claude plugin …` command.
     const statusCalls = jsonLines(statusLog).map((x) => x.argv.join(" "));
-    assert.deepEqual(statusCalls, ["--version", "--version", "--version", "--version", "--version", "--version"]);
+    // One read-only probe per status run, nothing else. A probe the 3 s bound killed on a loaded host may
+    // never reach the stub's log (#34), so the count is an upper bound, not an exact one.
+    assert.ok(statusCalls.length >= 1 && statusCalls.length <= 6, JSON.stringify(statusCalls));
+    assert.ok(statusCalls.every((c) => c === "--version"), JSON.stringify(statusCalls));
   } finally {
     cleanup(sb);
   }

@@ -25,12 +25,15 @@ const CLI_SPECS: CliSpec[] = [
   { id: "pi",          displayName: "Pi",            homePath: ".pi",      marker: "agent" },
 ];
 
+/** Display-only "what version is it?". A probe that TIMED OUT says so rather than vanishing (#34): on a loaded host a missing version reads as "nothing to report". */
+export const VERSION_PROBE_TIMED_OUT = "version unknown — --version timed out";
+
 function commandVersion(cmd: string): string | undefined {
   try {
     return execSync(`${cmd} --version`, { timeout: 3000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
       .trim().split("\n")[0];
-  } catch {
-    return undefined;
+  } catch (err) {
+    return (err as { code?: unknown }).code === "ETIMEDOUT" ? VERSION_PROBE_TIMED_OUT : undefined;
   }
 }
 
