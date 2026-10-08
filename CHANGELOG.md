@@ -5,6 +5,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-08
+
 ### Added
 
 - **`wicked-installer cleanup-legacy [--claude-home <dir>]... [--dry-run] [--json]` removes the legacy,
