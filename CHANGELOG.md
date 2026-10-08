@@ -5,6 +5,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-08
+
 ### Fixed
 
 - **`status` says when a CLI's `--version` probe timed out instead of silently dropping the
