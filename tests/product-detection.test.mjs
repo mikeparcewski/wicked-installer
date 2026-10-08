@@ -242,3 +242,26 @@ test("D7: detectCli — CLAUDE_CONFIG_DIR is exclusive, so ~/.claude is not chec
     rmSync(homeDir,   { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+test("detectClis: a --version probe that times out is reported as such, never silently dropped (#34)", { skip: process.platform === "win32" && "POSIX stub" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "wicked-vprobe-"));
+  try {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    // a `claude` that is on PATH but answers --version slower than the 3 s bound
+    writeFileSync(join(bin, "claude"), "#!/bin/sh\nsleep 6\necho 1.0.0\n", { mode: 0o755 });
+    const script = `const { detectClis, VERSION_PROBE_TIMED_OUT } = await import(${JSON.stringify(join(root, "dist", "detector.js"))});
+      const c = detectClis().find((x) => x.id === "claude-code");
+      process.stdout.write(JSON.stringify({ c, expected: VERSION_PROBE_TIMED_OUT }));`;
+    const res = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, HOME: dir },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const { c, expected } = JSON.parse(res.stdout);
+    assert.ok(c, "the CLI is detected from PATH");
+    assert.equal(c.version, expected);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
