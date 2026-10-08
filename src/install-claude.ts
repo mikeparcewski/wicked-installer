@@ -380,6 +380,7 @@ function printHelp(): void {
     "  install-claude --all",
     "  install-claude status --all",
     "  install-claude uninstall wicked-testing",
+    "  install-claude mcp upsert|remove <key> ...   (one ad-hoc MCP server; `mcp --help`)",
     "",
     "Verbs (default: install):",
     "  install    Acquire + wire assets into every resolved config dir",
@@ -2847,10 +2848,262 @@ function emitReport(options: Options, verb: Verb, resolution: Resolution, report
 }
 
 // ---------------------------------------------------------------------------
+// mcp verb (§12.5) — one ad-hoc MCP server, by key, through mechanism 1's invariants (§8.3)
+// ---------------------------------------------------------------------------
+//
+// `install-claude mcp upsert <key> --command <bin> [--arg <a>]... [--claude-home <dir>]...`
+// `install-claude mcp remove <key> [--claude-home <dir>]...`
+// The entry is a synthetic one-server block `{[key]: {command, args}}` wired by wireMcp (backup,
+// atomic write, converge by name, foreign → collision-skipped unless --force) and recorded as a
+// `json-key` under the synthetic product id `mcp-server:<key>`, so `status` and
+// `uninstall --all` see it. No env is ever written: the CLI host launches the server with the
+// operator's shell environment.
+
+const MCP_KEY_RE = /^[a-z][a-z0-9-]{0,63}$/;
+type McpSub = "upsert" | "remove";
+type McpResult = "written" | "converged" | "updated" | "removed" | "skipped" | "unsupported" | "manual" | "failed" | "planned";
+interface McpEntry { cli: string; result: McpResult; target: string; detail: string }
+interface McpArgs { sub: McpSub; key: string; command?: string; args: string[]; homes: string[]; dryRun: boolean; json: boolean; force: boolean }
+
+class McpUsageError extends Error {}
+
+function parseMcpArgs(argv: string[], homeFlags: string[]): McpArgs {
+  const [sub, key, ...rest] = argv;
+  if (sub !== "upsert" && sub !== "remove") throw new McpUsageError(`mcp: expected 'upsert' or 'remove', got ${JSON.stringify(sub ?? "")}`);
+  if (!key || !MCP_KEY_RE.test(key)) throw new McpUsageError(`mcp ${sub}: key ${JSON.stringify(key ?? "")} must match ^[a-z][a-z0-9-]{0,63}$`);
+  const out: McpArgs = { sub, key, args: [], homes: [], dryRun: false, json: false, force: false };
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    const name = arg.startsWith("--") && arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    const valued = name === "--command" || name === "--arg" || homeFlags.includes(name);
+    if (valued) {
+      let value: string | undefined;
+      if (arg !== name) value = arg.slice(name.length + 1);
+      else if (i + 1 < rest.length) { i += 1; value = rest[i]; }
+      if (value === undefined) throw new McpUsageError(`${name} requires a value`);
+      if (name === "--command") out.command = value;
+      else if (name === "--arg") out.args.push(value);
+      else out.homes.push(resolve(expandHome(value)));
+    } else if (arg === "--dry-run") out.dryRun = true;
+    else if (arg === "--json") out.json = true;
+    else if (arg === "--force") out.force = true;
+    else throw new McpUsageError(`unknown option: ${arg}`);
+  }
+  if (sub === "upsert") {
+    if (!out.command) throw new McpUsageError("mcp upsert: --command <bin> is required");
+    const cmd = expandHome(out.command);
+    if (CONTROL_CHARS.test(cmd)) throw new McpUsageError("--command: contains control characters");
+    if ((cmd.includes("/") || cmd.includes("\\")) && !isAbsolute(cmd)) throw new McpUsageError(`--command: ${JSON.stringify(out.command)} must be a bare command name or an absolute path`);
+    out.command = cmd;
+  }
+  return out;
+}
+
+function emitMcp(a: McpArgs, entries: McpEntry[]): void {
+  if (a.json) {
+    console.log(JSON.stringify({ verb: a.sub, key: a.key, command: a.command ?? null, args: a.args, dryRun: a.dryRun, clis: entries }, null, 2));
+    return;
+  }
+  for (const e of entries) console.log(`[${e.result}] ${e.cli}: ${e.target}${e.detail ? ` — ${e.detail}` : ""}`);
+}
+
+const mcpProductId = (key: string): string => `mcp-server:${key}`;
+
+/** The fix-or-remove refusal for an unparseable state file (§8.3 invariant 2): nothing is written. */
+function corruptStateFile(file: string): string | undefined {
+  let state: ChainResult;
+  try {
+    state = chainUnder(dirname(file), file);
+  } catch (err) {
+    return err instanceof Error ? `refused: ${err.message}` : String(err);
+  }
+  if (!state.exists) return undefined;
+  if (state.kind !== "file") return `refused: ${file} is not a regular file`;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    if (!isPlainObject(parsed)) return `unexpected JSON shape in ${file}; fix or remove ${file} and re-run`;
+  } catch {
+    return `corrupt JSON; fix or remove ${file} and re-run`;
+  }
+  return undefined;
+}
+
+function claudeMcpUpsert(a: McpArgs, target: Target, options: Options): McpEntry {
+  const entry = (result: McpResult, detail: string): McpEntry => ({ cli: "claude", result, target: target.mcpFile, detail });
+  const raw = readMarkerRaw(target.dir);
+  if (raw.corrupt) return entry("failed", corruptMarkerMessage(target.dir, raw.reason));
+  const id = mcpProductId(a.key);
+  const product: Product = {
+    id,
+    displayName: `MCP server ${a.key}`,
+    description: "ad-hoc MCP server written by `wicked-installer mcp upsert`",
+    type: "mcp-binary",
+    standalone: true,
+    opinionated: false,
+    status: "active",
+    requires: [],
+    install: { type: "manual" },
+    mcp: { [a.key]: { command: a.command as string, args: a.args } },
+  };
+  if (!options.dryRun) mkdirSync(target.dir, { recursive: true }); // selecting claude is consent to create its home (§3.3)
+  const marker = loadOrInitMarker(target.dir);
+  const prev = marker.products[id];
+  const mp: MarkerProduct = {
+    installedAt: prev?.installedAt ?? new Date().toISOString(),
+    lastResult: "installed",
+    assets: { mcp: 1 },
+    files: [],
+    notes: [`written by \`wicked-installer mcp upsert ${a.key}\`; no env is recorded or written`],
+  };
+  const actions: Action[] = [];
+  const notes: string[] = [];
+  try {
+    wireMcp(product, target, options, actions, notes, mp, prev);
+  } catch (err) {
+    return entry("failed", err instanceof Error ? err.message : String(err));
+  }
+  const act = actions[actions.length - 1];
+  if (!act) return entry("failed", "no action recorded");
+  const extra = notes.length ? `; ${notes.join("; ")}` : "";
+  if (act.result === "failed") return entry("failed", `${act.detail ?? "failed"}${extra}`);
+  let result: McpResult;
+  let detail: string;
+  switch (act.detail) {
+    case "added": result = "written"; detail = "added mcpServers entry"; break;
+    case "already current": result = "converged"; detail = "already current"; break;
+    case "updated": result = "updated"; detail = "updated the entry this installer wrote"; break;
+    case "overwrote foreign (--force)": result = "updated"; detail = "overwrote a foreign entry (--force); its prior value is kept in the marker and restored on remove"; break;
+    default: return entry("skipped", `collision-skipped: mcpServers.${a.key} holds a foreign value; use --force to overwrite${extra}`);
+  }
+  if (options.dryRun) return entry("planned", `would be ${result}: ${detail}${extra}`);
+  const unchanged = prev !== undefined && result === "converged" && deepEqual(prev.files, mp.files);
+  if (!unchanged) {
+    marker.products[id] = mp;
+    marker.updatedAt = new Date().toISOString();
+    try {
+      flushMarkerV2(target.dir, marker, options);
+    } catch (err) {
+      return entry("failed", `config written but the marker was not: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return entry(result, `${detail}${extra}`);
+}
+
+function claudeMcpRemove(a: McpArgs, target: Target, options: Options): McpEntry {
+  const entry = (result: McpResult, detail: string): McpEntry => ({ cli: "claude", result, target: target.mcpFile, detail });
+  const raw = readMarkerRaw(target.dir);
+  if (raw.corrupt) return entry("failed", corruptMarkerMessage(target.dir, raw.reason, "uninstall"));
+  const corrupt = corruptStateFile(target.mcpFile);
+  if (corrupt) return entry("failed", corrupt);
+  const id = mcpProductId(a.key);
+  const rec = raw.v2?.products[id];
+  if (!raw.v2 || !rec) {
+    let present = false;
+    try {
+      present = getByPointer(JSON.parse(readFileSync(target.mcpFile, "utf8")), `/mcpServers/${encodePointerToken(a.key)}`) !== undefined;
+    } catch {
+      present = false; // absent file
+    }
+    return present
+      ? entry("skipped", `mcpServers.${a.key} was not written by wicked-installer; not removed`)
+      : entry("skipped", `absent: no mcpServers.${a.key}`);
+  }
+  const actions: Action[] = [];
+  const refused = removeMarkerEntry(rec, target, options, actions);
+  const act = actions.find((x) => x.kind === "remove" || x.kind === "restore-prior");
+  if (refused > 0 || act?.result === "failed") return entry("failed", act?.detail ?? "removal refused; the marker record is kept");
+  let result: McpResult;
+  let detail: string;
+  let dropRecord = true;
+  if (act && (act.result === "ok" || act.result === "planned")) {
+    result = "removed";
+    detail = act.kind === "restore-prior" ? "restored the prior value recorded under --force" : "removed the entry this installer wrote";
+  } else if (act?.detail?.startsWith("user changed this")) {
+    result = "skipped";
+    detail = `skipped-modified: mcpServers.${a.key} changed since this installer wrote it; remove it manually (the marker record is kept)`;
+    dropRecord = false;
+  } else {
+    result = "skipped";
+    detail = `absent: ${act?.detail ?? "nothing recorded"}`;
+  }
+  if (options.dryRun) return result === "removed" ? entry("planned", `would be removed: ${detail}`) : entry(result, detail);
+  if (dropRecord) {
+    delete raw.v2.products[id];
+    try {
+      if (Object.keys(raw.v2.products).length === 0) {
+        const m = lstatChainNoFollow(target.dir, join("wicked-installer", "claude-install.json"));
+        if (m.exists && m.kind === "file") rmSync(m.abs, { force: true });
+        tryRemoveEmptyDir(target.dir, markerDirFor(target.dir), []);
+      } else {
+        raw.v2.updatedAt = new Date().toISOString();
+        flushMarkerV2(target.dir, raw.v2, options);
+      }
+    } catch (err) {
+      return entry("failed", `entry removed but the marker was not updated: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return entry(result, detail);
+}
+
+function printMcpHelp(): void {
+  console.log([
+    "install-claude mcp — write one MCP server into Claude Code's state file(s)",
+    "",
+    "Usage:",
+    "  install-claude mcp upsert <key> --command <bin> [--arg <a>]... [--claude-home <dir>]... [--force] [--dry-run] [--json]",
+    "  install-claude mcp remove <key> [--claude-home <dir>]... [--dry-run] [--json]",
+    "",
+    "No --env: the entry carries no environment; Claude Code launches the server with your shell environment.",
+  ].join("\n"));
+}
+
+function runMcp(argv: string[]): number {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    printMcpHelp();
+    return 0;
+  }
+  let a: McpArgs;
+  try {
+    a = parseMcpArgs(argv, ["--claude-home"]);
+  } catch (err) {
+    if (!(err instanceof McpUsageError)) throw err;
+    console.error(`Error: ${err.message}`);
+    return 2;
+  }
+  const options: Options = {
+    verb: "install", productIds: [], all: false, homeFlags: a.homes, registryPath: "", sourceRoot: "",
+    dryRun: a.dryRun, json: true, force: a.force, skipBinaries: true, purgeBinaries: false,
+  };
+  let resolution: Resolution;
+  try {
+    resolution = resolveTargets(options);
+  } catch (err) {
+    emitMcp(a, [{ cli: "claude", result: "failed", target: "", detail: err instanceof Error ? err.message : String(err) }]);
+    return 1;
+  }
+  const entries: McpEntry[] = [];
+  for (const target of resolution.targets) {
+    try {
+      entries.push(a.sub === "upsert" ? claudeMcpUpsert(a, target, options) : claudeMcpRemove(a, target, options));
+    } catch (err) {
+      entries.push({ cli: "claude", result: "failed", target: target.mcpFile, detail: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  emitMcp(a, entries);
+  return entries.some((e) => e.result === "failed") ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  // `mcp` is its own grammar (§12.5), routed before the product-verb parser.
+  if (process.argv[2] === "mcp") {
+    const code = runMcp(process.argv.slice(3));
+    if (code) process.exit(code);
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
   const registry = loadRegistry(options.registryPath);
 

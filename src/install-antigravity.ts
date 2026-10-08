@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { isInstallable } from "./types.js";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -663,7 +663,111 @@ async function installOne(product: Product, options: Options): Promise<InstallRe
   }
 }
 
+// ---------------------------------------------------------------------------
+// mcp verb (INTERFACE.md §12.5) — one ad-hoc MCP server, by key. Self-contained copy of the
+// verb grammar (§15: no shared modules between install scripts). No env is ever written: the
+// CLI host launches the server with the operator's shell environment.
+// ---------------------------------------------------------------------------
+
+const MCP_KEY_RE = /^[a-z][a-z0-9-]{0,63}$/;
+const MCP_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+type McpSub = "upsert" | "remove";
+type McpResult = "written" | "converged" | "updated" | "removed" | "skipped" | "unsupported" | "manual" | "failed" | "planned";
+interface McpEntry { cli: string; result: McpResult; target: string; detail: string }
+interface McpArgs { sub: McpSub; key: string; command?: string; args: string[]; homes: string[]; dryRun: boolean; json: boolean; force: boolean }
+
+class McpUsageError extends Error {}
+
+// Leading `~` only, function replacement (§1.1) so a `$&` in the home path cannot corrupt it.
+function mcpExpandHome(value: string): string {
+  return value.replace(/^~(?=$|[/\\])/, () => homedir());
+}
+
+function parseMcpArgs(argv: string[], homeFlags: string[]): McpArgs {
+  const [sub, key, ...rest] = argv;
+  if (sub !== "upsert" && sub !== "remove") throw new McpUsageError(`mcp: expected 'upsert' or 'remove', got ${JSON.stringify(sub ?? "")}`);
+  if (!key || !MCP_KEY_RE.test(key)) throw new McpUsageError(`mcp ${sub}: key ${JSON.stringify(key ?? "")} must match ^[a-z][a-z0-9-]{0,63}$`);
+  const out: McpArgs = { sub, key, args: [], homes: [], dryRun: false, json: false, force: false };
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    const name = arg.startsWith("--") && arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    const valued = name === "--command" || name === "--arg" || homeFlags.includes(name);
+    if (valued) {
+      let value: string | undefined;
+      if (arg !== name) value = arg.slice(name.length + 1);
+      else if (i + 1 < rest.length) { i += 1; value = rest[i]; }
+      if (value === undefined) throw new McpUsageError(`${name} requires a value`);
+      if (name === "--command") out.command = value;
+      else if (name === "--arg") out.args.push(value);
+      else out.homes.push(resolve(mcpExpandHome(value)));
+    } else if (arg === "--dry-run") out.dryRun = true;
+    else if (arg === "--json") out.json = true;
+    else if (arg === "--force") out.force = true;
+    else throw new McpUsageError(`unknown option: ${arg}`);
+  }
+  if (sub === "upsert") {
+    if (!out.command) throw new McpUsageError("mcp upsert: --command <bin> is required");
+    const cmd = mcpExpandHome(out.command);
+    if (MCP_CONTROL_CHARS.test(cmd)) throw new McpUsageError("--command: contains control characters");
+    if ((cmd.includes("/") || cmd.includes("\\")) && !isAbsolute(cmd)) throw new McpUsageError(`--command: ${JSON.stringify(out.command)} must be a bare command name or an absolute path`);
+    out.command = cmd;
+  }
+  return out;
+}
+
+function emitMcp(a: McpArgs, entries: McpEntry[]): void {
+  if (a.json) {
+    console.log(JSON.stringify({ verb: a.sub, key: a.key, command: a.command ?? null, args: a.args, dryRun: a.dryRun, clis: entries }, null, 2));
+    return;
+  }
+  for (const e of entries) console.log(`[${e.result}] ${e.cli}: ${e.target}${e.detail ? ` — ${e.detail}` : ""}`);
+}
+
+/** Parse + help for the verb; a number is the exit code to return without running. */
+function mcpArgsOrExit(argv: string[], homeFlags: string[], cli: string): McpArgs | number {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log([
+      `install-${cli} mcp — register one ad-hoc MCP server`,
+      "",
+      "Usage:",
+      `  install-${cli} mcp upsert <key> --command <bin> [--arg <a>]... [${homeFlags[0]} <dir>] [--force] [--dry-run] [--json]`,
+      `  install-${cli} mcp remove <key> [${homeFlags[0]} <dir>] [--dry-run] [--json]`,
+      "",
+      "No --env: the entry carries no environment; the CLI launches the server with your shell environment.",
+    ].join("\n"));
+    return 0;
+  }
+  try {
+    return parseMcpArgs(argv, homeFlags);
+  } catch (err) {
+    if (!(err instanceof McpUsageError)) throw err;
+    console.error(`Error: ${err.message}`);
+    return 2;
+  }
+}
+
+function runMcp(argv: string[]): number {
+  const parsed = mcpArgsOrExit(argv, ["--gemini-home", "--antigravity-home"], "antigravity");
+  if (typeof parsed === "number") return parsed;
+  const home = parsed.homes.length
+    ? parsed.homes[parsed.homes.length - 1]
+    : process.env.GEMINI_HOME ? resolve(mcpExpandHome(process.env.GEMINI_HOME)) : join(homedir(), ".gemini");
+  emitMcp(parsed, [{
+    cli: "antigravity",
+    result: "unsupported",
+    target: home,
+    detail: "unsupported: no stated MCP target (INTERFACE §8.3)",
+  }]);
+  return 0;
+}
+
 async function main(): Promise<void> {
+  // `mcp` is its own grammar (§12.5), routed before the product parser.
+  if (process.argv[2] === "mcp") {
+    const code = runMcp(process.argv.slice(3));
+    if (code) process.exit(code);
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
   const registry = loadRegistry(options.registryPath);
   const products = resolveProducts(registry, options.productIds, options.all);

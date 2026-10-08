@@ -5,6 +5,25 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`wicked-installer mcp upsert|remove <key>` — one ad-hoc MCP server into every CLI, idempotently
+  by key** (INTERFACE.md §12.5). `mcp upsert <key> --command <bin> [--arg <a>]... [--cli ...]
+  [--force] [--dry-run] --json` and `mcp remove <key>`; the key follows crew's registry rule
+  (`^[a-z][a-z0-9-]{0,63}$`). `index.ts` dispatches through the new `src/mcp-verb.ts`, and each
+  CLI's behaviour is a new verb mode of its own script (`install-<cli>.js mcp ...`). Claude:
+  `mcpServers.<key>` written through `wireMcp`'s invariants (backup, atomic write, converge by name,
+  foreign → `collision-skipped` unless `--force`) and recorded as `json-key` under the synthetic
+  product id `mcp-server:<key>`, so `status` and `uninstall --all` see it; `remove` deletes only the
+  value this installer wrote. Codex: `codex mcp get --json` / `mcp add` / `mcp remove`, with a notes
+  line in the v1 marker. OpenCode: `opencode mcp add` (state read from its config, since
+  `opencode mcp list` launches every server); `remove` is `manual` because opencode has no
+  `mcp remove`, and a numeric-looking argument is `manual` because opencode's argv parser would
+  write it as a number. Pi and Antigravity report `unsupported` (no stated MCP target, §8.3).
+  **No `--env`:** an entry carries no environment and no secret value is ever written. One JSON
+  envelope per invocation (`schemas/install-report.schema.json` `$defs.mcpEnvelope`); exit 0 unless
+  a CLI failed, 2 for bad arguments.
+
 ### Fixed
 
 - **`status` no longer reports installed products as "not installed" on a loaded host (#28).**

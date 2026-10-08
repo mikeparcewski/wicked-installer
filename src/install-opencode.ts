@@ -14,7 +14,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -983,7 +983,226 @@ async function installOne(product: Product, options: Options): Promise<InstallRe
   }
 }
 
+// ---------------------------------------------------------------------------
+// mcp verb (INTERFACE.md §12.5) — one ad-hoc MCP server, by key. Self-contained copy of the
+// verb grammar (§15: no shared modules between install scripts). No env is ever written: the
+// CLI host launches the server with the operator's shell environment.
+// ---------------------------------------------------------------------------
+
+const MCP_KEY_RE = /^[a-z][a-z0-9-]{0,63}$/;
+const MCP_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+type McpSub = "upsert" | "remove";
+type McpResult = "written" | "converged" | "updated" | "removed" | "skipped" | "unsupported" | "manual" | "failed" | "planned";
+interface McpEntry { cli: string; result: McpResult; target: string; detail: string }
+interface McpArgs { sub: McpSub; key: string; command?: string; args: string[]; homes: string[]; dryRun: boolean; json: boolean; force: boolean }
+
+class McpUsageError extends Error {}
+
+// Leading `~` only, function replacement (§1.1) so a `$&` in the home path cannot corrupt it.
+function mcpExpandHome(value: string): string {
+  return value.replace(/^~(?=$|[/\\])/, () => homedir());
+}
+
+function parseMcpArgs(argv: string[], homeFlags: string[]): McpArgs {
+  const [sub, key, ...rest] = argv;
+  if (sub !== "upsert" && sub !== "remove") throw new McpUsageError(`mcp: expected 'upsert' or 'remove', got ${JSON.stringify(sub ?? "")}`);
+  if (!key || !MCP_KEY_RE.test(key)) throw new McpUsageError(`mcp ${sub}: key ${JSON.stringify(key ?? "")} must match ^[a-z][a-z0-9-]{0,63}$`);
+  const out: McpArgs = { sub, key, args: [], homes: [], dryRun: false, json: false, force: false };
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    const name = arg.startsWith("--") && arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    const valued = name === "--command" || name === "--arg" || homeFlags.includes(name);
+    if (valued) {
+      let value: string | undefined;
+      if (arg !== name) value = arg.slice(name.length + 1);
+      else if (i + 1 < rest.length) { i += 1; value = rest[i]; }
+      if (value === undefined) throw new McpUsageError(`${name} requires a value`);
+      if (name === "--command") out.command = value;
+      else if (name === "--arg") out.args.push(value);
+      else out.homes.push(resolve(mcpExpandHome(value)));
+    } else if (arg === "--dry-run") out.dryRun = true;
+    else if (arg === "--json") out.json = true;
+    else if (arg === "--force") out.force = true;
+    else throw new McpUsageError(`unknown option: ${arg}`);
+  }
+  if (sub === "upsert") {
+    if (!out.command) throw new McpUsageError("mcp upsert: --command <bin> is required");
+    const cmd = mcpExpandHome(out.command);
+    if (MCP_CONTROL_CHARS.test(cmd)) throw new McpUsageError("--command: contains control characters");
+    if ((cmd.includes("/") || cmd.includes("\\")) && !isAbsolute(cmd)) throw new McpUsageError(`--command: ${JSON.stringify(out.command)} must be a bare command name or an absolute path`);
+    out.command = cmd;
+  }
+  return out;
+}
+
+function emitMcp(a: McpArgs, entries: McpEntry[]): void {
+  if (a.json) {
+    console.log(JSON.stringify({ verb: a.sub, key: a.key, command: a.command ?? null, args: a.args, dryRun: a.dryRun, clis: entries }, null, 2));
+    return;
+  }
+  for (const e of entries) console.log(`[${e.result}] ${e.cli}: ${e.target}${e.detail ? ` — ${e.detail}` : ""}`);
+}
+
+/** Parse + help for the verb; a number is the exit code to return without running. */
+function mcpArgsOrExit(argv: string[], homeFlags: string[], cli: string): McpArgs | number {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log([
+      `install-${cli} mcp — register one ad-hoc MCP server`,
+      "",
+      "Usage:",
+      `  install-${cli} mcp upsert <key> --command <bin> [--arg <a>]... [${homeFlags[0]} <dir>] [--force] [--dry-run] [--json]`,
+      `  install-${cli} mcp remove <key> [${homeFlags[0]} <dir>] [--dry-run] [--json]`,
+      "",
+      "No --env: the entry carries no environment; the CLI launches the server with your shell environment.",
+    ].join("\n"));
+    return 0;
+  }
+  try {
+    return parseMcpArgs(argv, homeFlags);
+  } catch (err) {
+    if (!(err instanceof McpUsageError)) throw err;
+    console.error(`Error: ${err.message}`);
+    return 2;
+  }
+}
+
+// Quote ONE argument for cmd.exe when spawning a .cmd shim with { shell: true } (§1.1 recipe, verbatim).
+function mcpWinQuote(arg: string): string {
+  if (arg === "") return '""';
+  if (/^[A-Za-z0-9_@+=:,./\\-]+$/.test(arg)) return arg;
+  let out = '"';
+  for (let i = 0; i < arg.length; ) {
+    let slashes = 0;
+    while (i < arg.length && arg[i] === "\\") { slashes += 1; i += 1; }
+    if (i === arg.length) { out += "\\".repeat(slashes * 2); break; }
+    else if (arg[i] === '"') { out += "\\".repeat(slashes * 2 + 1) + '"'; i += 1; }
+    else { out += "\\".repeat(slashes) + arg[i]; i += 1; }
+  }
+  return `${out}"`;
+}
+
+/**
+ * Spawn the CLI's own `mcp` subcommand (mechanism 2), output captured. On Windows an npm-installed
+ * CLI is a `.cmd` shim, which needs the §1.1 recipe (shell + winQuote); cmd.exe expands `%`/`!`
+ * even inside quotes, so user data carrying either is refused rather than passed through.
+ */
+function mcpSpawn(cmd: string, args: string[], env: NodeJS.ProcessEnv): { status: number | null; out: string; error?: string } {
+  let shim = false;
+  let exe = cmd;
+  if (process.platform === "win32") {
+    const where = spawnSync("where", [cmd], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const first = (where.stdout ?? "").split(/\r?\n/).find(Boolean)?.trim() ?? "";
+    shim = /\.(cmd|bat)$/i.test(first);
+    // Run exactly the shim `where` resolved (quoted: it may sit under "Program Files").
+    if (shim) exe = mcpWinQuote(first);
+    if (shim && [first, ...args].some((a) => /[%!]/.test(a))) {
+      return { status: null, out: "", error: `refused: ${cmd} is a .cmd shim and its path or an argument contains % or ! (cmd.exe would expand it); register this server by hand` };
+    }
+  }
+  const res = spawnSync(exe, shim ? args.map(mcpWinQuote) : args, {
+    env,
+    encoding: "utf8",
+    shell: shim,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 60000,
+  });
+  if (res.error) return { status: null, out: "", error: res.error.message };
+  return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+}
+
+function opencodeMcpHome(a: McpArgs): string {
+  if (a.homes.length) return a.homes[a.homes.length - 1];
+  return process.env.OPENCODE_CONFIG ? resolve(mcpExpandHome(process.env.OPENCODE_CONFIG)) : join(homedir(), ".config", "opencode");
+}
+
+// The file `opencode mcp add` reads and rewrites: an existing opencode.jsonc, else opencode.json,
+// else the .jsonc it creates (verified against opencode 1.18.x).
+function opencodeMcpFile(home: string): string {
+  const jsonc = join(home, "opencode.jsonc");
+  const json = join(home, "opencode.json");
+  return existsSync(jsonc) ? jsonc : existsSync(json) ? json : jsonc;
+}
+
+/**
+ * State is read from the config file `opencode mcp add` writes — read-only. `opencode mcp list` is
+ * not used: it launches every configured server to report its status.
+ */
+function opencodeMcpRead(file: string, a: McpArgs): { state: "absent" | "matches" | "drifted" } | { state: "error"; detail: string } {
+  if (!existsSync(file)) return { state: "absent" };
+  let cfg: unknown;
+  try {
+    cfg = JSON.parse(stripJsonc(readFileSync(file, "utf8")));
+  } catch (err) {
+    return { state: "error", detail: `cannot parse ${file} (${err instanceof Error ? err.message : String(err)}); fix or remove it and re-run` };
+  }
+  const mcp = cfg && typeof cfg === "object" ? (cfg as Record<string, unknown>).mcp : undefined;
+  const cur = mcp && typeof mcp === "object" ? (mcp as Record<string, unknown>)[a.key] : undefined;
+  if (cur === undefined) return { state: "absent" };
+  const c = (cur ?? {}) as Record<string, unknown>;
+  const same = c.type === "local"
+    && JSON.stringify(c.command) === JSON.stringify([a.command, ...a.args])
+    && (c.environment === undefined || (typeof c.environment === "object" && c.environment !== null && Object.keys(c.environment).length === 0))
+    && c.enabled !== false;
+  return { state: same ? "matches" : "drifted" };
+}
+
+// `opencode mcp add` parses its argv with yargs, which turns a numeric-looking token into a number:
+// `--arg 1` is written as `1`, and opencode then refuses its own config ("Expected string").
+const OPENCODE_NUMERIC = /^\s*[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?\s*$|^\s*0x[0-9a-f]+\s*$/i;
+
+function opencodeMcpEntry(a: McpArgs): McpEntry {
+  const home = opencodeMcpHome(a);
+  const file = opencodeMcpFile(home);
+  const entry = (result: McpResult, detail: string): McpEntry => ({ cli: "opencode", result, target: file, detail });
+  const st = opencodeMcpRead(file, a);
+  if (st.state === "error") return entry("failed", st.detail);
+  const byHand = JSON.stringify({ [a.key]: { type: "local", command: [a.command, ...a.args] } });
+  if (a.sub === "remove") {
+    if (st.state === "absent") return entry("skipped", `absent: no "mcp" entry named ${a.key}`);
+    return entry("manual", `opencode has no 'mcp remove'; delete the "${a.key}" entry under "mcp" in ${file}`);
+  }
+  if (st.state === "matches") return entry("converged", "already registered with this command and args");
+  if (basename(home) !== "opencode") {
+    return entry("manual", `config root ${home} is non-standard (its basename must be "opencode" to direct 'opencode mcp add'); add under "mcp" in ${file}: ${byHand}`);
+  }
+  if ([a.command ?? "", ...a.args].some((v) => OPENCODE_NUMERIC.test(v))) {
+    return entry("manual", `'opencode mcp add' would write a numeric-looking argument as a number (an invalid config); add under "mcp" in ${file}: ${byHand}`);
+  }
+  const addArgs = ["mcp", "add", a.key, "--", a.command ?? "", ...a.args];
+  const rendered = `opencode ${addArgs.join(" ")}`;
+  const result: McpResult = st.state === "absent" ? "written" : "updated";
+  if (a.dryRun) return entry("planned", `would be ${result}: ${rendered}`);
+  if (!commandExists("opencode")) return entry("failed", `opencode CLI not found on PATH; add under "mcp" in ${file}: ${byHand}`);
+  mkdirSync(home, { recursive: true });
+  const env = { ...process.env, XDG_CONFIG_HOME: dirname(home) };
+  const add = mcpSpawn("opencode", addArgs, env);
+  if (add.error || add.status !== 0) return entry("failed", `${rendered} failed: ${add.error ?? add.out.trim().slice(0, 300)}`);
+  // `mcp add` is read-modify-write and overwrites a same-name entry; confirm what it wrote.
+  const after = opencodeMcpRead(opencodeMcpFile(home), a);
+  if (after.state !== "matches") return entry("failed", `${rendered} exited 0 but ${opencodeMcpFile(home)} does not hold the requested entry`);
+  return entry(result, rendered);
+}
+
+function runMcp(argv: string[]): number {
+  const parsed = mcpArgsOrExit(argv, ["--opencode-home"], "opencode");
+  if (typeof parsed === "number") return parsed;
+  let e: McpEntry;
+  try {
+    e = opencodeMcpEntry(parsed);
+  } catch (err) {
+    e = { cli: "opencode", result: "failed", target: opencodeMcpHome(parsed), detail: err instanceof Error ? err.message : String(err) };
+  }
+  emitMcp(parsed, [e]);
+  return e.result === "failed" ? 1 : 0;
+}
+
 async function main(): Promise<void> {
+  // `mcp` is its own grammar (§12.5), routed before the product parser.
+  if (process.argv[2] === "mcp") {
+    const code = runMcp(process.argv.slice(3));
+    if (code) process.exit(code);
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
   const registry = loadRegistry(options.registryPath);
   const products = resolveProducts(registry, options.productIds, options.all);
