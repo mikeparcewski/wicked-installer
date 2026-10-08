@@ -5,6 +5,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
 ### Added
 
 - **`wicked-installer mcp upsert|remove <key>` — one ad-hoc MCP server into every CLI, idempotently
