@@ -391,7 +391,7 @@ test("status: per-dir verdict (registered / partial / copy only / not installed)
     assert.equal(b.status, 1, b.stdout + b.stderr);
     assert.match(b.stdout, /marketplace: not registered/);
     assert.match(b.stdout, /installed:\s+not installed/);
-    assert.match(b.stdout, /bare copy:\s+.*plugins[\\/]wicked-garden \(v12\.0\.0\) — copy only \(unregistered\).*left in place \(https:\/\/github\.com\/mikeparcewski\/wicked-installer\/issues\/20\)/);
+    assert.match(b.stdout, /bare copy:\s+.*plugins[\\/]wicked-garden \(v12\.0\.0\) — copy only \(unregistered\).*left in place — 'wicked-installer cleanup-legacy' removes it \(https:\/\/github\.com\/mikeparcewski\/wicked-installer\/issues\/20\)/);
     assert.match(b.stdout, /state:\s+~ copy only \(unregistered\)/);
     assert.match(b.stdout, /overall:\s+copy only \(unregistered\) across 1 config dir\(s\)/);
     assert.match(b.stdout, /not installed\s+wicked-garden/, "a bare copy is not 'installed' in the product list: Claude Code cannot load it");
@@ -472,12 +472,12 @@ test("status points out a bare copy in ~/.claude when that is not an active conf
   try {
     const r = run(sb, ["status"], { configDir: cfg });
     assert.equal(r.status, 1, "an empty active dir is not registered ⇒ exit 1");
-    assert.match(r.stdout, /is not an active config dir but holds a bare copy at .*plugins[\\/]wicked-garden \(v11\.0\.0\) — copy only \(unregistered\).*left in place \(https:\/\/github\.com\/mikeparcewski\/wicked-installer\/issues\/20\)/);
+    assert.match(r.stdout, /is not an active config dir but holds a bare copy at .*plugins[\\/]wicked-garden \(v11\.0\.0\) — copy only \(unregistered\).*left in place — 'wicked-installer cleanup-legacy' removes it \(https:\/\/github\.com\/mikeparcewski\/wicked-installer\/issues\/20\)/);
 
     // Installing into the active dir reports the legacy copy and leaves it exactly where it was.
     const i = run(sb, ["install", "wicked-garden"], { configDir: cfg });
     assert.equal(i.status, 0, i.stdout + i.stderr);
-    assert.match(i.stdout, new RegExp(`legacy wicked-garden copy detected at ${escapeRe(join(sb.home, ".claude", "plugins", "wicked-garden"))} — left in place; removal will ship separately \\(see https://github\\.com/mikeparcewski/wicked-installer/issues/20\\)`));
+    assert.match(i.stdout, new RegExp(`legacy wicked-garden copy detected at ${escapeRe(join(sb.home, ".claude", "plugins", "wicked-garden"))} — left in place; remove it with 'wicked-installer cleanup-legacy' \\(see https://github\\.com/mikeparcewski/wicked-installer/issues/20\\)`));
     assert.match(i.stdout, /1 legacy copy left in place/);
     assert.equal(readFileSync(join(legacy, "plugin.json"), "utf8"), JSON.stringify({ name: "wicked-garden", version: "11.0.0" }), "the legacy copy is untouched");
   } finally {

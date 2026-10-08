@@ -58,6 +58,19 @@ every product type prints its plan and nothing is installed or written — the o
 a dry run may start is the read-only `claude --version` probe the Claude plugin plan is
 derived from.
 
+### `cleanup-legacy` — remove old unregistered wicked-garden copies
+
+```
+npx wicked-installer cleanup-legacy --dry-run   # what would be removed
+npx wicked-installer cleanup-legacy
+```
+
+Earlier installers left copies Claude Code never loads: a bare `~/.claude/plugins/wicked-garden/` and
+skills/hooks recorded by an older `install-claude.js`. `install` only reports them. This verb removes
+them, per config dir, only once the plugin is registered there and every entry is proven to be
+garden's own. One refused entry removes nothing in that dir and exits 1. Nothing outside the config
+dir is touched. Contract: INTERFACE.md §12.6.
+
 ### `mcp` — one MCP server, every CLI
 
 ```

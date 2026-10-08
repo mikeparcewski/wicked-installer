@@ -582,6 +582,30 @@ install-<cli> mcp upsert|remove <key> ...          (the per-CLI verb mode the di
 
 **Exit codes.** `0` when no entry is `failed` (`skipped`, `unsupported` and `manual` are not failures); `1` when any entry failed, or when no CLI was selected (`--cli all` detected none); `2` for bad arguments (key rule, missing `--command` on upsert, relative `--command`, unknown `--cli`/option, `--env`). A corrupt `.claude.json` fails that CLI with "fix or remove `<file>` and re-run" and leaves the file byte-identical (§8.3 invariant 2).
 
+### 12.6 `cleanup-legacy` (central installer; issue #20)
+
+Removes the **legacy, unregistered** copies of a Claude Code plugin (wicked-garden) that earlier installers left in a Claude config dir — the bare `plugins/<plugin>/` copy (`npx wicked-garden install`) and the skills/hooks/MCP entries an earlier `install-claude.js` recorded for it in its marker — **only where ownership is proven**. `install` keeps detecting and reporting these copies and names this verb; it never removes them.
+
+```
+wicked-installer cleanup-legacy [--claude-home <dir>]... [--dry-run] [--json]
+```
+
+**Decisions.**
+- **Opt-in verb, not automatic on install.** The removal is driven by data on disk (a marker), so it runs only when the operator asks. Install never deletes.
+- **Registration first.** For each config dir (§11.1 resolution: `--claude-home`, else `CLAUDE_CONFIG_DIR`, else `~/.claude`), the plugin registration is re-derived from disk (`registrationVerdict`). Unless it is `registered`, nothing is removed and the dir reports `blocked`.
+- **Positive ownership per entry, validated before anything is touched:**
+  - Marker paths must be relative, with no empty/`.`/`..` segment, no drive and no `~`. Every component below the config dir is lstat'd (a symlink anywhere is refused, never followed), and the leaf must be realpath-contained in the dir.
+  - `dir`/`file` records are removed only on the allow-list: `skills/<product>*` (a real directory whose `SKILL.md` is a regular file carrying the product id), or `wicked-installer/products/<product>/…`.
+  - `json-key` is accepted only for `/mcpServers/<name>` in this dir's own `.claude.json`. The value must still hash to `wroteHash`, and a recorded `prior` is restored. **No exception for the default home's `~/.claude.json`:** a cleanup of dir X touches nothing outside X, so such a record is refused (remove that key by hand).
+  - `hooks-entry` is accepted only in this dir's `settings.json`, on a well-formed event name, with the product's own owner key `wicked-installer/products/<product>`. Only hook groups carrying that key are removed.
+  - The bare copy is removed only when it is a real directory whose `.claude-plugin/plugin.json` is a regular file naming the plugin.
+  - A v1 marker entry, or a v2 record without a file manifest, cannot prove ownership. It is refused, and its copies are left for the operator.
+- **All or nothing per dir.** If one entry is refused, nothing in that dir is removed, the marker record is kept, the dir reports `failed`, and the run exits 1.
+- **Order.** Config edits (one backup under `wicked-installer/backups/` plus an atomic replace per file), then recorded paths, then the bare copy, then the marker. The marker record is dropped only after every removal has succeeded; the marker file is deleted when no product is left in it. A failure part-way stops the run and keeps the record, and a re-run treats already-removed entries as `absent`.
+- `--dry-run` reports exactly the removals that would happen (`planned`), under the same rules, and writes nothing.
+
+**Output.** `--json` prints `$defs.cleanupLegacyEnvelope`: `{verb: "cleanup-legacy", dryRun, dirs: [{configDir, productId, registration, result, removals: [{kind, target, result, detail}]}]}`. Dir `result` is one of `cleaned | planned | nothing | blocked | failed`. Removal `result` is one of `removed | planned | absent | kept | refused | failed`. **Exit:** 0 when no dir is `failed`/`blocked`, 1 otherwise, 2 for bad arguments.
+
 ---
 
 ## 13. Dry-run guarantees

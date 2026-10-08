@@ -306,7 +306,7 @@ async function installClaudePlugin(
   // copy recorded by an earlier install-claude.js) are reported and LEFT IN PLACE — never removed here.
   const legacy = options.preDetectedLegacy ?? [...new Set([...configDirs.dirs, join(homedir(), ".claude")].flatMap((dir) => detectLegacyCopies(dir, spec)))];
   if (options.preDetectedLegacy === undefined) {
-    for (const path of legacy) log(`  legacy ${id} copy detected at ${path} — left in place; removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`);
+    for (const path of legacy) log(`  legacy ${id} copy detected at ${path} — left in place; remove it with 'wicked-installer cleanup-legacy' (see ${LEGACY_CLEANUP_ISSUE})`);
   }
   const legacyNote = legacy.length > 0 ? `; ${legacy.length} legacy cop${legacy.length === 1 ? "y" : "ies"} left in place (see ${LEGACY_CLEANUP_ISSUE})` : "";
   const note = (install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "") + legacyNote;

@@ -299,7 +299,7 @@ test("install-claude.js uninstall of a plugin removes NOTHING — legacy assets 
     assert.match(garden.message, /Claude Code plugin — nothing removed by this script/);
     assert.deepEqual(garden.actions, []);
     assert.ok(garden.notes.some((n) => /remove it with: claude plugin uninstall wicked-garden@wicked-garden/.test(n)), JSON.stringify(garden.notes));
-    assert.ok(garden.notes.some((n) => /a legacy copy recorded in .*claude-install\.json is left in place — removal will ship separately \(see .*issues\/20\)/.test(n)), JSON.stringify(garden.notes));
+    assert.ok(garden.notes.some((n) => /a legacy copy recorded in .*claude-install\.json is left in place — remove it with 'wicked-installer cleanup-legacy' \(see .*issues\/20\)/.test(n)), JSON.stringify(garden.notes));
     assert.deepEqual(snapshot(sb.cfg), before, "legacy skill copy, marker and settings.json are byte-identical after `uninstall wicked-garden`");
 
     // A v1 (array) marker: same — nothing rewritten, not even the marker's shape.
@@ -388,8 +388,8 @@ test("dispatch: the Claude script gets the products WITHOUT garden; garden is re
     assert.match(out, /Wicked Garden\s+ok/, "the summary grid shows garden ok under Claude Code");
 
     // Legacy copies: reported, one line each, and left exactly as they were.
-    assert.match(out, new RegExp(`legacy wicked-garden copy detected at ${escapeRe(join(sb.cfg, "plugins", "wicked-garden"))} — left in place; removal will ship separately \\(see ${escapeRe(ISSUE)}\\)`));
-    assert.match(out, new RegExp(`legacy wicked-garden copy detected at ${escapeRe(markerPath(sb.cfg))} \\(install-claude\\.js marker: 1 recorded path\\(s\\)\\) — left in place; removal will ship separately \\(see ${escapeRe(ISSUE)}\\)`));
+    assert.match(out, new RegExp(`legacy wicked-garden copy detected at ${escapeRe(join(sb.cfg, "plugins", "wicked-garden"))} — left in place; remove it with 'wicked-installer cleanup-legacy' \\(see ${escapeRe(ISSUE)}\\)`));
+    assert.match(out, new RegExp(`legacy wicked-garden copy detected at ${escapeRe(markerPath(sb.cfg))} \\(install-claude\\.js marker: 1 recorded path\\(s\\)\\) — left in place; remove it with 'wicked-installer cleanup-legacy' \\(see ${escapeRe(ISSUE)}\\)`));
     assert.match(out, /2 legacy copies left in place/);
     assert.equal(readFileSync(join(sb.cfg, "skills", "wicked-garden-core", "SKILL.md"), "utf8"), legacyBefore.skill, "legacy skill copy untouched");
     assert.equal(readFileSync(join(sb.cfg, "plugins", "wicked-garden", ".claude-plugin", "plugin.json"), "utf8"), legacyBefore.bare, "bare copy untouched");
