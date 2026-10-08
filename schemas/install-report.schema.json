@@ -145,6 +145,45 @@
         }
       },
       "additionalProperties": false
+    },
+    "cleanupLegacyEnvelope": {
+      "title": "`cleanup-legacy` verb envelope (INTERFACE.md §12.6)",
+      "description": "Printed by `wicked-installer cleanup-legacy --json`: one report per (config dir, claude-plugin product). Exit 0 when no report is `failed`/`blocked`, 1 otherwise, 2 for bad arguments.",
+      "type": "object",
+      "required": ["verb", "dryRun", "dirs"],
+      "properties": {
+        "verb": { "type": "string", "enum": ["cleanup-legacy"] },
+        "dryRun": { "type": "boolean" },
+        "dirs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["configDir", "productId", "registration", "result", "removals"],
+            "properties": {
+              "configDir": { "type": "string" },
+              "productId": { "type": "string" },
+              "registration": { "type": "string", "description": "The re-derived plugin registration verdict for this dir." },
+              "result": { "type": "string", "enum": ["cleaned", "planned", "nothing", "blocked", "failed"] },
+              "removals": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["kind", "target", "result", "detail"],
+                  "properties": {
+                    "kind": { "type": "string", "enum": ["bare-copy", "dir", "file", "json-key", "hooks-entry", "marker-entry"] },
+                    "target": { "type": "string" },
+                    "result": { "type": "string", "enum": ["removed", "planned", "absent", "kept", "refused", "failed"] },
+                    "detail": { "type": "string" }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

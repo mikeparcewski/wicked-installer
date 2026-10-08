@@ -2621,7 +2621,7 @@ function pluginUninstallNotice(product: Product, resolution: Resolution, markers
       ? m.v2.products[product.id] !== undefined
       : (m?.legacy?.products?.some((p) => p.id === product.id) ?? false);
     if (recorded) {
-      notes.push(`${target.dir}: a legacy copy recorded in ${markerPathFor(target.dir)} is left in place — removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`);
+      notes.push(`${target.dir}: a legacy copy recorded in ${markerPathFor(target.dir)} is left in place — remove it with 'wicked-installer cleanup-legacy' (see ${LEGACY_CLEANUP_ISSUE})`);
     }
   }
   return {

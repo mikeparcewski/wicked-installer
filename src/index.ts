@@ -224,7 +224,7 @@ function reportLegacyCopies(pluginIds: string[], flags: DispatchFlags): Record<s
     const spec = claudePluginSpec(product);
     found[id] = [...new Set(dirs.flatMap((dir) => detectLegacyCopies(dir, spec)))];
     for (const path of found[id]) {
-      console.log(chalk.dim(`  legacy ${id} copy detected at ${path} — left in place; removal will ship separately (see ${LEGACY_CLEANUP_ISSUE})`));
+      console.log(chalk.dim(`  legacy ${id} copy detected at ${path} — left in place; remove it with 'wicked-installer cleanup-legacy' (see ${LEGACY_CLEANUP_ISSUE})`));
     }
   }
   return found;
@@ -617,7 +617,7 @@ function renderPluginRegistration(flags: DispatchFlags): RegistrationState | und
     console.log(`    cache:       ${reg.cacheVersions.length > 0 ? reg.cacheVersions.join(", ") : chalk.dim("none")}  ${chalk.dim(cacheRoot(dir, spec))}`);
     if (reg.enabled !== undefined) console.log(`    enabled:     ${reg.enabled ? chalk.green("yes") : chalk.yellow("no")}  ${chalk.dim("settings.json enabledPlugins")}`);
     if (reg.bareCopy) {
-      console.log(`    bare copy:   ${chalk.yellow(`${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it; left in place (${LEGACY_CLEANUP_ISSUE})`)}`);
+      console.log(`    bare copy:   ${chalk.yellow(`${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it; left in place — 'wicked-installer cleanup-legacy' removes it (${LEGACY_CLEANUP_ISSUE})`)}`);
     }
     const state = verdict.state === "registered"
       ? chalk.green(`✓ ${describeVerdict(verdict)}`)
@@ -637,7 +637,7 @@ function renderPluginRegistration(flags: DispatchFlags): RegistrationState | und
   if (!dirs.includes(defaultHome)) {
     const reg = readRegistration(defaultHome, spec);
     if (reg.bareCopy) {
-      console.log(chalk.yellow(`  ${defaultHome} is not an active config dir but holds a bare copy at ${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it; left in place (${LEGACY_CLEANUP_ISSUE})`));
+      console.log(chalk.yellow(`  ${defaultHome} is not an active config dir but holds a bare copy at ${reg.bareCopy.path}${reg.bareCopy.version ? ` (v${reg.bareCopy.version})` : ""} — copy only (unregistered); Claude Code does not load it; left in place — 'wicked-installer cleanup-legacy' removes it (${LEGACY_CLEANUP_ISSUE})`));
     }
   }
 
@@ -702,6 +702,7 @@ function printHelp(): void {
     "  wicked-installer install <ids>   Install specific products (space-separated, direct)",
     "  wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)",
     "  wicked-installer mcp upsert|remove <key>  Write/remove one MCP server in your CLIs' MCP configs (`mcp --help`)",
+    "  wicked-installer cleanup-legacy  Remove legacy unregistered wicked-garden copies whose ownership is proven",
     "  wicked-installer status          Show detected CLIs, installed products, and wicked-garden's Claude Code registration",
     "  wicked-installer --version       Show version",
     "",
@@ -766,6 +767,10 @@ async function main(): Promise<void> {
   if (argv[0] === "mcp") {
     const { runMcpVerb } = await import("./mcp-verb.js");
     process.exit(await runMcpVerb(argv.slice(1)));
+  }
+  if (argv[0] === "cleanup-legacy") {
+    const { runCleanupLegacy } = await import("./legacy-cleanup.js");
+    process.exit(await runCleanupLegacy(argv.slice(1)));
   }
 
   if (argv.includes("--version") || argv.includes("-v")) {

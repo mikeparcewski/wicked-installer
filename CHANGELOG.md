@@ -5,6 +5,21 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`wicked-installer cleanup-legacy [--claude-home <dir>]... [--dry-run] [--json]` removes the legacy,
+  unregistered wicked-garden copies, and only where ownership is proven (#20, INTERFACE.md §12.6).**
+  Opt-in; `install` still only reports these copies, and now names this verb. Per config dir it
+  removes nothing unless the plugin registration there is re-derived as `registered`. Every marker
+  record is validated before anything is touched: relative paths only, every component lstat'd (no
+  symlink anywhere), realpath-contained; an allow-list of `skills/wicked-garden*` with the product
+  signature and `wicked-installer/products/wicked-garden/`; `json-key` only for `/mcpServers/<name>`
+  in this dir's own `.claude.json` and only while it still hashes to `wroteHash` (never the default
+  home's `~/.claude.json`); `hooks-entry` only with the product's own owner key. The bare
+  `plugins/wicked-garden` copy goes only when its plugin.json names the plugin. One refused entry
+  removes nothing in that dir, keeps the marker record and exits 1. Config files are backed up
+  before an atomic rewrite, and the marker record is dropped last. New `$defs.cleanupLegacyEnvelope`.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added
