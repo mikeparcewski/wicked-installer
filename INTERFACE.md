@@ -102,6 +102,8 @@ verb := install | status | uninstall        (v1.1; default: install)
 
 v1 scripts implement only the implicit `install` verb. That is conforming.
 
+The `mcp` verb (§12.5) has its own grammar — `install-<cli> mcp upsert|remove <key> ...` — and is routed before verb detection, so it never collides with a product id.
+
 ### 3.2 Flags (shared, argv-compatible with install-codex)
 
 Every value flag MUST accept both `--flag value` and `--flag=value` (slice from the FIRST `=` so values containing `=` survive). Values are tilde-expanded (§1.1) then made absolute with `resolve()`.
@@ -316,6 +318,8 @@ Target file (claude): for the default `~/.claude` home, `~/.claude.json` (top-le
 5. **Tilde expansion** of `command`/`env` values per §4.1 at write time.
 6. **Marker:** every added key recorded as a `json-key` record (§10.2) so uninstall can remove exactly it.
 7. **Missing file tolerated:** create one containing only `{ "mcpServers": { ... } }`.
+
+**The `mcp` verb reuses mechanism 1's invariants for claude (§12.5).** `wicked-installer mcp upsert <key>` wires a synthetic one-entry block `{[key]: {command, args}}` through the same read-modify-write path (backup, atomic write, converge per server name, `collision-skipped` unless `--force`) and records it as a `json-key` under the synthetic product id `mcp-server:<key>`; codex and opencode take the verb through mechanism 2 (their own `mcp add`). Pi and the Gemini family stay unwired: the verb reports them `unsupported` until a target is stated here and verified.
 
 ### 8.4 Hooks wiring (claude: `<configDir>/settings.json`, event-keyed arrays)
 
@@ -550,6 +554,34 @@ Integrity spot-checks feed the `stale` verdict: every recorded `files[]` path ex
 
 (Illustration, non-normative: the claude reference performs this on install — it sweeps `commands/<id>/` and `agents/<id>-*.md`, plus pre-0.3 bare-name skill dirs and the old hardcoded `~/.claude/plugins/wicked-garden/` tree, each signature-gated, emitting `migrate-removed`. Its slug-specific set is its own; the REQUIRED behavior for *your* script is the product-prefixed rule above.)
 
+### 12.5 `mcp` (one ad-hoc MCP server, by key)
+
+Writes ONE MCP server — not a registry product — into the operator's CLI MCP configurations, idempotently by key, and removes it again. Built for a running process (wicked-crew's `mcp-server` workflow `install` phase, through wicked-garden's `scripts/mcp/install.py`).
+
+```
+wicked-installer mcp upsert <key> --command <bin> [--arg <a>]... [--cli all|<cli>[,<cli>...]] [--force] [--dry-run] [--json] [--<cli>-home <dir>]...
+wicked-installer mcp remove <key> [--cli ...] [--dry-run] [--json] [--<cli>-home <dir>]...
+install-<cli> mcp upsert|remove <key> ...          (the per-CLI verb mode the dispatcher spawns)
+```
+
+- `<key>` matches `^[a-z][a-z0-9-]{0,63}$` (crew's registry and the garden scaffold use the same rule) and is the server name in every CLI.
+- `--command` is a bare command name or an absolute path; a leading `~` is expanded (§1.1). A relative path with a separator is refused. `--arg` is repeatable; values pass through untouched and in order (a value may begin with `-`).
+- `--cli` defaults to `all` = every CLI whose `dist/install-<cli>.js` is bundled and whose home or command is detected (`detectCli`, §11.2), plus any CLI given an explicit `--<cli>-home`. Home flags: `--claude-home` (repeatable, §11.1), `--codex-home`, `--opencode-home`, `--gemini-home` (alias `--antigravity-home`), `--pi-home`.
+- **No `--env`.** An entry written by this verb carries no environment: the CLI host launches the server with the operator's shell environment, and the one secret a server needs is named by the server's own documentation. No secret value is ever written into a CLI config. `--env` is rejected as a bad argument.
+- `index.ts` stays a dispatcher: it validates the arguments, selects CLIs and runs `process.execPath dist/install-<cli>.js mcp ... --json` for each, sequentially; every CLI's behaviour lives in its own script (§2.1 ownership).
+
+| CLI | Mechanism | `upsert` | `remove` |
+|---|---|---|---|
+| claude | 1 (§8.3) | every §11.1 target: `mcpServers.<key>` in `.claude.json` via `wireMcp` — backup, atomic write, converge by name; foreign value → `skipped` (collision-skipped) unless `--force` (prior kept in the marker); `json-key` marker record under product id `mcp-server:<key>`, so `status` and `uninstall --all` see it | deletes the key when its hash matches our `wroteHash` (restores a `--force` prior), else `skipped` (skipped-modified, record kept); a key we never wrote is never removed |
+| codex | 2 | state from `codex mcp get <key> --json`; absent → `codex mcp add <key> -- <command> <args...>`; different → `codex mcp remove <key>` then add; `CODEX_HOME` = the codex home. The v1 marker gains a product entry `mcp-server:<key>` whose notes line names the registration (shape unchanged) | `codex mcp remove <key>`; entry dropped from the marker |
+| opencode | 2 | state read from the config `opencode mcp add` writes (`opencode.jsonc`, else `opencode.json`) — `opencode mcp list` is not used because it launches every configured server; absent/different → `opencode mcp add <key> -- <command> <args...>` (`XDG_CONFIG_HOME` = the home's parent), then re-read to confirm. A numeric-looking argument, or a home whose basename is not `opencode`, is `manual` with the exact JSON to add: opencode's argv parser writes `3000` as a number, which opencode then rejects | `manual`: opencode has no `mcp remove`; the detail names the entry to delete and the file |
+| pi | — | `unsupported` (no `pi mcp`, no mcpServers map; §8.3) | `unsupported` |
+| antigravity | — | `unsupported: no stated MCP target (INTERFACE §8.3)` | same |
+
+**Output.** `--json` prints one envelope (`schemas/install-report.schema.json` `$defs.mcpEnvelope`): `{verb, key, command, args, dryRun, clis: [{cli, result, target, detail}]}`, `result` ∈ `written | converged | updated | removed | skipped | unsupported | manual | failed | planned`. Each script prints the same envelope for its own CLI and the dispatcher concatenates their `clis`. `--dry-run` writes nothing (read-only state probes such as `codex mcp get` may run) and reports `planned`. Human output is one line per CLI entry, as `status` renders.
+
+**Exit codes.** `0` when no entry is `failed` (`skipped`, `unsupported` and `manual` are not failures); `1` when any entry failed, or when no CLI was selected (`--cli all` detected none); `2` for bad arguments (key rule, missing `--command` on upsert, relative `--command`, unknown `--cli`/option, `--env`). A corrupt `.claude.json` fails that CLI with "fix or remove `<file>` and re-run" and leaves the file byte-identical (§8.3 invariant 2).
+
 ---
 
 ## 13. Dry-run guarantees
@@ -564,6 +596,8 @@ Integrity spot-checks feed the `stale` verdict: every recorded `files[]` path ex
 ## 14. Central picker (`src/index.ts` becomes the dispatcher)
 
 Flow: existing product/bundle picker → dependency resolution (resolver.ts unchanged) → CLI detection (§11.2 signals + glob of `dist/install-*.js` next to `dist/index.js`) → multi-select CLIs → spawn each selected script **sequentially** as `process.execPath dist/install-<cli>.js <ids...> --json` (never rely on shebangs — Windows), appending `--skip-binaries` for the 2nd..nth, passing through `--dry-run`/`--force` → parse each stdout (tail JSON object; tolerate v1 shape, absent verbs, absent mcp support) → render one aggregate product × CLI summary table → exit 1 if any script exited nonzero or any report failed; treat exit 2 as "CLI not present", not an error. A script whose stdout fails to parse is reported failed with its raw tail attached.
+
+**The `mcp` verb (§12.5)** is dispatched the same way, without the picker: `src/mcp-verb.ts` parses `mcp upsert|remove <key>`, selects CLIs (`--cli`, default every bundled script whose CLI is detected), spawns `process.execPath dist/install-<cli>.js mcp ... --json` per CLI and concatenates the `clis` entries of their envelopes; a script that prints no envelope is reported `failed` with its stderr tail.
 
 **Offer rule:** a CLI is offered iff `dist/install-<cli>.js` exists — shipping the script IS registering with the picker; no adapters registry exists. Preselected when either detection signal fires; shown unchecked with "not detected — home will be created" when neither fires (selecting it is allowed). A CLI with no install script is never offered.
 

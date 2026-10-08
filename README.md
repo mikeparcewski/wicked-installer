@@ -36,6 +36,7 @@ npx wicked-installer                 Interactive install
 npx wicked-installer list            List available products
 npx wicked-installer install <ids>   Install specific products (space-separated)
 npx wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)
+npx wicked-installer mcp upsert|remove <key>   Write/remove one MCP server in your CLIs
 npx wicked-installer status          Show detected CLIs, installed products, and
                                      wicked-garden's Claude Code registration
 npx wicked-installer --version
@@ -56,6 +57,31 @@ installs each product directly, and exits 1 if any of them failed. With `--dry-r
 every product type prints its plan and nothing is installed or written — the only process
 a dry run may start is the read-only `claude --version` probe the Claude plugin plan is
 derived from.
+
+### `mcp` — one MCP server, every CLI
+
+```
+npx wicked-installer mcp upsert acme-notes --command node --arg ~/acme/dist/server.js --json
+npx wicked-installer mcp remove acme-notes --json
+```
+
+Writes one MCP server (not a registry product) into each detected CLI, idempotently by key
+(`^[a-z][a-z0-9-]{0,63}$`): a re-run with the same command and args reports `converged` and
+writes nothing. `--cli all|claude,codex,opencode,antigravity,pi` picks targets (default: every
+detected CLI), `--dry-run` writes nothing, `--force` lets claude overwrite a same-name entry
+this installer did not write, and `--<cli>-home <dir>` points at a non-default home.
+
+| CLI | How |
+|---|---|
+| Claude Code | `mcpServers.<key>` in `.claude.json` (backup, atomic write, recorded as `mcp-server:<key>` so `status`/`uninstall` see it) |
+| Codex | `codex mcp add` / `codex mcp remove` |
+| OpenCode | `opencode mcp add`; remove is a manual step (opencode has no `mcp remove`) |
+| Pi, Antigravity | `unsupported` — no stated MCP target |
+
+There is no `--env`: the entry carries no environment, and the CLI launches the server with
+your shell environment — export the secret the server's documentation names there. `--json`
+prints one envelope `{verb, key, command, args, dryRun, clis: [{cli, result, target, detail}]}`;
+exit 0 unless a CLI failed, 2 for bad arguments. Contract: INTERFACE.md §12.5.
 
 ---
 

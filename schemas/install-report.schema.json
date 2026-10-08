@@ -116,5 +116,35 @@
         }
       ]
     }
-  ]
+  ],
+  "$defs": {
+    "mcpEnvelope": {
+      "title": "`mcp` verb envelope (INTERFACE.md §12.5)",
+      "description": "Printed by `wicked-installer mcp upsert|remove <key> --json` (and by each `install-<cli>.js mcp ...` for its own CLI): one entry per CLI target. An additive definition, not a per-CLI install report. Exit 0 when no entry is `failed`, 1 otherwise, 2 for bad arguments.",
+      "type": "object",
+      "required": ["verb", "key", "command", "args", "clis"],
+      "properties": {
+        "verb": { "type": "string", "enum": ["upsert", "remove"] },
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+        "command": { "type": ["string", "null"], "description": "Bare command name or absolute path (leading ~ expanded); null on a remove given no --command." },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "dryRun": { "type": "boolean" },
+        "clis": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cli", "result", "target", "detail"],
+            "properties": {
+              "cli": { "type": "string" },
+              "result": { "type": "string", "enum": ["written", "converged", "updated", "removed", "skipped", "unsupported", "manual", "failed", "planned"] },
+              "target": { "type": "string", "description": "The config file (or home) the entry lives in." },
+              "detail": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

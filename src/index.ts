@@ -701,6 +701,7 @@ function printHelp(): void {
     "  wicked-installer list            List available products",
     "  wicked-installer install <ids>   Install specific products (space-separated, direct)",
     "  wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)",
+    "  wicked-installer mcp upsert|remove <key>  Write/remove one MCP server in your CLIs' MCP configs (`mcp --help`)",
     "  wicked-installer status          Show detected CLIs, installed products, and wicked-garden's Claude Code registration",
     "  wicked-installer --version       Show version",
     "",
@@ -759,6 +760,13 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+
+  // `mcp` has its own grammar (repeatable --arg values may look like flags) and its own --help:
+  // routed before the shared parser (INTERFACE.md §12.5).
+  if (argv[0] === "mcp") {
+    const { runMcpVerb } = await import("./mcp-verb.js");
+    process.exit(await runMcpVerb(argv.slice(1)));
+  }
 
   if (argv.includes("--version") || argv.includes("-v")) {
     console.log(VERSION);
