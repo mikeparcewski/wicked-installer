@@ -28,7 +28,17 @@
             "WICKED_XEDGE_DB": "~/.wicked/xedge.db"
           }
         }
-      }
+      },
+      "capabilities": [
+        {
+          "id": "code-graph",
+          "label": "code graph + memory/knowledge MCP server",
+          "needs": [
+            { "kind": "backend", "bin": "wicked-estate", "product": "wicked-estate" },
+            { "kind": "backend", "bin": "wicked-estate-mcp", "product": "wicked-estate" }
+          ]
+        }
+      ]
     },
     {
       "id": "wicked-bus",
@@ -58,7 +68,8 @@
         "package": "wicked-testing",
         "command": "install"
       },
-      "note": "Retired. npm package deprecated at 0.11.0. Do not install — use wicked-garden (qe domain) + wicked-crew instead."
+      "note": "Retired. npm package deprecated at 0.11.0. Do not install — use wicked-garden (qe domain) + wicked-crew instead.",
+      "successors": ["wicked-garden", "wicked-crew"]
     },
     {
       "id": "wicked-brain",
@@ -73,7 +84,8 @@
         "type": "npm-global",
         "package": "wicked-brain"
       },
-      "note": "Retired. npm package deprecated. Use wicked-estate instead — it ships all memory/knowledge/search capabilities. ~/.wicked-brain on disk is a frozen archive; never delete it."
+      "note": "Retired. npm package deprecated. Use wicked-estate instead — it ships all memory/knowledge/search capabilities. ~/.wicked-brain on disk is a frozen archive; never delete it.",
+      "successors": ["wicked-estate", "wicked-garden"]
     },
     {
       "id": "wicked-vault",
@@ -108,7 +120,35 @@
         "pluginId": "wicked-garden@wicked-garden",
         "mcpInstructions": "Run /wicked-garden-core setup in Claude Code to complete configuration (verifies peers; blocks only on wicked-vault, the one the evidence gate needs)."
       },
-      "note": "Opinionated bundle — you get everything. Individual components cannot be disabled."
+      "note": "Opinionated bundle — you get everything. Individual components cannot be disabled.",
+      "capabilities": [
+        {
+          "id": "skill-scripts",
+          "label": "script-backed skills (copied skills on Codex / OpenCode / Pi / Antigravity)",
+          "hosts": ["codex", "opencode", "pi", "antigravity"],
+          "needs": [
+            { "kind": "launcher", "bin": "wicked-garden", "npx": "wicked-garden", "doctor": ["doctor"] },
+            { "kind": "python", "min": "3.10" }
+          ]
+        },
+        {
+          "id": "plugin-scripts",
+          "label": "plugin hooks + scripts (Claude Code)",
+          "hosts": ["claude"],
+          "needs": [{ "kind": "python", "min": "3.10" }]
+        },
+        {
+          "id": "evidence-gate",
+          "label": "evidence gate",
+          "needs": [{ "kind": "backend", "bin": "wicked-vault", "npx": "wicked-vault" }]
+        },
+        {
+          "id": "mem-search",
+          "label": "mem / search / code graph",
+          "optional": true,
+          "needs": [{ "kind": "backend", "bin": "wicked-estate-mcp", "product": "wicked-estate" }]
+        }
+      ]
     },
     {
       "id": "wicked-interactive",
@@ -153,7 +193,14 @@
       "install": {
         "type": "npm-global",
         "package": "wicked-crew"
-      }
+      },
+      "capabilities": [
+        {
+          "id": "daemon",
+          "label": "governed-run daemon + bundled Studio (wicked-crew serve)",
+          "needs": [{ "kind": "backend", "bin": "wicked-crew", "npx": "wicked-crew" }]
+        }
+      ]
     },
     {
       "id": "wicked-core",

@@ -41,11 +41,13 @@ export async function promptBundle(): Promise<UserSelection> {
   });
 
   const bundle = bundles.find(b => b.id === bundleId)!;
-  const { selected, added, blocked } = resolve(bundle.products);
+  const { selected, added, blocked, refused } = resolve(bundle.products);
 
   if (blocked.length > 0) {
     console.log(chalk.yellow(`\nWarning: could not resolve: ${blocked.join(", ")}`));
   }
+  // A retired product is never installed — nor anything that needs one. Stop before acquisition.
+  if (refused.length > 0) throw new Error(refused.join("\n"));
 
   return { products: selected, addedDeps: added };
 }
@@ -65,11 +67,13 @@ export async function promptCustom(): Promise<UserSelection> {
     validate: (input: readonly unknown[]) => input.length > 0 ? true : "Select at least one product",
   });
 
-  const { selected: resolved, added, blocked } = resolve(selected);
+  const { selected: resolved, added, blocked, refused } = resolve(selected);
 
   if (blocked.length > 0) {
     console.log(chalk.yellow(`\nWarning: could not resolve dependencies: ${blocked.join(", ")}`));
   }
+  // A retired product is never installed — nor anything that needs one. Stop before acquisition.
+  if (refused.length > 0) throw new Error(refused.join("\n"));
 
   if (added.length > 0) {
     console.log(

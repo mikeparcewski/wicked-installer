@@ -20,6 +20,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { isInstallable, retiredRefusal } from "./types.js";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 
@@ -86,6 +87,7 @@ interface Product {
   // v1.1: optional MCP block. Unknown-field tolerant — absent on most products.
   mcp?: Record<string, McpServerSpec>;
   note?: string;
+  successors?: string[];
 }
 
 interface Registry {
@@ -93,11 +95,6 @@ interface Registry {
   products: Product[];
 }
 
-// May this product be installed? `design` is unbuilt; `retired` is gone (npm-deprecated).
-// Deliberately duplicated from src/types.ts: this script imports nothing from src/ (§15).
-function isInstallable(p: { status: ProductStatus }): boolean {
-  return p.status !== "design" && p.status !== "retired";
-}
 
 interface Options {
   verb: Verb;
@@ -147,6 +144,7 @@ interface InstallReport {
   success: boolean;
   skipped: boolean;
   message: string;
+  delivery?: "registered" | "copied" | "acquired" | "manual" | "planned";
   version?: string;
   heuristic?: boolean;
   assets: AssetCounts;
@@ -376,10 +374,10 @@ function printHelp(): void {
     "",
     "Usage:",
     "  install-claude [verb] <product ids...>",
-    "  install-claude --products wicked-testing,wicked-brain",
+    "  install-claude --products wicked-bus,wicked-estate",
     "  install-claude --all",
     "  install-claude status --all",
-    "  install-claude uninstall wicked-testing",
+    "  install-claude uninstall wicked-bus",
     "  install-claude mcp upsert|remove <key> ...   (one ad-hoc MCP server; `mcp --help`)",
     "",
     "Verbs (default: install):",
@@ -409,6 +407,9 @@ function loadRegistry(path: string): Registry {
 
 function resolveProducts(registry: Registry, ids: string[], all: boolean): Product[] {
   const byId = new Map(registry.products.map((product) => [product.id, product]));
+  // One predicate for every CLI path (src/types.ts): `--all` takes only installable products,
+  // and a retired product — named or pulled in through `requires` — is refused with its
+  // successors rather than acquired.
   const requested = all
     ? registry.products.filter(isInstallable).map((product) => product.id)
     : ids;
@@ -420,12 +421,14 @@ function resolveProducts(registry: Registry, ids: string[], all: boolean): Produ
   const out: Product[] = [];
   const seen = new Set<string>();
 
-  function add(id: string): void {
+  function add(id: string, requiredBy?: string): void {
     if (seen.has(id)) return;
     const product = byId.get(id);
     if (!product) throw new Error(`unknown product: ${id}`);
+    const refusal = retiredRefusal(product, requiredBy);
+    if (refusal) throw new Error(refusal);
     seen.add(id);
-    for (const req of product.requires) add(req);
+    for (const req of product.requires) add(req, id);
     out.push(product);
   }
 
@@ -2127,12 +2130,20 @@ function installOneInstall(
     if (targets.length > 1) notes.push(`fanned out to ${targets.length} config dirs`);
 
     const assetSummary = `skills=${assets.skills}, mcp=${assets.mcp}, hooks=${assets.hooks}`;
+    // What was delivered (EXP-01): an MCP server or hook written into settings is wired into
+    // Claude Code (`registered`); skills alone are `copied`; a binary alone is `acquired`.
+    // Whether each capability can then RUN is the central readiness check, not this script's.
+    const delivery = options.dryRun ? "planned"
+      : skipped ? "manual"
+      : assets.mcp > 0 || assets.hooks > 0 ? "registered"
+      : assets.skills > 0 ? "copied" : "acquired";
     return {
       productId: product.id,
       displayName: product.displayName,
       success: true,
       skipped,
-      message: `${product.displayName}: ${skipped ? "manual step noted" : "installed"} (${assetSummary})`,
+      message: `${product.displayName}: ${skipped ? "manual step noted" : delivery} (${assetSummary})`,
+      delivery,
       version,
       assets,
       actions,

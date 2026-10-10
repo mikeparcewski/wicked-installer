@@ -15,6 +15,8 @@ import { listProducts, getProduct } from "./registry.js";
 import type { InstallResult, Product } from "./types.js";
 import { LEGACY_CLEANUP_ISSUE, cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, detectLegacyCopies, expandHome, readRegistration, registrationVerdict, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
 import type { RegistrationState } from "./claude-plugin.js";
+import { preflight } from "./readiness.js";
+import type { CapabilityReadiness } from "./readiness.js";
 
 /**
  * Everything a claude-plugin product needs resolved is checked BEFORE anything is installed,
@@ -39,6 +41,7 @@ interface DispatchFlags {
   force: boolean;
   sourceRoot?: string;    // --source-root <dir>: local checkout root (the shared per-CLI flag, INTERFACE.md §3.2)
   claudeHomes: string[];  // --claude-home <dir> (repeatable): explicit Claude config dir(s)
+  offline?: boolean;      // --offline: the readiness check makes no network lookup (npx fallback not checked)
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +57,8 @@ interface ScriptReportEntry {
   success: boolean;
   skipped: boolean;
   message?: string;
+  /** What was delivered (EXP-01): registered | copied | acquired | manual. Absent from older scripts. */
+  delivery?: string;
 }
 
 interface ScriptReport {
@@ -206,7 +211,7 @@ async function registerPluginViaClaude(id: string, flags: DispatchFlags, preDete
   console.log(`\n${chalk.cyan("→")} ${chalk.bold(product.displayName)} — registered Claude Code plugin${flags.dryRun ? chalk.dim(" [dry-run]") : ""}`);
   // Claude Code is the chosen target here: no `claude` CLI ⇒ a manual step, never the bare copy.
   const result = await installProduct(product, { ...installOptionsFrom(flags), noFallback: true, preDetectedLegacy });
-  return { productId: id, displayName: product.displayName, success: result.success, skipped: result.skipped, message: result.message };
+  return { productId: id, displayName: product.displayName, success: result.success, skipped: result.skipped, message: result.message, delivery: deliveryOf(result) };
 }
 
 /**
@@ -268,13 +273,55 @@ export async function dispatchToClis(
   }
 
   const hadFailure = renderSummary(results, productIds);
+  const pending = renderReadiness(
+    readinessFor(productIds, results.filter((r) => r.present).map((r) => r.cli), flags),
+    flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):",
+  );
 
   if (hadFailure) {
     console.log(chalk.red("\nOne or more installations failed. See the summary above."));
     return 1;
   }
-  console.log(chalk.green(`\nDone! ${flags.dryRun ? "(dry-run — nothing was written)" : "Start your coding agent to activate the installed tools."}`));
+  console.log(doneLine(flags, pending));
   return 0;
+}
+
+/** A plugin's registration outcome in the same vocabulary the scripts report. */
+function deliveryOf(result: InstallResult): string | undefined {
+  switch (result.registration) {
+    case "registered": return "registered";
+    case "fallback": return "copied";
+    case "manual": return "manual";
+    case "planned": return "planned";
+    default: return undefined;
+  }
+}
+
+/**
+ * The readiness check (src/readiness.ts) for what was just delivered, rendered as one line per
+ * capability: `ready`, or `pending` with each unmet need's reason and remedy. Returns how many
+ * REQUIRED capabilities are pending. Pending never fails the install — the copy/registration
+ * happened — but it is never reported as done either (EXP-01).
+ */
+export function renderReadiness(rows: CapabilityReadiness[], heading: string): number {
+  if (rows.length === 0) return 0;
+  console.log(chalk.bold(`\n${heading}`));
+  for (const r of rows) {
+    const tag = r.state === "ready" ? chalk.green("ready  ") : chalk.yellow("pending");
+    console.log(`  ${tag}  ${chalk.bold(r.productId)} — ${r.label}${r.optional ? chalk.dim(" (optional)") : ""}`);
+    for (const n of r.needs) {
+      const mark = n.met ? chalk.green("✓") : chalk.yellow("✗");
+      console.log(`           ${mark} ${n.need}: ${chalk.dim(n.detail)}`);
+      if (!n.met && n.remedy) console.log(`             ${chalk.cyan("→")} ${n.remedy}`);
+    }
+  }
+  return rows.filter((r) => r.state === "pending" && !r.optional).length;
+}
+
+/** Script slugs → registry `hosts`; `undefined` ⇒ every capability applies. */
+function readinessFor(productIds: string[], hosts: string[] | undefined, flags: DispatchFlags): CapabilityReadiness[] {
+  const products = productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined);
+  return preflight(products, { hosts, offline: flags.offline === true, probeOnly: flags.dryRun });
 }
 
 interface Cell {
@@ -293,6 +340,12 @@ function statusCell(result: CliRunResult, productId: string): Cell {
   if (!entry) return cell("-", chalk.dim);
   if (!entry.success) return cell("failed", chalk.red);
   if (entry.skipped) return cell("manual", chalk.yellow);
+  // What was DELIVERED — registered with the host, or only copied. Readiness is reported below.
+  if (entry.delivery === "registered") return cell("registered", chalk.green);
+  if (entry.delivery === "copied") return cell("copied", chalk.cyan);
+  if (entry.delivery === "acquired") return cell("acquired", chalk.green);
+  if (entry.delivery === "planned") return cell("planned", chalk.cyan);
+  if (entry.delivery === "manual") return cell("manual", chalk.yellow);
   return cell("ok", chalk.green);
 }
 
@@ -373,6 +426,12 @@ function productIdsFromSelection(selection: UserSelection): string[] {
   return ids;
 }
 
+function doneLine(flags: DispatchFlags, pending: number): string {
+  if (flags.dryRun) return chalk.green("\nDry run complete — nothing was installed or written.");
+  if (pending > 0) return chalk.yellow(`\nInstalled, but ${pending} capability(ies) are pending — see Readiness above for what each still needs.`);
+  return chalk.green("\nDone! Start your coding agent to activate the installed tools.");
+}
+
 // ---------------------------------------------------------------------------
 // Direct install (the `install <ids>` command, and the interactive path when
 // the user selects zero CLIs). Honours --dry-run for every product: the plan
@@ -444,14 +503,13 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
     }
   }
 
+  // The direct path registers plugins with Claude Code; every other product is machine-wide.
+  const pending = renderReadiness(readinessFor(all.map((p) => p.id), ["claude"], flags), flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):");
   if (failures.length > 0) {
     console.log(chalk.red(`\n${failures.length} installation(s) failed. Check output above for details.`));
     process.exit(1);
-  } else if (flags.dryRun) {
-    console.log(chalk.green("\nDry run complete — nothing was installed or written."));
-  } else {
-    console.log(chalk.green("\nDone! Start your coding agent to activate the installed tools."));
   }
+  console.log(doneLine(flags, pending));
 }
 
 // ---------------------------------------------------------------------------
@@ -541,10 +599,15 @@ async function runList(): Promise<void> {
 
 async function runInstallDirect(productIds: string[], flags: DispatchFlags): Promise<void> {
   const { resolve } = await import("./resolver.js");
-  const { selected, added, blocked } = resolve(productIds);
+  const { selected, added, blocked, refused } = resolve(productIds);
 
   if (blocked.length > 0) {
     console.error(chalk.red(`Unknown products: ${blocked.join(", ")}`));
+    process.exit(1);
+  }
+  if (refused.length > 0) {
+    // A retired product is never installed; the message names what replaced it.
+    for (const why of refused) console.error(chalk.red(why));
     process.exit(1);
   }
   try {
@@ -563,19 +626,24 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
 
   const results = await installDirectly([...added, ...selected], flags);
   const failures = results.filter((r) => !r.success && !r.skipped);
+  const pending = renderReadiness(
+    readinessFor([...added, ...selected].map((p) => p.id), ["claude"], flags),
+    flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):",
+  );
 
   if (flags.dryRun) {
     if (failures.length > 0) {
       console.log(chalk.red(`\nDry run finished with ${failures.length} problem(s); nothing was written.`));
       process.exit(1);
     }
-    console.log(chalk.green("\nDry run complete — nothing was installed or written."));
+    console.log(doneLine(flags, pending));
     return;
   }
   if (failures.length > 0) {
     console.log(chalk.red(`\n${failures.length} installation(s) failed. Check output above for details.`));
     process.exit(1);
   }
+  console.log(doneLine(flags, pending));
 }
 
 /** Worst-first: the aggregate across config dirs is the lowest-ranked state. */
@@ -688,6 +756,17 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
     console.log(`  ${statusIcon}  ${chalk.bold(p.id)}${statusBadge}`);
   }
 
+  // Capability readiness, for the hosts actually present: "installed"/"registered" above says
+  // what is on disk; this says whether each capability can run here (EXP-01). Informational —
+  // it never changes the exit code, which stays the registration verdict below.
+  // Hosts = the install scripts whose CLI the picker would pre-check (binary on PATH or a home
+  // with an identity marker, §11.2) — the same signal the interactive install uses.
+  const hosts = discoverCliScripts(__dirname).filter((s) => detectCli(s.cli).detected).map((s) => s.cli);
+  renderReadiness(
+    preflight(listProducts(false), { hosts, offline: flags.offline === true, probeOnly: flags.dryRun }),
+    `Capability readiness (for detected CLIs: ${hosts.length > 0 ? hosts.join(", ") : "none"}):`,
+  );
+
   const aggregate = renderPluginRegistration(flags);
   if (aggregate !== undefined && aggregate !== "registered") process.exitCode = 1;
 }
@@ -712,6 +791,7 @@ function printHelp(): void {
     "                                   default: $CLAUDE_CONFIG_DIR, else ~/.claude)",
     "  --source-root <dir>              Register wicked-garden from the local checkout <dir>/wicked-garden instead of GitHub",
     "  --force                          Pass --force through to per-CLI install scripts (interactive path)",
+    "  --offline                        Readiness check makes no network lookup (an npx fallback is reported as not checked)",
   ].join("\n"));
 }
 
@@ -742,6 +822,8 @@ function parseArgs(argv: string[]): ParsedArgs {
 
     if (arg === "--dry-run") {
       flags.dryRun = true;
+    } else if (arg === "--offline") {
+      flags.offline = true;
     } else if (arg === "--force") {
       flags.force = true;
     } else if (arg === "--source-root" || arg.startsWith("--source-root=")) {

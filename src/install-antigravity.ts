@@ -14,13 +14,13 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { isInstallable } from "./types.js";
+import { isInstallable, retiredRefusal } from "./types.js";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-type ProductStatus = "stable" | "active" | "preview" | "design";
+type ProductStatus = "stable" | "active" | "preview" | "design" | "retired";
 type ProductType = "npm-cli" | "npm-lib" | "mcp-binary" | "claude-plugin" | "desktop-binary";
 type InstallType = "npm-global" | "npm-run" | "binary" | "manual" | "github-binary" | "git-plugin" | "cargo";
 
@@ -52,6 +52,7 @@ interface Product {
   recommended?: string[];
   install: InstallAction;
   note?: string;
+  successors?: string[];
 }
 
 interface Registry {
@@ -81,6 +82,8 @@ interface InstallReport {
   success: boolean;
   skipped: boolean;
   message: string;
+  delivery?: Delivery;
+  pending?: string[];
   assets: AssetCounts;
   notes: string[];
 }
@@ -202,7 +205,7 @@ function printHelp(): void {
     "",
     "Usage:",
     "  install-antigravity <product ids...>",
-    "  install-antigravity --products wicked-testing,wicked-brain",
+    "  install-antigravity --products wicked-bus,wicked-estate",
     "  install-antigravity --all",
     "",
     "Options:",
@@ -227,6 +230,9 @@ function loadRegistry(path: string): Registry {
 
 function resolveProducts(registry: Registry, ids: string[], all: boolean): Product[] {
   const byId = new Map(registry.products.map((product) => [product.id, product]));
+  // One predicate for every CLI path (src/types.ts): `--all` takes only installable products,
+  // and a retired product — named or pulled in through `requires` — is refused with its
+  // successors rather than acquired.
   const requested = all
     ? registry.products.filter(isInstallable).map((product) => product.id)
     : ids;
@@ -238,12 +244,14 @@ function resolveProducts(registry: Registry, ids: string[], all: boolean): Produ
   const out: Product[] = [];
   const seen = new Set<string>();
 
-  function add(id: string): void {
+  function add(id: string, requiredBy?: string): void {
     if (seen.has(id)) return;
     const product = byId.get(id);
     if (!product) throw new Error(`unknown product: ${id}`);
+    const refusal = retiredRefusal(product, requiredBy);
+    if (refusal) throw new Error(refusal);
     seen.add(id);
-    for (const req of product.requires) add(req);
+    for (const req of product.requires) add(req, id);
     out.push(product);
   }
 
@@ -618,6 +626,25 @@ function writeInstallMarker(options: Options, reports: InstallReport[]): void {
   writeFileSync(markerPath, `${JSON.stringify(body, null, 2)}\n`);
 }
 
+/**
+ * What this script delivered, in one word (EXP-01): `registered` = wired into the host (an MCP
+ * server), `copied` = skill files placed but nothing registered, `acquired` = a binary only,
+ * `manual` = a step the operator performs, `planned` = --dry-run. Whether a capability is then READY is a separate,
+ * read-only check (`wicked-installer status`, src/readiness.ts).
+ */
+type Delivery = "registered" | "copied" | "acquired" | "manual" | "planned";
+
+/**
+ * Runtime this script deliberately did not provision. An `npm-run` product's skills reach its
+ * scripts only through that package's launcher, which this script never installs — say so when
+ * the launcher is not already on PATH instead of reporting the copy as a finished install.
+ */
+function runtimePending(product: Product): string[] {
+  const pkg = product.install.package;
+  if (product.install.type !== "npm-run" || !pkg || commandExists(pkg)) return [];
+  return [`${pkg} launcher not on PATH — script-backed skills are pending: run \`npm i -g ${pkg}\` (the \`npx ${pkg}\` fallback needs the network at first use)`];
+}
+
 async function installOne(product: Product, options: Options): Promise<InstallReport> {
   const notes: string[] = [];
   let assets: AssetCounts = { skills: 0 };
@@ -637,12 +664,16 @@ async function installOne(product: Product, options: Options): Promise<InstallRe
 
     const skipped = product.install.type === "manual" || product.install.type === "binary";
     const assetSummary = `skills=${assets.skills}`;
+    const delivery: Delivery = options.dryRun ? "planned" : skipped ? "manual" : assets.skills > 0 ? "copied" : "acquired";
+    const pending = runtimePending(product);
     return {
       productId: product.id,
       displayName: product.displayName,
       success: true,
       skipped,
-      message: `${product.displayName}: ${skipped ? "manual step noted" : "installed"} (${assetSummary})`,
+      message: `${product.displayName}: ${skipped ? "manual step noted" : delivery} (${assetSummary})${pending.length > 0 ? " — runtime pending" : ""}`,
+      delivery,
+      pending,
       assets,
       notes,
     };
@@ -792,6 +823,7 @@ async function main(): Promise<void> {
       const status = report.success ? (report.skipped ? "manual" : "ok") : "failed";
       console.log(`[${status}] ${report.message}`);
       for (const note of report.notes) console.log(`  ${note}`);
+      for (const item of report.pending ?? []) console.log(`  pending: ${item}`);
     }
   }
 

@@ -145,7 +145,8 @@ Load `registry.json`, require `products` to be an array (else `invalid registry:
 {
   "id": "wicked-testing",              // historical
   "displayName": "Wicked Testing",
-  "status": "stable" | "active" | "preview" | "design",
+  "status": "stable" | "active" | "preview" | "design" | "retired",
+  "successors": ["wicked-garden"],     // retired rows only: what absorbed it, named on refusal
   "requires": ["wicked-bus"],          // hard deps, auto-installed
   "recommended": ["wicked-brain"],     // informational ONLY — never auto-installed // historical
   "install": { "type": "...", ... },   // acquisition spec, §5
@@ -154,8 +155,8 @@ Load `registry.json`, require `products` to be an array (else `invalid registry:
 ```
 
 **Selection & dependency resolution** (exactly the codex reference's `resolveProducts`):
-1. Requested set = explicit ids, or (with `--all`) every product with `status !== "design"`. Explicitly naming a design-status product IS allowed — no status filter on explicit ids (deliberate escape hatch; such products carry `manual` install type, which just prints instructions).
-2. Unknown id → error `unknown product: <id>`, exit 1.
+1. Requested set = explicit ids, or (with `--all`) every product `isInstallable` accepts — not `design`, not `retired`. The predicate lives in `src/types.ts` and every script imports it (§15); no script spells its own status filter (EXP-02: three copies that filtered only `design` made `--all` acquire the retired wicked-testing and wicked-brain). Explicitly naming a design-status product IS allowed (deliberate escape hatch; such products carry `manual` install type, which just prints instructions).
+2. Unknown id → error `unknown product: <id>`, exit 1. A **retired** id — named, or reached through `requires` — is refused with `retiredRefusal`'s message (`<id> is retired and is not installed[ (required by <dependent>)]. <where its capabilities went>. Successors: <ids>.`), exit 1, before anything is acquired. The central `install <ids>` path refuses the same way.
 3. Expand `requires` recursively, depth-first, deduplicating with a seen-set (mark seen BEFORE recursing — cycle-safe). Prerequisites are ordered BEFORE dependents.
 
 **Unknown-field tolerance is mandatory.** Your script MUST ignore registry fields it doesn't understand — this is how the v1.1 `mcp` block ships without touching codex/antigravity.
@@ -391,6 +392,8 @@ Without `--json`: one `[ok|manual|failed] <message>` line per product plus inden
 }
 ```
 
+`delivery` (`registered | copied | acquired | manual | planned`) and `pending` (strings) are additive per-report keys (EXP-01): `delivery` says what the script did — wired into the host, files only, a binary only — and never that the capability can run; `pending` lists runtime the script deliberately did not provision and found missing (an `npm-run` product's launcher, which no per-CLI script installs). The central picker renders `delivery` in the summary grid and then runs the **readiness check** (`src/readiness.ts`) over each delivered product's registry `capabilities`: every need — `launcher` (on PATH; its `doctor` self-check, when declared, must print `{"ok": true}`), `python` (python3 → python → py -3 at the floor), `backend` (on PATH) — is met or unmet with a reason and a remedy, and the capability is `ready` or `pending`. An `npx` fallback is never `ready`: it fetches at first use and fails offline, so a missing launcher with a reachable registry is still `pending`. `--offline` skips the registry lookup. Pending never changes the exit code; it changes the closing line. `status` prints the same check for the detected CLIs.
+
 `assets.mcp`/`assets.hooks`/`assets.bins` are additive keys inside the existing object — a v1 parser that reads only `assets.skills` keeps working. **No conforming script copies agents or commands (§7.2)**, so `assets.agents`/`assets.commands` are either absent (the codex reference emits only `skills`) or always `0` (a script that keeps them for v1-parser compatibility, as the claude reference does); they are never nonzero. `skills` is the only asset count guaranteed present. `status`/`uninstall` use the same envelope with verb-appropriate entries. Exit-1-if-any-failed applies with and without `--json`.
 
 ---
@@ -613,7 +616,8 @@ wicked-installer cleanup-legacy [--claude-home <dir>]... [--dry-run] [--json]
 1. **Zero writes outside the OS temp dir.** No mkdir under the CLI home, no marker write, no config-file writes, no backups, no `npm i -g`/`cargo install`, no PATH mutations. Print `dry-run: <action>` lines for every command (with cwd when set), mkdir, tree copy (`copy <src> -> <dest>`), and marker write.
 2. **Staging into temp (git clone, npm pack) is permitted and encouraged** in dry-run — it's what makes reported asset counts real. Where a script skips staging (codex skips npm-pack today — conforming v1), v1.1 scripts must say so: note `asset counts unavailable (dry-run, npm-pack source)` rather than reporting confident zeros. Only local-checkout sources are guaranteed accurate in v1.
 3. `--dry-run --json` emits the **same report schema** with `dryRun: true` and every action's `result: "planned"` — the central picker parses dry and real runs identically. Stdout is guaranteed pure JSON (this is the validated conformance check).
-4. Dry-run reproduces failures detectable without writing: unknown product ids, missing cargo toolchain, unreadable registry, corrupt target JSON ⇒ same exit codes as a real run.
+4. Dry-run reproduces failures detectable without writing: unknown product ids, retired product ids, missing cargo toolchain, unreadable registry, corrupt target JSON ⇒ same exit codes as a real run.
+5. The central readiness check under `--dry-run` is PATH probes only — no `doctor`, no `python --version`, no registry lookup — and says so per need.
 
 ---
 
@@ -633,7 +637,7 @@ Flow: existing product/bundle picker → dependency resolution (resolver.ts unch
 
 ## 15. How to register your CLI (checklist)
 
-1. Copy `src/install-codex.ts` to `src/install-<cli>.ts`. Keep it self-contained: no imports from other `src/` modules, `node:` builtins only, no npm deps.
+1. Copy `src/install-codex.ts` to `src/install-<cli>.ts`. Keep it self-contained: `node:` builtins only, no npm deps, and no imports from other `src/` modules **except `./types.js`** — it imports nothing itself and holds the lifecycle predicate (`isInstallable`, `retiredRefusal`) every CLI path must share (§4).
 2. Rename the home plumbing: `Options.codexHome` → `<cli>Home`; default `$<CLI>_HOME` then `~/.<cli>`; flags `--<cli>-home`/`--<cli>-home=`; report key `<cli>Home` (literal `<cli>` + `Home`, no transformation — a hyphenated slug like `gemini-wicked` gives the valid key `gemini-wickedHome`; the report `*Home` pattern accepts the same lowercase/digit/hyphen slug set as the marker `cli` field, §9/Appendix B.1); marker `<cli>-install.json`; temp-dir prefix `wicked-<cli>-`; help text; "Installing X for <CLI>..." strings; the PATH-probe command name.
 3. Set your platform-override dir: `skills/<skill>/platform/<cli>/` where `<cli>` is your own slug (§7.1). Prefer-with-fallback selection is the v1.1 behavior; a v1 clone that copies the skill tree verbatim carries the subdir along.
 4. Map assets to YOUR CLI's layout — adjust §7 destinations, not the discovery/normalization algorithms or the flag surface. Fixed rules for a new script: (a) confirm your `--<cli>-home` default does not resolve to a config root an existing bundled script already owns (§2.1); (b) do NOT copy `agents/`/`commands/` — the codex reference has **no** such copy path, so a clone inherits this for free; if you emit those keys at all, report `agents: 0, commands: 0` (§7.2); (c) on install, perform the **REQUIRED stale-artifact purge** of your product's own prior-era `agents/<id>-*.md` and `commands/<id>/` orphans (§12.4), ownership-gated and `--dry-run`-reported; (d) to wire MCP/hooks you must first add and verify your CLI's target file+key per §8.3/§8.4 — otherwise ignore the registry `mcp` block and product `hooks/` assets (surface the prose note), which is conforming; a CLI whose runtime has a native `mcp add` subcommand may instead use mechanism 2 (§8.3).
