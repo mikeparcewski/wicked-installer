@@ -18,12 +18,18 @@ import { spawnSync } from "node:child_process";
 import { prepareClaudeSpawn, probeOnPath } from "./claude-plugin.js";
 import type { Capability, CapabilityNeed, Product } from "./types.js";
 
-export type ReadinessState = "ready" | "pending";
+/**
+ * `unchecked` = nothing is known to be missing, but a need was only found on PATH and not
+ * verified (its self-check or version was not run — `--dry-run`). Never shown as `ready`.
+ */
+export type ReadinessState = "ready" | "pending" | "unchecked";
 
 export interface NeedResult {
   /** e.g. "launcher wicked-garden", "python >= 3.10", "backend wicked-vault". */
   need: string;
   met: boolean;
+  /** false when `met` rests on a PATH probe alone (the self-check / version was not run). */
+  verified?: boolean;
   detail: string;
   /** What to do when unmet. */
   remedy?: string;
@@ -130,7 +136,7 @@ function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): Nee
   const probe = probeOnPath(need.bin, ctx.env, ctx.platform);
   if (probe.state === "found") {
     if (!need.doctor) return { need: label, met: true, detail: `on PATH (${probe.path})` };
-    if (ctx.probeOnly) return { need: label, met: true, detail: `on PATH (${probe.path}); \`${need.bin} ${need.doctor.join(" ")}\` not run under --dry-run` };
+    if (ctx.probeOnly) return { need: label, met: true, verified: false, detail: `on PATH (${probe.path}); \`${need.bin} ${need.doctor.join(" ")}\` not run under --dry-run` };
     const res = ctx.spawn(probe.path, need.doctor);
     let report: { ok?: unknown; reason?: unknown; python?: { kind?: unknown; version?: unknown; reason?: unknown } } | undefined;
     try {
@@ -171,7 +177,7 @@ function checkPython(need: Extract<CapabilityNeed, { kind: "python" }>, ctx: Ctx
   for (const [name, pre] of candidates) {
     const probe = probeOnPath(name, ctx.env, ctx.platform);
     if (probe.state !== "found") continue;
-    if (ctx.probeOnly) return { need: label, met: true, detail: `${name} on PATH (${probe.path}); version not checked under --dry-run` };
+    if (ctx.probeOnly) return { need: label, met: true, verified: false, detail: `${name} on PATH (${probe.path}); version not checked under --dry-run` };
     const res = ctx.spawn(probe.path, [...pre, "--version"]);
     const version = firstLine(`${res.stdout}\n${res.stderr}`.trim());
     if (res.status === 0 && versionAtLeast(version, need.min)) {
@@ -212,7 +218,7 @@ export function preflight(products: Product[], opts: PreflightOptions = {}): Cap
         capability: cap.id,
         label: cap.label,
         optional: cap.optional === true,
-        state: needs.every((n) => n.met) ? "ready" : "pending",
+        state: !needs.every((n) => n.met) ? "pending" : needs.some((n) => n.verified === false) ? "unchecked" : "ready",
         needs,
       });
     }

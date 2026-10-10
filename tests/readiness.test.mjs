@@ -169,6 +169,10 @@ test("--dry-run (probeOnly): nothing is spawned — PATH probes only", { skip },
     assert.match(by(rows, "skill-scripts").needs[0].detail, /not run under --dry-run/);
     assert.match(by(rows, "evidence-gate").needs[0].detail, /fallback was not checked \(--dry-run\)/);
     assert.ok(by(rows, "plugin-scripts"), "a Claude target brings the Claude capability");
+    // Found on PATH but never run: not "ready" — a python3 below the floor would look the same.
+    assert.equal(by(rows, "plugin-scripts").state, "unchecked");
+    assert.equal(by(rows, "skill-scripts").state, "unchecked");
+    assert.equal(by(rows, "plugin-scripts").needs[0].verified, false);
   } finally {
     sb.cleanup();
   }
