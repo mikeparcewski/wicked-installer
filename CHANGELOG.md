@@ -5,6 +5,29 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-10
+
+### Fixed
+
+- **A retired product is never installed, on any CLI path (EXP-02, #37).** `install-codex`,
+  `install-opencode` and `install-pi` filtered `--all` on `design` alone, so `--all` acquired the
+  retired wicked-testing and wicked-brain, and `install-codex wicked-testing` reported "installed".
+  There is now one predicate, `isInstallable` + `retiredRefusal` in the import-free `src/types.ts`, and
+  all five scripts, the central `install <ids>` and the interactive picker use it. Naming a retired
+  product, or a product that requires one, exits 1 before anything is acquired and names its
+  successors (registry `successors`).
+
+### Added
+
+- **Install results distinguish delivered from ready (EXP-01, #37).** Each per-CLI report carries
+  `delivery` (`registered | copied | acquired | manual | planned`), plus `pending` for runtime it
+  deliberately skipped. The summary grid shows `registered`/`copied` instead of `ok`. A readiness check
+  (`src/readiness.ts`) then reads each product's registry `capabilities` and reports every capability
+  `ready` or `pending`, with a reason and remedy per need: launcher on PATH with its `doctor`
+  self-check, Python at the floor, backend on PATH. An `npx` fallback is never `ready`, because it
+  fetches at first use and fails offline. The same check runs in `status` for detected CLIs.
+  `--offline` skips the registry lookup, and `--dry-run` probes PATH only, spawning nothing.
+
 ## [0.6.1] - 2026-10-08
 
 ### Fixed
