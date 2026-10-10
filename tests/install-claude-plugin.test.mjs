@@ -133,11 +133,14 @@ function plantBareCopy(cfg) {
 // 1. The script itself
 // ---------------------------------------------------------------------------
 
-test("install-claude.js imports nothing from src/ (INTERFACE.md §15 self-contained)", () => {
+test("install-claude.js imports nothing from src/ but the dependency-free ./types.js (INTERFACE.md §15 self-contained)", () => {
   const src = readFileSync(join(ROOT, "src", "install-claude.ts"), "utf8");
   const imports = [...src.matchAll(/^import[^;]*?from\s+"([^"]+)";/gm)].map((m) => m[1]);
   assert.ok(imports.length > 0);
-  for (const spec of imports) assert.match(spec, /^node:/, `install-claude.ts must import only node: builtins, found ${spec}`);
+  for (const spec of imports) assert.match(spec, /^(node:|\.\/types\.js$)/, `install-claude.ts must import only node: builtins and ./types.js, found ${spec}`);
+  // ./types.js is the one sanctioned exception because it imports nothing itself.
+  const types = readFileSync(join(ROOT, "src", "types.ts"), "utf8");
+  assert.doesNotMatch(types, /^import\s/m, "src/types.ts must stay import-free");
 });
 
 test("install-claude.js handed wicked-garden: a manual step, nothing staged/copied/wired, no marker entry", () => {
@@ -355,7 +358,7 @@ async function dispatch(sb, productIds, flags, { claude = true, env: extra = {} 
   });
   if (claude) process.env.WICKED_CLAUDE_BIN = STUB;
   try {
-    const code = await indexModule.dispatchToClis([cliOption], productIds, { dryRun: false, force: false, claudeHomes: [], ...flags });
+    const code = await indexModule.dispatchToClis([cliOption], productIds, { dryRun: false, force: false, claudeHomes: [], offline: true, ...flags });
     return { code, out: logs.join("\n") };
   } finally {
     console.log = origLog;
@@ -385,7 +388,7 @@ test("dispatch: the Claude script gets the products WITHOUT garden; garden is re
     ]);
     assert.ok(existsSync(cacheDir(sb.cfg)), "payload where Claude Code loads from");
     assert.match(out, /registered with Claude Code as wicked-garden@wicked-garden/);
-    assert.match(out, /Wicked Garden\s+ok/, "the summary grid shows garden ok under Claude Code");
+    assert.match(out, /Wicked Garden\s+registered/, "the summary grid shows garden REGISTERED (not merely copied) under Claude Code");
 
     // Legacy copies: reported, one line each, and left exactly as they were.
     assert.match(out, new RegExp(`legacy wicked-garden copy detected at ${escapeRe(join(sb.cfg, "plugins", "wicked-garden"))} — left in place; remove it with 'wicked-installer cleanup-legacy' \\(see ${escapeRe(ISSUE)}\\)`));
@@ -1119,7 +1122,7 @@ test("dispatch: without a Claude target the Claude-specific preflight does not r
     Object.assign(process.env, { PATH: `${sb.bin}:${dirname(process.execPath)}`, HOME: sb.home, USERPROFILE: sb.home, CLAUDE_CONFIG_DIR: "", FAKE_NPM_LOG: sb.npmLog, WICKED_SOURCE_ROOT: sb.srcRoot });
     let out;
     try {
-      await indexModule.dispatchToClis([codex], ["wicked-garden"], { dryRun: false, force: false, claudeHomes: [] });
+      await indexModule.dispatchToClis([codex], ["wicked-garden"], { dryRun: false, force: false, claudeHomes: [], offline: true });
       out = logs.join("\n");
     } finally {
       console.log = origLog;

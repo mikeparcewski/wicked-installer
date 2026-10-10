@@ -62,7 +62,9 @@ function run(sb, args, { configDir, claude = "seam", env: extra = {} } = {}) {
   };
   if (configDir !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
   if (claude === "seam") env.WICKED_CLAUDE_BIN = STUB;
-  return spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env, timeout: 120_000 });
+  // --offline: the post-install readiness check makes no `npm view` lookup through the fake npm,
+  // so the npm log below records acquisitions only (readiness has its own tests).
+  return spawnSync(process.execPath, [CLI, ...args, "--offline"], { encoding: "utf8", env, timeout: 120_000 });
 }
 
 const jsonLines = (log) => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);

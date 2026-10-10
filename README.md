@@ -37,8 +37,8 @@ npx wicked-installer list            List available products
 npx wicked-installer install <ids>   Install specific products (space-separated)
 npx wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)
 npx wicked-installer mcp upsert|remove <key>   Write/remove one MCP server in your CLIs
-npx wicked-installer status          Show detected CLIs, installed products, and
-                                     wicked-garden's Claude Code registration
+npx wicked-installer status          Show detected CLIs, installed products, capability
+                                     readiness, and wicked-garden's Claude Code registration
 npx wicked-installer --version
 
 Flags:
@@ -50,6 +50,8 @@ Flags:
   --source-root <dir>    Register wicked-garden from the local checkout
                          <dir>/wicked-garden instead of the published marketplace
   --force                Passed through to the per-CLI install scripts (interactive)
+  --offline              Readiness check makes no network lookup (an npx fallback is
+                         reported as not checked)
 ```
 
 `install <ids>` resolves required dependencies first (garden pulls in wicked-vault),
@@ -57,6 +59,32 @@ installs each product directly, and exits 1 if any of them failed. With `--dry-r
 every product type prints its plan and nothing is installed or written — the only process
 a dry run may start is the read-only `claude --version` probe the Claude plugin plan is
 derived from.
+
+A **retired** product (`wicked-testing`, `wicked-brain`) is never installed: no `--all`, bundle
+or default selects one on any CLI path, and naming one — or a product that requires one —
+exits 1 with what replaced it, before anything is acquired.
+
+### Delivered is not ready
+
+The summary grid says what each CLI got: `registered` (wired into the host — a Claude Code
+plugin, an MCP server, a settings hook), `copied` (skill files placed, nothing registered),
+`acquired` (a binary), `manual`, or `planned` (`--dry-run`). Then a **readiness check** reads
+each delivered product's `capabilities` (registry.json) and reports every capability `ready` or
+`pending`, with the reason and the fix for each unmet need:
+
+- **launcher** — on PATH, and its read-only self-check passes (`wicked-garden doctor`). Garden
+  skills copied into Codex / OpenCode / Pi / Antigravity reach their scripts only through it;
+  none of those scripts installs it.
+- **python** — `python3` / `python` (`py -3` on Windows) at the floor (3.10 for garden).
+- **backend** — on PATH: `wicked-vault` for garden's evidence gate, `wicked-estate-mcp` for
+  mem/search (optional), `wicked-crew` for the daemon.
+
+An `npx` fallback is never `ready`: it fetches the package at first use, so it fails offline.
+A missing launcher whose registry answers reads `pending — only the npx fallback is available`;
+with the registry unreachable, `pending — the npx fallback cannot resolve it`. Pending never
+fails the install; the closing line says how many capabilities still need something.
+`--offline` skips the registry lookup, `--dry-run` checks PATH only (spawns nothing), and
+`status` runs the same check for the CLIs it detects.
 
 ### `cleanup-legacy` — remove old unregistered wicked-garden copies
 

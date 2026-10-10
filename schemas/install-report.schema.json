@@ -30,6 +30,16 @@
             "description": "true only for install.type manual|binary (manual step noted, not a failure)."
           },
           "message": { "type": "string" },
+          "delivery": {
+            "type": "string",
+            "enum": ["registered", "copied", "acquired", "manual", "planned"],
+            "description": "v1.1 additive (EXP-01): what the script DELIVERED — registered = wired into the host (an MCP server, a settings hook); copied = files placed, nothing registered; acquired = a binary only; manual = an operator step; planned = --dry-run. Says nothing about whether the capability can run: that is the central readiness check (ready | pending)."
+          },
+          "pending": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "v1.1 additive (EXP-01): runtime this script deliberately did not provision and found missing (e.g. an npm-run product's launcher not on PATH). Never a failure."
+          },
           "version": {
             "type": "string",
             "description": "v1.1: staged/acquired product version when known."
