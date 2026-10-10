@@ -617,7 +617,7 @@ wicked-installer cleanup-legacy [--claude-home <dir>]... [--dry-run] [--json]
 2. **Staging into temp (git clone, npm pack) is permitted and encouraged** in dry-run — it's what makes reported asset counts real. Where a script skips staging (codex skips npm-pack today — conforming v1), v1.1 scripts must say so: note `asset counts unavailable (dry-run, npm-pack source)` rather than reporting confident zeros. Only local-checkout sources are guaranteed accurate in v1.
 3. `--dry-run --json` emits the **same report schema** with `dryRun: true` and every action's `result: "planned"` — the central picker parses dry and real runs identically. Stdout is guaranteed pure JSON (this is the validated conformance check).
 4. Dry-run reproduces failures detectable without writing: unknown product ids, retired product ids, missing cargo toolchain, unreadable registry, corrupt target JSON ⇒ same exit codes as a real run.
-5. The central readiness check under `--dry-run` is PATH probes only — no `doctor`, no `python --version`, no registry lookup — and says so per need.
+5. The central readiness check under `--dry-run` is PATH probes only — no `doctor`, no `python --version`, no registry lookup — and says so per need. A capability whose needs are all on PATH but unverified is `unchecked`, never `ready`.
 
 ---
 

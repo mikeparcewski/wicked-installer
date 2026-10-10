@@ -307,12 +307,12 @@ export function renderReadiness(rows: CapabilityReadiness[], heading: string): n
   if (rows.length === 0) return 0;
   console.log(chalk.bold(`\n${heading}`));
   for (const r of rows) {
-    const tag = r.state === "ready" ? chalk.green("ready  ") : chalk.yellow("pending");
+    const tag = r.state === "ready" ? chalk.green("ready    ") : r.state === "unchecked" ? chalk.cyan("unchecked") : chalk.yellow("pending  ");
     console.log(`  ${tag}  ${chalk.bold(r.productId)} — ${r.label}${r.optional ? chalk.dim(" (optional)") : ""}`);
     for (const n of r.needs) {
-      const mark = n.met ? chalk.green("✓") : chalk.yellow("✗");
-      console.log(`           ${mark} ${n.need}: ${chalk.dim(n.detail)}`);
-      if (!n.met && n.remedy) console.log(`             ${chalk.cyan("→")} ${n.remedy}`);
+      const mark = !n.met ? chalk.yellow("✗") : n.verified === false ? chalk.cyan("?") : chalk.green("✓");
+      console.log(`             ${mark} ${n.need}: ${chalk.dim(n.detail)}`);
+      if (!n.met && n.remedy) console.log(`               ${chalk.cyan("→")} ${n.remedy}`);
     }
   }
   return rows.filter((r) => r.state === "pending" && !r.optional).length;

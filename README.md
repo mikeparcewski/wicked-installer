@@ -83,7 +83,8 @@ An `npx` fallback is never `ready`: it fetches the package at first use, so it f
 A missing launcher whose registry answers reads `pending — only the npx fallback is available`;
 with the registry unreachable, `pending — the npx fallback cannot resolve it`. Pending never
 fails the install; the closing line says how many capabilities still need something.
-`--offline` skips the registry lookup, `--dry-run` checks PATH only (spawns nothing), and
+`--offline` skips the registry lookup, `--dry-run` checks PATH only (spawns nothing — a need found
+on PATH but not run makes the capability `unchecked`, never `ready`), and
 `status` runs the same check for the CLIs it detects.
 
 ### `cleanup-legacy` — remove old unregistered wicked-garden copies
