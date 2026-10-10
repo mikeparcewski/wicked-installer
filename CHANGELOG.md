@@ -5,6 +5,15 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-10
+
+### Fixed
+
+- **Under `--dry-run`, a capability whose needs were only found on PATH is `unchecked`, never
+  `ready` (#39).** On 0.7.0 a dry run reported garden's Claude plugin-scripts `ready` because a
+  `python3` was on PATH, even though that interpreter was 3.9.6, below the 3.10 floor; a dry run
+  never runs the version check. A PATH-only result now marks the need unverified.
+
 ## [0.7.0] - 2026-10-10
 
 ### Fixed
