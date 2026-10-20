@@ -880,11 +880,20 @@ function commandValueSpan(line: string): { prefix: string; suffix: string } | un
   return { prefix: line.slice(0, end + 1) + m[1], suffix: m[3] };
 }
 
+/** JSON with object keys sorted at every level (Codex prints map keys in no fixed order). */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(v);
+}
+
 /** Everything `codex mcp get --json` shows, minus the command — must not change in a repair. */
 function visibleSettings(s: CodexMcpServer): string {
   const { command: _command, ...transport } = s.transport ?? {};
   void _command;
-  return JSON.stringify({ ...s, transport });
+  return canonicalJson({ ...s, transport });
 }
 
 /**
@@ -985,7 +994,8 @@ const PLUGIN_ESTATE_SERVERS: Array<{ command: string; args: string[] }> = [
 /** An entry that runs garden's estate launcher (`wicked-garden run scripts/estate_mcp.mjs`). */
 function isLauncherEntry(t: CodexMcpTransport): boolean {
   const args = stringArgs(t.args);
-  return /(^|[\\/])wicked-garden(\.cmd)?$/i.test(String(t.command ?? "")) && args[0] === "run" && /(^|\/)scripts\/estate_mcp\.mjs$/.test(args[1] ?? "");
+  const script = (args[1] ?? "").replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+  return /(^|[\\/])wicked-garden(\.cmd)?$/i.test(String(t.command ?? "")) && args[0] === "run" && script === "scripts/estate_mcp.mjs";
 }
 
 function isConfigTier(t: CodexMcpTransport): boolean {

@@ -40,6 +40,18 @@ const state = existsSync(stateFile)
 const save = () => writeFileSync(stateFile, JSON.stringify(state, null, 2));
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; } };
 const configFile = join(home, "config.toml");
+// CODEX_STUB_SHUFFLE_ENV=1: print env maps in a different key order on every call (real codex
+// prints map keys in no fixed order).
+let shuffleCalls = 0;
+function shuffled(env) {
+  if (process.env.CODEX_STUB_SHUFFLE_ENV !== "1") return env;
+  const keys = Object.keys(env);
+  const counter = join(home, "stub-shuffle");
+  shuffleCalls = existsSync(counter) ? Number(readFileSync(counter, "utf8")) + 1 : 1;
+  writeFileSync(counter, String(shuffleCalls));
+  const rot = shuffleCalls % keys.length;
+  return Object.fromEntries([...keys.slice(rot), ...keys.slice(0, rot)].map((k) => [k, env[k]]));
+}
 const configText = () => (existsSync(configFile) ? readFileSync(configFile, "utf8") : "");
 const HEADER = /^\s*\[\s*["']?mcp_servers["']?\s*\.\s*["']?([A-Za-z0-9_-]+)["']?\s*(\.\s*env\s*)?\]\s*(?:#.*)?$/;
 function configServers() {
@@ -129,7 +141,7 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   if (!s) fail(`Error: No MCP server named '${a2}' found.`);
   out({
     name: a2, enabled: s.enabled !== false, disabled_reason: null,
-    transport: { type: "stdio", command: s.command, args: s.args ?? [], env: s.env && Object.keys(s.env).length ? s.env : null, env_vars: s.env_vars ?? [], cwd: s.cwd ?? null },
+    transport: { type: "stdio", command: s.command, args: s.args ?? [], env: s.env && Object.keys(s.env).length ? shuffled(s.env) : null, env_vars: s.env_vars ?? [], cwd: s.cwd ?? null },
     enabled_tools: s.enabled_tools ?? null, disabled_tools: s.disabled_tools ?? null,
     startup_timeout_sec: s.startup_timeout_sec ?? null, tool_timeout_sec: s.tool_timeout_sec ?? null,
   });

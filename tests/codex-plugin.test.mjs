@@ -665,6 +665,33 @@ test("estate: escaped triple quotes and quoted command keys are read like Codex 
   }
 });
 
+test("estate: a Windows-spelled launcher entry (wicked-garden.cmd, scripts\\estate_mcp.mjs) is recognised and left alone", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
+    const before = '[mcp_servers.wicked-estate]\ncommand = "wicked-garden.cmd"\nargs = ["run", ".\\\\scripts\\\\estate_mcp.mjs"]\n';
+    seedConfig(sb, before);
+    const r = run(sb);
+    assert.ok(configToml(sb).startsWith(before), configToml(sb));
+    assert.ok(!r.garden.notes.some((n) => /repaired/.test(n)), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a repair is kept when Codex prints the env map in another key order", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    seedConfig(sb, '[mcp_servers.wicked-estate]\ncommand = "/opt/old/wicked-estate-mcp"\n\n[mcp_servers.wicked-estate.env]\nA = "1"\nB = "2"\nC = "3"\nD = "4"\n');
+    const r = run(sb, [], { CODEX_STUB_SHUFFLE_ENV: "1" });
+    assert.ok(r.garden.notes.some((n) => /only its command line changed/.test(n)), r.garden.notes.join("\n"));
+    assert.match(configToml(sb), /command = "[^"]+\.local\/bin\/wicked-estate-mcp"/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("estate: a symlinked config.toml is repaired at its target and stays a symlink", { skip }, () => {
   const sb = sandbox();
   try {
