@@ -317,9 +317,12 @@ registered as a Codex plugin instead of having its skills copied:
   `codex mcp get` shows the effective one. Whether a config entry exists is read from
   `config.toml` itself, not inferred from the command. An entry for `wicked-estate` that does not
   point at the currently resolved binary is repaired with mechanism 1, using the target stated in
-  §8.3: only its `command` line changes. A plugin-served `wicked-estate` with no config entry is
-  left to the plugin when its launcher (override → executable on PATH → `~/.local/bin`) would
-  start the current binary; otherwise `codex mcp add` creates an entry. Resolution order: `WICKED_ESTATE_MCP_BIN`,
+  §8.3: only its `command` line changes. An entry served through garden's launcher (the plugin's
+  server, or a config entry running `wicked-garden run scripts/estate_mcp.mjs`) is never
+  repointed at the binary: the launcher applies the read-only and governed-unit rules. When the
+  launcher (override → executable on PATH → `~/.local/bin`) would not start the current binary,
+  the fix (PATH or `WICKED_ESTATE_MCP_BIN`) is reported instead. The estate product itself
+  creates an entry with `codex mcp add` only when nothing serves the name. Resolution order: `WICKED_ESTATE_MCP_BIN`,
   PATH, `~/.local/bin`, `~/.cargo/bin`. The highest sibling `wicked-estate --version` wins, unless
   the override is set. An older `~/.cargo/bin` copy shadowing it on PATH is reported.
 - **Every `codex` call** carries `CODEX_HOME` = the target home.

@@ -43,8 +43,11 @@ All notable changes to wicked-installer are documented here. The format follows
   to make, and is never mistaken for a missing one. Keys are read with a small TOML key scanner
   (escapes decoded, literal keys, comments and multi-line values skipped), so Windows project
   tables and backslashes in comments do not block a repair.
-  When the garden plugin serves the server, a new entry is added only if the plugin's launcher
-  would not start the current binary. It warns when an older `~/.cargo/bin`
+  garden's launcher (the plugin's server, or a config entry running it) is never replaced by a
+  direct-binary entry. It is what adds `--readonly` for `WICKED_ESTATE_READONLY` and run markers,
+  and when it would not start the current binary, the summary gives the PATH or
+  `WICKED_ESTATE_MCP_BIN` fix. A direct-binary config entry is repaired, with a note that it
+  overrides the launcher. It warns when an older `~/.cargo/bin`
   copy shadows the current one on PATH.
 - **On Windows, `codex`/`npm` calls pick a candidate Windows can launch.** `where` can list an
   extensionless sh wrapper before `npm.cmd`, and the first `.exe`/`.cmd`/`.bat` is now used.

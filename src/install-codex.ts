@@ -754,8 +754,19 @@ function scanKeyPath(line: string, pos: number): { path: string[]; end: number }
   }
 }
 
+/** Where an unescaped `"""` closes a multi-line basic string on this line, or -1. */
+function tripleBasicClose(line: string, from: number): number {
+  for (let i = from; i < line.length; i += 1) {
+    if (line[i] === "\\") { i += 1; continue; }
+    if (line.startsWith(TRIPLE_BASIC, i)) return i;
+  }
+  return -1;
+}
+
 /** Bracket depth after scanning `line` from `pos` (strings and comments respected). */
 function scanBrackets(line: string, pos: number, depth: number): number {
+  // A multi-line string inside an array is beyond this reader: refuse rather than guess.
+  if (line.includes(TRIPLE_BASIC, pos) || line.includes(TRIPLE_LITERAL, pos)) throw new TomlScanError("multi-line string inside an array");
   for (let i = pos; i < line.length; i += 1) {
     const c = line[i];
     if (c === "#") break;
@@ -776,7 +787,7 @@ type OpenValue = { kind: "basic3" | "literal3" } | { kind: "array"; depth: numbe
 function openValueAfter(line: string, pos: number): OpenValue | undefined {
   let i = pos;
   while (line[i] === " " || line[i] === "\t") i += 1;
-  if (line.startsWith(TRIPLE_BASIC, i)) return line.indexOf(TRIPLE_BASIC, i + 3) >= 0 ? undefined : { kind: "basic3" };
+  if (line.startsWith(TRIPLE_BASIC, i)) return tripleBasicClose(line, i + 3) >= 0 ? undefined : { kind: "basic3" };
   if (line.startsWith(TRIPLE_LITERAL, i)) return line.indexOf(TRIPLE_LITERAL, i + 3) >= 0 ? undefined : { kind: "literal3" };
   if (line[i] === "[") {
     const depth = scanBrackets(line, i, 0);
@@ -799,6 +810,8 @@ function findConfigServerTable(text: string, name: string): ConfigTable {
   let sawSubtable = false;
   let table: string[] = [];
   let open: OpenValue | undefined;
+  let commandLine = -1;
+  let badCommand = false;
   const isServer = (path: string[]) => path.length >= 2 && path[0] === "mcp_servers" && path[1] === name;
   try {
     for (let i = 0; i < lines.length; i += 1) {
@@ -807,7 +820,7 @@ function findConfigServerTable(text: string, name: string): ConfigTable {
         if (open.kind === "array") {
           const depth = scanBrackets(l, 0, open.depth);
           open = depth > 0 ? { kind: "array", depth } : undefined;
-        } else if (l.includes(open.kind === "basic3" ? TRIPLE_BASIC : TRIPLE_LITERAL)) {
+        } else if (open.kind === "basic3" ? tripleBasicClose(l, 0) >= 0 : l.includes(TRIPLE_LITERAL)) {
           open = undefined;
         }
         continue;
@@ -831,6 +844,12 @@ function findConfigServerTable(text: string, name: string): ConfigTable {
       if (l[end] !== "=") throw new TomlScanError("expected = after a key");
       const full = [...table, ...path];
       open = openValueAfter(l, end + 1);
+      // The server's own `command` key (any key spelling), read in this same pass so a
+      // multi-line value elsewhere in the table can never be mistaken for a key.
+      if (table.length === 2 && isServer(table) && path.length === 1 && path[0] === "command") {
+        if (open || !commandValueSpan(l) || commandLine >= 0) badCommand = true;
+        commandLine = i;
+      }
       if (full.length === 1 && full[0] === "mcp_servers") return { ambiguous: "mcp_servers is an inline table" };
       // A key of the server from outside its own tables (dotted keys, an inline table under
       // [mcp_servers]) — inside [mcp_servers.<name>] or one of its subtables it is ordinary.
@@ -844,20 +863,22 @@ function findConfigServerTable(text: string, name: string): ConfigTable {
   if (open) return { ambiguous: "config.toml ends inside a multi-line value" };
   if (starts.length > 1) return { ambiguous: `[mcp_servers.${name}] appears ${starts.length} times` };
   if (starts.length === 0) return sawSubtable ? { ambiguous: `only subtables of [mcp_servers.${name}] exist` } : "none";
-  let commandLine = -1;
-  for (let i = starts[0] + 1; i < lines.length; i += 1) {
-    const l = lines[i].replace(/\r$/, "");
-    if (/^\s*\[/.test(l)) break;
-    if (/^\s*command\s*=/.test(l)) {
-      if (!COMMAND_LINE.test(l) || commandLine >= 0) return { ambiguous: `the command line of [mcp_servers.${name}] is not a single quoted string` };
-      commandLine = i;
-    }
-  }
+  if (badCommand) return { ambiguous: `the command line of [mcp_servers.${name}] is not a single quoted string` };
   if (commandLine < 0) return { ambiguous: `[mcp_servers.${name}] has no command line` };
   return { lines, commandLine };
 }
 
-const COMMAND_LINE = /^(\s*command\s*=\s*)("(?:[^"\\]|\\.)*"|'[^']*')(\s*(?:#.*)?)$/;
+/**
+ * The `command = <string>` line split as prefix (key spelling kept) / value / suffix (comment
+ * kept), when the value is a single-line basic or literal string; else undefined.
+ */
+function commandValueSpan(line: string): { prefix: string; suffix: string } | undefined {
+  const { end } = scanKeyPath(line, line.search(/\S/));
+  if (line[end] !== "=") return undefined;
+  const m = /^(\s*)("(?:[^"\\]|\\.)*"|'[^']*')(\s*(?:#.*)?)$/.exec(line.slice(end + 1));
+  if (!m || m[2].startsWith(TRIPLE_BASIC) || m[2].startsWith(TRIPLE_LITERAL)) return undefined;
+  return { prefix: line.slice(0, end + 1) + m[1], suffix: m[3] };
+}
 
 /** Everything `codex mcp get --json` shows, minus the command — must not change in a repair. */
 function visibleSettings(s: CodexMcpServer): string {
@@ -900,10 +921,10 @@ function pointCodexMcpAt(name: string, binary: string, version: string | undefin
   if (options.dryRun) return `would repair Codex MCP server ${name}: ${was} -> ${label} (only its command line changes)`;
   const raw = table.lines[table.commandLine];
   const cr = raw.endsWith("\r") ? "\r" : "";
-  const m = COMMAND_LINE.exec(raw.replace(/\r$/, ""));
-  if (!m) return `Codex MCP server ${name}: not changed (unexpected command line)`;
+  const span = commandValueSpan(raw.replace(/\r$/, ""));
+  if (!span) return `Codex MCP server ${name}: not changed (unexpected command line)`;
   const lines = [...table.lines];
-  lines[table.commandLine] = `${m[1]}${JSON.stringify(binary)}${m[3]}${cr}`;
+  lines[table.commandLine] = `${span.prefix}${JSON.stringify(binary)}${span.suffix}${cr}`;
   // The new file keeps the old one's permission bits (config.toml may hold secrets: 0600 stays 0600).
   const mode = statSync(configFile).mode & 0o777;
   const backup = `${configFile}.wicked-bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -939,6 +960,12 @@ function registerCodexMcp(product: Product, options: Options): string[] {
   }
   const current = codexMcpGet(product.id, options);
   if (current.state === "error") throw new Error(current.detail);
+  if (current.state === "present" && isLauncherEntry(current.transport)) {
+    // garden's launcher resolves the binary itself (and adds --readonly where it must).
+    const launcher = pluginLauncherResolves();
+    notes.push(`Codex MCP server ${product.id}: runs garden's estate launcher (it resolves the binary at start and adds --readonly where it must) — left as it is; it would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}${launcher && samePath(launcher, chosen.path) ? "" : `, not ${homeTilde(chosen.path)} — put ${homeTilde(dirname(chosen.path))} first on PATH or set WICKED_ESTATE_MCP_BIN`}`);
+    return notes;
+  }
   notes.push(pointCodexMcpAt(product.id, chosen.path, chosen.version, current, options));
   return notes;
 }
@@ -954,6 +981,12 @@ function stringArgs(args: unknown): string[] {
 const PLUGIN_ESTATE_SERVERS: Array<{ command: string; args: string[] }> = [
   { command: "wicked-garden", args: ["run", "scripts/estate_mcp.mjs"] },
 ];
+
+/** An entry that runs garden's estate launcher (`wicked-garden run scripts/estate_mcp.mjs`). */
+function isLauncherEntry(t: CodexMcpTransport): boolean {
+  const args = stringArgs(t.args);
+  return /(^|[\\/])wicked-garden(\.cmd)?$/i.test(String(t.command ?? "")) && args[0] === "run" && /(^|\/)scripts\/estate_mcp\.mjs$/.test(args[1] ?? "");
+}
 
 function isConfigTier(t: CodexMcpTransport): boolean {
   const args = JSON.stringify(stringArgs(t.args));
@@ -980,8 +1013,12 @@ function repairEstateForPlugin(options: Options): string[] {
   // Whether a config entry exists is read from config.toml itself — a user entry may look
   // exactly like the plugin's (`wicked-garden run scripts/estate_mcp.mjs`).
   const configFile = join(options.codexHome, "config.toml");
-  const homeEntry = findConfigServerTable(existsSync(configFile) ? readFileSync(configFile, "utf8") : "", "wicked-estate") !== "none";
-  const pluginServed = !homeEntry && !(current.state === "present" && isConfigTier(current.transport));
+  const table = findConfigServerTable(existsSync(configFile) ? readFileSync(configFile, "utf8") : "", "wicked-estate");
+  const homeEntry = table !== "none";
+  // Served through garden's launcher: the plugin's own server, or a config entry that runs the
+  // same launcher. Either resolves the binary at start, so neither is ever repointed.
+  const pluginServed = (!homeEntry && !(current.state === "present" && isConfigTier(current.transport)))
+    || (current.state === "present" && isLauncherEntry(current.transport) && !(typeof table === "object" && "ambiguous" in table));
   if (!chosen) {
     notes.push(pluginServed
       ? "wicked-estate MCP: served by the plugin, but no wicked-estate-mcp is installed yet — `npx wicked-installer install wicked-estate`"
@@ -989,14 +1026,21 @@ function repairEstateForPlugin(options: Options): string[] {
     return notes;
   }
   if (pluginServed) {
+    // The plugin's launcher stays in the path: it is what adds --readonly for
+    // WICKED_ESTATE_READONLY / run markers and refuses an unpinned governed unit. A config entry
+    // that runs the binary directly would bypass that, so none is written; the fix is reported.
     const launcher = pluginLauncherResolves();
     if (launcher && samePath(launcher, chosen.path)) {
       notes.push(`wicked-estate MCP: served by the plugin; its launcher starts ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`);
-      return notes;
+    } else {
+      notes.push(`wicked-estate MCP: served by the plugin, but its launcher would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}, not ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""} — put ${homeTilde(dirname(chosen.path))} first on PATH, or set WICKED_ESTATE_MCP_BIN=${chosen.path} in the environment Codex starts from`);
     }
-    notes.push(`wicked-estate MCP: the plugin's launcher would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}, not ${homeTilde(chosen.path)}`);
+    return notes;
   }
   notes.push(pointCodexMcpAt("wicked-estate", chosen.path, chosen.version, current, options));
+  if (current.state === "present" && isConfigTier(current.transport) && !isLauncherEntry(current.transport)) {
+    notes.push("wicked-estate MCP: this config entry runs the binary directly and overrides the plugin's server (whose launcher adds --readonly for WICKED_ESTATE_READONLY and run markers); `codex mcp remove wicked-estate` lets the plugin serve it");
+  }
   return notes;
 }
 

@@ -12,7 +12,7 @@
 // `mcp add` rewrites the whole entry (other keys are dropped), as codex 0.163 does.
 //
 //   CODEX_STUB_NO_PLUGIN=1   behave like a codex without `codex plugin` (exit 2)
-//   CODEX_STUB_FAIL=<sub>    make one subcommand exit 1: plugin-add | marketplace-add | mcp-add
+//   CODEX_STUB_FAIL=<sub>    make one subcommand exit 1: plugin-add | marketplace-add | mcp-add | mcp-get
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -50,12 +50,12 @@ function configServers() {
   for (const rawLine of configText().split("\n")) {
     // Decode \uXXXX in keys and skip """ blocks, the TOML the tests write.
     const line = rawLine.replace(/\r$/, "").replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-    const triples = (line.match(/"""/g) ?? []).length;
+    const triples = (line.match(/(?<!\\)"""/g) ?? []).length;
     if (inTriple || triples % 2 === 1) { if (triples % 2 === 1) inTriple = !inTriple; continue; }
     const h = HEADER.exec(line);
     if (h) { cur = servers[h[1]] ??= {}; env = !!h[2]; continue; }
     if (/^\s*\[/.test(line)) { cur = undefined; continue; }
-    const kv = /^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*(?:#.*)?$/.exec(line);
+    const kv = /^\s*["']?([A-Za-z_]+)["']?\s*=\s*(.+?)\s*(?:#.*)?$/.exec(line);
     if (!cur || !kv) continue;
     let value;
     try { value = JSON.parse(kv[2]); } catch { value = kv[2]; }
@@ -124,6 +124,7 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   save();
   out({ pluginId: a2, name: plugin, marketplaceName: mkt, version: manifest.version, installedPath: join(base, manifest.version) });
 } else if (a0 === "mcp" && a1 === "get") {
+  if (process.env.CODEX_STUB_FAIL === "mcp-get") fail("stub: mcp get failed");
   const s = configServers()[a2] ?? pluginServers()[a2];
   if (!s) fail(`Error: No MCP server named '${a2}' found.`);
   out({

@@ -547,15 +547,17 @@ test("estate: a stale config entry gets only its command line replaced (every ot
   }
 });
 
-test("estate: a user entry shaped like the plugin's (`wicked-garden run …`) is still a config entry — edited, not replaced", { skip }, () => {
+test("estate: a config entry that runs garden's launcher is never repointed at the raw binary", { skip }, () => {
   const sb = sandbox();
   try {
-    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0"); // off PATH: the launcher cannot find it
+    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0"); // off PATH
     const before = '[mcp_servers.wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\ncwd = "/work"\nenabled = false\n';
     seedConfig(sb, before);
     const r = run(sb);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(configToml(sb).split("\n[marketplaces")[0].trimEnd(), before.replace('"wicked-garden"', JSON.stringify(join(sb.home, ".cargo", "bin", "wicked-estate-mcp"))).trimEnd());
+    assert.ok(configToml(sb).startsWith(before), configToml(sb));
+    assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"));
+    assert.ok(r.garden.notes.some((n) => /launcher would start nothing/.test(n)), r.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
   }
@@ -615,9 +617,9 @@ for (const [label, toml] of [
 }
 
 for (const [label, toml] of [
-  ["an escaped server key", '[mcp_servers."wicked\\u002destate"]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\nenabled = false\n'],
-  ["an escaped table key", '["mcp\\u005fservers".wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\nrequired = true\n'],
-  ["Windows project tables and backslashes in comments and values", "[projects.'C:\\work\\repo']\ntrust_level = \"trusted\"\n\n[mcp_servers.wicked-estate] # was C:\\old\ncommand = \"wicked-garden\" # mcp_servers.wicked-estate\nargs = [\n  \"run\",\n  \"scripts/estate_mcp.mjs\", # C:\\x\n]\n\n[notes]\ntext = \"\"\"\n[mcp_servers.wicked-estate]\ncommand = \"not a table\"\n\"\"\"\n"],
+  ["an escaped server key", '[mcp_servers."wicked\\u002destate"]\ncommand = "/opt/old/wicked-estate-mcp"\nargs = ["--readonly"]\nenabled = false\n'],
+  ["an escaped table key", '["mcp\\u005fservers".wicked-estate]\ncommand = "/opt/old/wicked-estate-mcp"\nargs = ["--readonly"]\nrequired = true\n'],
+  ["Windows project tables and backslashes in comments and values", "[projects.'C:\\work\\repo']\ntrust_level = \"trusted\"\n\n[mcp_servers.wicked-estate] # was C:\\old\ncommand = \"/opt/old/wicked-estate-mcp\" # mcp_servers.wicked-estate\nargs = [\n  \"--readonly\",\n  \"--db\", # C:\\x\n  \"C:\\\\data\\\\g.db\",\n]\n\n[notes]\ntext = \"\"\"\n[mcp_servers.wicked-estate]\ncommand = \"not a table\"\n\"\"\"\n"],
 ]) {
   test(`estate: an entry spelled with ${label} is found and gets only its command line replaced`, { skip }, () => {
     const sb = sandbox();
@@ -628,8 +630,8 @@ for (const [label, toml] of [
       assert.equal(r.status, 0, r.stderr);
       assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"), "no mcp add");
       const lines = toml.split("\n");
-      const i = lines.findIndex((l) => /^command = "wicked-garden"/.test(l));
-      lines[i] = lines[i].replace('"wicked-garden"', JSON.stringify(join(sb.home, ".cargo", "bin", "wicked-estate-mcp")));
+      const i = lines.findIndex((l) => /^command = "\/opt\/old\/wicked-estate-mcp"/.test(l));
+      lines[i] = lines[i].replace('"/opt/old/wicked-estate-mcp"', JSON.stringify(join(sb.home, ".cargo", "bin", "wicked-estate-mcp")));
       assert.equal(configToml(sb).slice(0, lines.join("\n").length), lines.join("\n"), configToml(sb));
       assert.ok(r.garden.notes.some((n) => /only its command line changed/.test(n)), r.garden.notes.join("\n"));
     } finally {
@@ -637,6 +639,31 @@ for (const [label, toml] of [
     }
   });
 }
+
+test("estate: escaped triple quotes and quoted command keys are read like Codex reads them", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    const toml = [
+      'developer_instructions = """Example of \\"""',
+      'example = """',
+      "[mcp_servers.wicked-estate]",
+      '"command" = "/opt/old/wicked-estate-mcp" # keep me',
+      'args = ["run", "scripts/estate_mcp.mjs"]',
+      "required = true",
+      "[profiles.work]",
+      "developer_instructions = 'Explain \"\"\" strings'",
+      "",
+    ].join("\n");
+    seedConfig(sb, toml);
+    const r = run(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"));
+    assert.equal(configToml(sb), toml.replace('"command" = "/opt/old/wicked-estate-mcp"', `"command" = ${JSON.stringify(join(sb.home, ".local", "bin", "wicked-estate-mcp"))}`), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
 
 test("estate: a symlinked config.toml is repaired at its target and stays a symlink", { skip }, () => {
   const sb = sandbox();
@@ -667,25 +694,26 @@ test("estate: a plugin-served server whose launcher finds the current binary is 
   }
 });
 
-test("estate: a binary only in ~/.cargo/bin (off PATH) gets a new config entry — the plugin's launcher cannot find it", { skip }, () => {
+test("estate: with the binary only in ~/.cargo/bin (off PATH) no direct-binary entry is written — the launcher stays in the path, and the fix is named", { skip }, () => {
   const sb = sandbox();
   try {
     fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
     const r = run(sb);
-    assert.match(configToml(sb), new RegExp(`\\[mcp_servers\\.wicked-estate\\]\\ncommand = ${JSON.stringify(join(sb.home, ".cargo", "bin", "wicked-estate-mcp")).replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
-    assert.ok(r.garden.notes.some((n) => /launcher would start nothing/.test(n)), r.garden.notes.join("\n"));
+    assert.doesNotMatch(configToml(sb), /mcp_servers/);
+    assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"));
+    assert.ok(r.garden.notes.some((n) => /launcher would start nothing .* put ~\/\.cargo\/bin first on PATH, or set WICKED_ESTATE_MCP_BIN=/.test(n)), r.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
   }
 });
 
-test("estate: a failed MCP step is a note — the plugin and its marker record stay", { skip }, () => {
+test("estate: an MCP problem after the plugin is registered is a note — the plugin and its marker record stay", { skip }, () => {
   const sb = sandbox();
   try {
-    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0"); // forces a new entry via `codex mcp add`
-    const r = run(sb, [], { CODEX_STUB_FAIL: "mcp-add" });
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    const r = run(sb, [], { CODEX_STUB_FAIL: "mcp-get" });
     assert.equal(r.garden.success, true);
-    assert.ok(r.garden.notes.some((n) => /wicked-estate MCP repair failed: codex mcp add wicked-estate failed/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(r.garden.notes.some((n) => /wicked-estate MCP not checked/.test(n)), r.garden.notes.join("\n"));
     assert.ok(marker(sb).products.find((p) => p.id === "wicked-garden").codexPlugin, "marketplace ownership recorded");
   } finally {
     cleanup(sb);
@@ -708,18 +736,33 @@ test("--dry-run without the global package plans the plugin path instead of the 
   }
 });
 
-test("estate product registers its resolved binary even when the plugin already serves the name", { skip }, () => {
+test("estate product leaves a plugin-served (launcher) server alone — no direct-binary override", { skip }, () => {
   const sb = sandbox();
   try {
-    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0"); // the plugin's launcher finds it: no entry yet
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0"); // the plugin's launcher finds it
     assert.equal(run(sb).status, 0);
     const res = spawnSync(process.execPath, [script, "wicked-estate", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
       encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
-    assert.match(configToml(sb), new RegExp(`\\[mcp_servers\\.wicked-estate\\]\\ncommand = "[^"]+wicked-estate-mcp"\\n(?!args)`),
-      "the plugin's `wicked-garden run …` args are not carried into the config entry");
+    assert.doesNotMatch(configToml(sb), /mcp_servers/);
+    assert.match(res.stdout, /runs garden's estate launcher .* left as it is; it would start ~\/\.local\/bin\/wicked-estate-mcp/);
     assert.ok(marker(sb).products.some((p) => p.id === "wicked-garden" && p.codexPlugin), "the garden record survives a run for another product");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate product registers its resolved binary when nothing serves the name", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
+    mkdirSync(sb.codexHome, { recursive: true });
+    const res = spawnSync(process.execPath, [script, "wicked-estate", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(configToml(sb), /\[mcp_servers\.wicked-estate\]\ncommand = "[^"]+\.cargo\/bin\/wicked-estate-mcp"/);
   } finally {
     cleanup(sb);
   }

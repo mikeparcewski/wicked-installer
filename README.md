@@ -125,8 +125,13 @@ On a Codex with `codex plugin` (codex-cli 0.163+), the Codex script registers ga
      table, a repeated table) is not touched and is never treated as missing; the summary says
      what to change. The file's permissions are kept, and a symlinked `config.toml` is edited
      at its target;
-   - with no entry, the installer adds one (`codex mcp add`) only when the launcher would not start
-     the current binary, for example when the binary sits only in `~/.cargo/bin` off PATH.
+   - garden's launcher stays in the path. It is what adds `--readonly` for
+     `WICKED_ESTATE_READONLY` and run markers, and what refuses an unpinned governed unit. So the
+     plugin's own server, or a config entry running `wicked-garden run scripts/estate_mcp.mjs`, is
+     never replaced by a direct-binary entry. When the launcher would not start the current binary
+     (for example, it sits only in `~/.cargo/bin` off PATH), the summary says how to fix PATH or
+     set `WICKED_ESTATE_MCP_BIN`. A config entry that already runs the binary directly is
+     repaired, and the summary notes that it overrides the plugin's launcher.
 
    An older `~/.cargo/bin` copy that shadows the current binary on PATH is reported.
 
