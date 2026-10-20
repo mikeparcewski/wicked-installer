@@ -5,6 +5,41 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`install-codex` registers wicked-garden as a Codex plugin (codex-cli 0.163+).** When `codex
+  plugin` is available and garden ships `.codex-plugin/plugin.json`, garden is added through a
+  local marketplace at a durable copy of the package: a `--source-root` checkout, or the global
+  npm package, which it now installs (`npm install -g wicked-garden`; only a product registry.json
+  marks `install.codexPlugin: true` is installed this way). It is then installed with
+  `codex plugin add wicked-garden@wicked-garden`, and its skills appear as `wicked-garden:<skill>`.
+  A re-run re-adds the plugin only when the version changes. A same-name marketplace this
+  installer did not add is used as it is, not repointed (`--force` repoints it). Older Codex
+  versions, and garden releases without the manifest, keep the copy path.
+- **The loose skills `install-codex` copied before are removed (they used to accumulate).**
+  The plugin path removes every `wicked-garden-*` skill it can attribute to itself. The copy path
+  removes the ones a release no longer ships. A skill is attributed through the marker: the skill
+  names it now records, or, for a marker written before names were recorded, garden's entry in it
+  plus the installer's naming. Anything else stays, and the summary counts it;
+  `--prune-legacy-skills` opts in to removing those too. A symlink, or anything when the marker is
+  unreadable, is never removed. Removed skills are moved under
+  `$CODEX_HOME/wicked-installer/pruned-skills/<time>/`, so a removal can be undone.
+
+### Fixed
+
+- **The Codex `wicked-estate` MCP entry is repaired to the current binary.** Registration used to
+  hard-code `~/.cargo/bin/wicked-estate-mcp`. It now resolves the binary from
+  `WICKED_ESTATE_MCP_BIN`, PATH, `~/.local/bin` and `~/.cargo/bin`, and picks the highest
+  `wicked-estate --version` (an explicit `WICKED_ESTATE_MCP_BIN` wins). It repairs a config entry
+  that points elsewhere and keeps that entry's args and env. It warns when an older
+  `~/.cargo/bin` copy shadows the current one on PATH. When the garden plugin serves the server
+  and the config has no entry of its own, no entry is written.
+- **Every `codex` call `install-codex` makes now carries `CODEX_HOME` = `--codex-home`.** MCP
+  registration used to run against the default home even when `--codex-home` named another.
+- **The Codex marker keeps the entries of products a run did not touch.** It used to record only the
+  last run. A run for one product therefore erased what an earlier run recorded about another, and
+  ownership-based removal depends on that record.
+
 ## [0.7.1] - 2026-10-10
 
 ### Fixed

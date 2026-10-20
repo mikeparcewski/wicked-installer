@@ -73,8 +73,9 @@ each delivered product's `capabilities` (registry.json) and reports every capabi
 `pending`, with the reason and the fix for each unmet need:
 
 - **launcher** — on PATH, and its read-only self-check passes (`wicked-garden doctor`). Garden
-  skills copied into Codex / OpenCode / Pi / Antigravity reach their scripts only through it;
-  none of those scripts installs it.
+  skills on Codex / OpenCode / Pi / Antigravity reach their scripts only through it. Only
+  `install-codex` on a Codex with `codex plugin` installs it (`npm install -g wicked-garden`,
+  because that package is the plugin's marketplace); the others do not.
 - **python** — `python3` / `python` (`py -3` on Windows) at the floor (3.10 for garden).
 - **backend** — on PATH: `wicked-vault` for garden's evidence gate, `wicked-estate-mcp` for
   mem/search (optional), `wicked-crew` for the daemon.
@@ -86,6 +87,40 @@ fails the install; the closing line says how many capabilities still need someth
 `--offline` skips the registry lookup, `--dry-run` checks PATH only (spawns nothing — a need found
 on PATH but not run makes the capability `unchecked`, never `ready`), and
 `status` runs the same check for the CLIs it detects.
+
+### Codex — wicked-garden as a plugin
+
+On a Codex with `codex plugin` (codex-cli 0.163+), `install-codex wicked-garden` registers garden
+as a **plugin** instead of copying its skills into `$CODEX_HOME/skills`:
+
+1. The plugin source is a durable copy of garden that ships `.codex-plugin/plugin.json`: a
+   `--source-root` checkout, else the global npm package (`npm install -g wicked-garden`, then
+   `$(npm root -g)/wicked-garden`; registry.json marks garden `install.codexPlugin: true`, and no
+   other product is installed globally this way). It is never a temp staging dir, because Codex keeps reading
+   the marketplace root.
+2. `codex plugin marketplace add <that root>` registers the local marketplace `wicked-garden`.
+   A marketplace of that name that this installer did not add is used as it is; `--force`
+   repoints it. Then `codex plugin add wicked-garden@wicked-garden` installs the plugin (Codex
+   copies it to `plugins/cache/wicked-garden/wicked-garden/<version>/`). The plugin is re-added
+   only when the version changes.
+3. Every loose `wicked-garden-*` skill this installer copied earlier is removed. A removed skill is
+   moved to `$CODEX_HOME/wicked-installer/pruned-skills/<time>/`. Ownership comes from the marker:
+   the skill names it now records, or, for a marker written before names were recorded, garden's
+   entry in it plus the installer's naming (`<product>-*` whose `SKILL.md` name is the directory
+   name). Skills the installer cannot attribute to itself are left in place and counted in the
+   summary; `--prune-legacy-skills` removes those too. A symlink is never removed. When the marker
+   is unreadable, nothing is removed.
+4. `wicked-estate` MCP: the plugin declares the server itself, and its launcher finds the binary at
+   start. A `wicked-estate` entry in your Codex config takes precedence over the plugin's, so
+   such an entry is repaired to point at the current binary. Its args and env are kept. The
+   current binary is the highest `wicked-estate --version` among `WICKED_ESTATE_MCP_BIN`, PATH,
+   `~/.local/bin` and `~/.cargo/bin`, unless `WICKED_ESTATE_MCP_BIN` is set, in which case that
+   one wins. An older `~/.cargo/bin` copy that shadows it on PATH is reported.
+
+A re-run with nothing new changes nothing and says so line by line. A Codex without
+`codex plugin`, or a garden release without `.codex-plugin/`, gets the copy path as before. On
+the copy path, skills are now recorded by name, so a skill a later release drops is removed.
+Every `codex` call carries `CODEX_HOME` = the target home (`--codex-home`).
 
 ### `cleanup-legacy` — remove old unregistered wicked-garden copies
 
