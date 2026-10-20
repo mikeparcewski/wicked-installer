@@ -117,7 +117,7 @@ test("plugin path: garden is registered through a local marketplace, every codex
     assert.equal(st.plugins["wicked-garden@wicked-garden"].version, "1.0.0");
     assert.ok(calls(sb).every((c) => c.home === sb.codexHome), "every codex call carried CODEX_HOME = --codex-home");
     assert.deepEqual(marker(sb).products.find((p) => p.id === "wicked-garden").codexPlugin, {
-      pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: join(sb.src, "wicked-garden"), version: "1.0.0", addedByInstaller: true, enabled: true,
+      pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: realpathSync(join(sb.src, "wicked-garden")), version: "1.0.0", addedByInstaller: true, enabled: true,
     });
     assert.ok(!existsSync(join(sb.codexHome, "skills", "wicked-garden-alpha")), "no loose copies on the plugin path");
   } finally {
@@ -788,6 +788,36 @@ test("a disabled garden plugin: no estate check, and the estate product does not
     assert.doesNotMatch(configToml(sb), /mcp_servers/);
     assert.match(res.stdout, /not registered — the garden plugin is disabled/);
     assert.match(res.stdout, /not checked — the garden plugin is disabled/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a non-executable newer copy in ~/.local/bin is never chosen", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".cargo", "bin"), "0.29.0");
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    chmodSync(join(sb.home, ".local", "bin", "wicked-estate-mcp"), 0o644);
+    seedConfig(sb, '[mcp_servers.wicked-estate]\ncommand = "/opt/old/wicked-estate-mcp"\n');
+    run(sb);
+    assert.match(configToml(sb), /command = "[^"]+\.cargo\/bin\/wicked-estate-mcp"/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--dry-run of estate + garden plans no direct-binary estate entry when garden is planned as a plugin", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
+    mkdirSync(sb.codexHome, { recursive: true });
+    const res = spawnSync(process.execPath, [script, "wicked-estate", "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--dry-run", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /would be served by the garden plugin's launcher planned in this run/);
+    assert.doesNotMatch(res.stdout, /would register Codex MCP server wicked-estate/);
   } finally {
     cleanup(sb);
   }
