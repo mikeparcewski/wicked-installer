@@ -5,6 +5,81 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`install-codex` registers wicked-garden as a Codex plugin (codex-cli 0.163+).** When `codex
+  plugin` is available and garden ships `.codex-plugin/plugin.json`, garden is added through a
+  local marketplace at a durable copy of the package: a `--source-root` checkout, or the global
+  npm package, which it now installs (`npm install -g wicked-garden`; only a product registry.json
+  marks `install.codexPlugin: true` is installed this way). It is then installed with
+  `codex plugin add wicked-garden@wicked-garden`, and its skills appear as `wicked-garden:<skill>`.
+  A re-run re-adds the plugin only when the version changes. A plugin the user disabled (seen in either
+  listing) is left exactly as it is: no repoint, no update (`codex plugin add` would re-enable
+  it), no estate check, no shadowing estate entry, and its loose skills are not removed. Loose
+  skills are removed only after an enabled plugin is verified. A failed `codex plugin list` changes nothing. A same-name marketplace this
+  installer did not add is used as it is, not repointed, and its plugin still updates when that
+  marketplace offers a new version. `--force` repoints a local one; a git one is never
+  repointed. Older Codex
+  versions, and garden releases without the manifest, keep the copy path.
+- **The loose skills `install-codex` copied before are removed (they used to accumulate).**
+  The plugin path removes every `wicked-garden-*` skill it can attribute to itself. The copy path
+  removes the ones a release no longer ships. A skill is attributed through the skill names the
+  marker now records. A marker written before names were recorded holds only a count, so the
+  installer-named `<product>-*` dirs are counted and listed under `--dry-run`, but left in place
+  unless `--prune-legacy-skills` is given. A symlink, or anything when the marker is unreadable,
+  is never removed. An unreadable marker is kept aside rather than overwritten. Removed skills are moved under
+  `$CODEX_HOME/wicked-installer/pruned-skills/<time>/`, so a removal can be undone.
+
+### Fixed
+
+- **The Codex `wicked-estate` MCP entry is repaired to the current binary** (other `mcp-binary`
+  products still resolve their own binary by name). Registration used to
+  hard-code `~/.cargo/bin/wicked-estate-mcp`. It now resolves the binary from
+  `WICKED_ESTATE_MCP_BIN`, PATH, `~/.local/bin` and `~/.cargo/bin`, and picks the highest
+  `wicked-estate --version` (an explicit `WICKED_ESTATE_MCP_BIN` wins). It repairs a config entry
+  that points elsewhere by replacing only the `command = …` line of `[mcp_servers.<name>]` in
+  `config.toml`. `codex mcp add` would rewrite the whole entry and drop `cwd`, `env_vars`,
+  `enabled`, `required`, tool lists, approval modes and timeouts. The write is backed up, atomic,
+  and read back through `codex mcp get --json`; the backup is restored unless everything but the
+  command reads back unchanged. The file's permissions are kept, and a symlinked `config.toml`
+  is edited at its target. An entry in another form (dotted keys, a key under `[mcp_servers]`,
+  an inline or repeated table, only subtables, a line it cannot read) is left alone, with the edit
+  to make, and is never mistaken for a missing one. Keys are read with a small TOML key scanner
+  (escapes decoded, literal keys, comments and multi-line values skipped), so Windows project
+  tables and backslashes in comments do not block a repair.
+  garden's launcher (the plugin's server, or a config entry running it) is never replaced by a
+  direct-binary entry. It is what adds `--readonly` for `WICKED_ESTATE_READONLY` and run markers,
+  and when it would not start the current binary, the summary gives the PATH or
+  `WICKED_ESTATE_MCP_BIN` fix. A direct-binary config entry is repaired, with a note that it
+  overrides the launcher. Any other command (a wrapper such as `npx …`) is left alone. The edit
+  is skipped if `config.toml` changed after it was read (checked again after the backup), and a
+  failed read-back restores the backup only if the file is still exactly what the repair wrote.
+  Codex offers no lock, so a writer in the instant before the rename is not detectable.
+  Discovered paths are made absolute, and a renamed `WICKED_ESTATE_MCP_BIN` download still
+  repairs a `wicked-estate-mcp` entry. It warns when an older `~/.cargo/bin`
+  copy shadows the current one on PATH.
+- **On Windows, `codex`/`npm` calls pick a candidate Windows can launch.** `where` can list an
+  extensionless sh wrapper before `npm.cmd`, and the first `.exe`/`.cmd`/`.bat` is now used.
+- **A failed run keeps the product's earlier marker entry whole** (with `lastFailure` beside it),
+  so a failed migration does not erase the evidence a retry needs. A failed `codex plugin add`
+  also rolls back the marketplace change made in the same run. An estate MCP problem after the
+  plugin is registered is reported as a note, not as a failed install.
+- **MCP servers are registered after every product of the run is in place.** Before this,
+  `wicked-estate` followed by `wicked-garden` wrote a direct-binary entry that shadowed the
+  plugin's launcher. For a Codex-plugin product the picker now passes Codex `--plugin-packages`
+  next to `--skip-binaries`, so the package that is its marketplace is installed. No other CLI
+  installs it, and no other binary is re-acquired. A garden found
+  next to a globally installed wicked-installer is treated as the global npm package and
+  refreshed. An installer-owned marketplace whose root was moved or deleted (Codex then refuses
+  every listing) is removed and re-added. That happens only while the configured source is still
+  the recorded one and `config.toml` shows the plugin enabled; otherwise the run stops and says
+  why.
+- **Every `codex` call `install-codex` makes now carries `CODEX_HOME` = `--codex-home`.** MCP
+  registration used to run against the default home even when `--codex-home` named another.
+- **The Codex marker keeps the entries of products a run did not touch.** It used to record only the
+  last run. A run for one product therefore erased what an earlier run recorded about another, and
+  ownership-based removal depends on that record.
+
 ## [0.7.1] - 2026-10-10
 
 ### Fixed

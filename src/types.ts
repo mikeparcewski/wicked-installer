@@ -19,6 +19,7 @@ export interface InstallAction {
   version?: string;          // exact version to pin — for cargo (omit for latest)
   marketplace?: string;      // claude-plugin: what `claude plugin marketplace add` receives (GitHub owner/repo, URL, or path); default mikeparcewski/<id>
   pluginId?: string;         // claude-plugin: `<plugin>@<marketplace>` for `claude plugin install|update`; default <id>@<id>
+  codexPlugin?: boolean;     // npm-run: the package ships .codex-plugin/ — install-codex may `npm install -g` it and register it as a Codex plugin
 }
 
 export interface Product {

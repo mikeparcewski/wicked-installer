@@ -118,13 +118,14 @@
         "command": "install",
         "marketplace": "mikeparcewski/wicked-garden",
         "pluginId": "wicked-garden@wicked-garden",
+        "codexPlugin": true,
         "mcpInstructions": "Run /wicked-garden-core setup in Claude Code to complete configuration (verifies peers; blocks only on wicked-vault, the one the evidence gate needs)."
       },
       "note": "Opinionated bundle — you get everything. Individual components cannot be disabled.",
       "capabilities": [
         {
           "id": "skill-scripts",
-          "label": "script-backed skills (copied skills on Codex / OpenCode / Pi / Antigravity)",
+          "label": "script-backed skills (the Codex plugin, or skills copied into Codex / OpenCode / Pi / Antigravity)",
           "hosts": ["codex", "opencode", "pi", "antigravity"],
           "needs": [
             { "kind": "launcher", "bin": "wicked-garden", "npx": "wicked-garden", "doctor": ["doctor"] },
