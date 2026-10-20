@@ -13,9 +13,10 @@ All notable changes to wicked-installer are documented here. The format follows
   npm package, which it now installs (`npm install -g wicked-garden`; only a product registry.json
   marks `install.codexPlugin: true` is installed this way). It is then installed with
   `codex plugin add wicked-garden@wicked-garden`, and its skills appear as `wicked-garden:<skill>`.
-  A re-run re-adds the plugin only when the version changes. A plugin the user disabled is left
-  exactly as it is: no repoint, no update (`codex plugin add` would re-enable it), and its loose
-  skills are not removed. A failed `codex plugin list` changes nothing. A same-name marketplace this
+  A re-run re-adds the plugin only when the version changes. A plugin the user disabled (seen in either
+  listing) is left exactly as it is: no repoint, no update (`codex plugin add` would re-enable
+  it), no estate check, no shadowing estate entry, and its loose skills are not removed. Loose
+  skills are removed only after an enabled plugin is verified. A failed `codex plugin list` changes nothing. A same-name marketplace this
   installer did not add is used as it is, not repointed, and its plugin still updates when that
   marketplace offers a new version. `--force` repoints a local one; a git one is never
   repointed. Older Codex
@@ -51,8 +52,11 @@ All notable changes to wicked-installer are documented here. The format follows
   and when it would not start the current binary, the summary gives the PATH or
   `WICKED_ESTATE_MCP_BIN` fix. A direct-binary config entry is repaired, with a note that it
   overrides the launcher. Any other command (a wrapper such as `npx …`) is left alone. The edit
-  is skipped if `config.toml` changed after it was read, and a failed read-back restores the
-  backup only if the file is still exactly what the repair wrote. It warns when an older `~/.cargo/bin`
+  is skipped if `config.toml` changed after it was read (checked again after the backup), and a
+  failed read-back restores the backup only if the file is still exactly what the repair wrote.
+  Codex offers no lock, so a writer in the instant before the rename is not detectable.
+  Discovered paths are made absolute, and a renamed `WICKED_ESTATE_MCP_BIN` download still
+  repairs a `wicked-estate-mcp` entry. It warns when an older `~/.cargo/bin`
   copy shadows the current one on PATH.
 - **On Windows, `codex`/`npm` calls pick a candidate Windows can launch.** `where` can list an
   extensionless sh wrapper before `npm.cmd`, and the first `.exe`/`.cmd`/`.bat` is now used.

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -117,7 +117,7 @@ test("plugin path: garden is registered through a local marketplace, every codex
     assert.equal(st.plugins["wicked-garden@wicked-garden"].version, "1.0.0");
     assert.ok(calls(sb).every((c) => c.home === sb.codexHome), "every codex call carried CODEX_HOME = --codex-home");
     assert.deepEqual(marker(sb).products.find((p) => p.id === "wicked-garden").codexPlugin, {
-      pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: join(sb.src, "wicked-garden"), version: "1.0.0", addedByInstaller: true,
+      pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: join(sb.src, "wicked-garden"), version: "1.0.0", addedByInstaller: true, enabled: true,
     });
     assert.ok(!existsSync(join(sb.codexHome, "skills", "wicked-garden-alpha")), "no loose copies on the plugin path");
   } finally {
@@ -719,6 +719,75 @@ test("--dry-run that plans the npm install still previews the loose-skill and es
     assert.equal(g.delivery, "planned");
     assert.ok(g.notes.some((n) => /would remove 1 loose wicked-garden skill/.test(n)), g.notes.join("\n"));
     assert.ok(g.notes.some((n) => /wicked-estate MCP/.test(n)), g.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a plugin disabled between the two listings is neither updated nor followed by loose-skill removal", { skip }, () => {
+  const sb = sandbox();
+  try {
+    assert.equal(run(sb).status, 0);
+    skill(join(sb.codexHome, "skills", "wicked-garden-old"), "wicked-garden-old");
+    const m = marker(sb);
+    m.products.find((p) => p.id === "wicked-garden").skills = ["wicked-garden-old"];
+    writeFileSync(join(sb.codexHome, "wicked-installer", "codex-install.json"), JSON.stringify(m));
+    garden(join(sb.src, "wicked-garden"), "1.1.0");
+    rmSync(join(sb.codexHome, "stub-plugin-list-count"), { force: true });
+    const before = calls(sb).length;
+    run(sb, [], { CODEX_STUB_DISABLE_ON_LIST: "2" });
+    assert.ok(!calls(sb).slice(before).some((c) => c.argv[0] === "plugin" && c.argv[1] === "add"));
+    assert.ok(existsSync(join(sb.codexHome, "skills", "wicked-garden-old")));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a renamed WICKED_ESTATE_MCP_BIN download still repairs a direct-binary entry", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const dl = join(sb.tmp, "dl");
+    mkdirSync(dl, { recursive: true });
+    write(join(dl, "mcp-v0.30"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dl, "mcp-v0.30"), 0o755);
+    seedConfig(sb, '[mcp_servers.wicked-estate]\ncommand = "/opt/old/wicked-estate-mcp"\n');
+    const r = run(sb, [], { WICKED_ESTATE_MCP_BIN: join(dl, "mcp-v0.30") });
+    assert.match(configToml(sb), new RegExp(`command = ${JSON.stringify(join(dl, "mcp-v0.30")).replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a relative PATH entry never becomes a relative MCP command", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.tmp, "rel-tools"), "0.30.0");
+    seedConfig(sb, '[mcp_servers.wicked-estate]\ncommand = "/opt/old/wicked-estate-mcp"\n');
+    const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
+      cwd: sb.tmp, encoding: "utf8", env: { PATH: `rel-tools:${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(configToml(sb), new RegExp(`command = ${JSON.stringify(join(realpathSync(sb.tmp), "rel-tools", "wicked-estate-mcp")).replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a disabled garden plugin: no estate check, and the estate product does not register a shadowing entry", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
+    assert.equal(run(sb).status, 0);
+    const st = state(sb);
+    st.plugins["wicked-garden@wicked-garden"].enabled = false;
+    writeFileSync(join(sb.codexHome, "stub-state.json"), JSON.stringify(st));
+    const res = spawnSync(process.execPath, [script, "wicked-garden", "wicked-estate", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.doesNotMatch(configToml(sb), /mcp_servers/);
+    assert.match(res.stdout, /not registered — the garden plugin is disabled/);
+    assert.match(res.stdout, /not checked — the garden plugin is disabled/);
   } finally {
     cleanup(sb);
   }

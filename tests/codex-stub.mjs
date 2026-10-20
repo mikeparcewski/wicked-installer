@@ -110,11 +110,14 @@ function failOnMissingRoots(what) {
 // CODEX_STUB_FAIL_PLUGIN_LIST_ON=<n>: the n-th `plugin list` fails.
 function maybeFailPluginList() {
   const at = Number(process.env.CODEX_STUB_FAIL_PLUGIN_LIST_ON || 0);
-  if (!at) return;
+  const dis = Number(process.env.CODEX_STUB_DISABLE_ON_LIST || 0);
+  if (!at && !dis) return;
   const counter = join(home, "stub-plugin-list-count");
   const n = (existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0) + 1;
   writeFileSync(counter, String(n));
   if (n === at) fail("stub: plugin list failed");
+  // CODEX_STUB_DISABLE_ON_LIST=<n>: the user disables every plugin just before the n-th list.
+  if (n === dis) { for (const p of Object.values(state.plugins)) p.enabled = false; save(); }
 }
 if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   failOnMissingRoots("marketplace(s)");

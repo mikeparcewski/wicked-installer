@@ -626,7 +626,8 @@ function pluginLauncherResolves(envOverlay: Record<string, string> | null | unde
 function resolveEstateMcpBinary(name = "wicked-estate-mcp", overrideEnv: string | null = "WICKED_ESTATE_MCP_BIN"): EstateResolution {
   const seen = new Set<string>();
   const candidates: EstateCandidate[] = [];
-  const add = (p: string, source: string, needExec: boolean) => {
+  const add = (rawPath: string, source: string, needExec: boolean) => {
+    const p = resolve(rawPath); // a relative PATH entry must not become a relative MCP command
     if (needExec ? !isExecutableFile(p) : !isRegularFile(p)) return;
     let key = p;
     try {
@@ -914,7 +915,7 @@ function visibleSettings(s: CodexMcpServer): string {
  * Point the config-tier entry `name` at `binary`. Returns the note; throws only when Codex
  * cannot be asked at all. Never deletes an entry, never drops a setting.
  */
-function pointCodexMcpAt(name: string, binary: string, version: string | undefined, current: { state: "absent" } | { state: "present"; server: CodexMcpServer; transport: CodexMcpTransport }, options: Options): string {
+function pointCodexMcpAt(name: string, binary: string, version: string | undefined, current: { state: "absent" } | { state: "present"; server: CodexMcpServer; transport: CodexMcpTransport }, options: Options, canonicalBinary: string = binary): string {
   const label = `${homeTilde(binary)}${version ? ` (${version})` : ""}`;
   const configPath = join(options.codexHome, "config.toml");
   // A config.toml that is a symlink (dotfile managers) is edited at its target, so the link stays.
@@ -944,9 +945,11 @@ function pointCodexMcpAt(name: string, binary: string, version: string | undefin
   // Only an entry that runs the estate binary itself is repointed: a wrapper (npx, node, a
   // shell script) takes arguments meant for itself, which the bare binary would not accept.
   const exe = (p: string) => (p.split(/[\\/]/).pop() ?? "").replace(/\.exe$/i, "").toLowerCase();
-  const runsBinary = current.state === "present" && exe(String(current.transport.command ?? "")) === exe(binary);
+  // The product's canonical executable name decides, not the replacement's (an override may be
+  // a renamed download).
+  const runsBinary = current.state === "present" && (exe(String(current.transport.command ?? "")) === exe(canonicalBinary) || current.transport.command === binary);
   if (!runsBinary) {
-    return `Codex MCP server ${name}: not changed (its command ${was} is not the ${exe(binary)} binary) — point it at ${binary} yourself if it should run that`;
+    return `Codex MCP server ${name}: not changed (its command ${was} is not the ${exe(canonicalBinary)} binary) — point it at ${binary} yourself if it should run that`;
   }
   if (options.dryRun) return `would repair Codex MCP server ${name}: ${was} -> ${label} (only its command line changes)`;
   const raw = table.lines[table.commandLine];
@@ -970,7 +973,10 @@ function pointCodexMcpAt(name: string, binary: string, version: string | undefin
   }
   cpSync(configFile, backup);
   chmodSync(backup, mode);
-  if (readFileSync(backup, "utf8") !== text) {
+  // Re-check the LIVE file after the backup (and the backup itself): another writer in between
+  // keeps its change and nothing is written. A writer in the instant before the rename is not
+  // detectable without a lock Codex does not offer.
+  if (readFileSync(backup, "utf8") !== text || readFileSync(configFile, "utf8") !== text) {
     // Another writer got in between the check and the backup: keep theirs, write nothing.
     rmSync(tmp, { force: true });
     rmSync(backup, { force: true });
@@ -1017,7 +1023,7 @@ function registerCodexMcp(product: Product, options: Options): string[] {
     notes.push(`Codex MCP server ${product.id}: runs garden's estate launcher (it resolves the binary at start and adds --readonly where it must) — left as it is; it would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}${launcher && samePath(launcher, chosen.path) ? "" : `, not ${homeTilde(chosen.path)} — put ${homeTilde(dirname(chosen.path))} first on PATH or set WICKED_ESTATE_MCP_BIN`}`);
     return notes;
   }
-  notes.push(pointCodexMcpAt(product.id, chosen.path, chosen.version, current, options));
+  notes.push(pointCodexMcpAt(product.id, chosen.path, chosen.version, current, options, estate ? "wicked-estate-mcp" : binaryName));
   return notes;
 }
 
@@ -1068,6 +1074,10 @@ function repairEstateForPlugin(options: Options): string[] {
   const configFile = join(options.codexHome, "config.toml");
   const table = findConfigServerTable(existsSync(configFile) ? readFileSync(configFile, "utf8") : "", "wicked-estate");
   const homeEntry = table !== "none";
+  if (!homeEntry && current.state === "absent" && !options.dryRun) {
+    notes.push("wicked-estate MCP: Codex reports no wicked-estate server (is the garden plugin enabled?)");
+    return notes;
+  }
   // Served through garden's launcher: the plugin's own server, or a config entry that runs the
   // same launcher. Either resolves the binary at start, so neither is ever repointed.
   const pluginServed = (!homeEntry && !(current.state === "present" && isConfigTier(current.transport)))
@@ -1095,7 +1105,7 @@ function repairEstateForPlugin(options: Options): string[] {
     }
     return notes;
   }
-  notes.push(pointCodexMcpAt("wicked-estate", chosen.path, chosen.version, current, options));
+  notes.push(pointCodexMcpAt("wicked-estate", chosen.path, chosen.version, current, options, "wicked-estate-mcp"));
   const runsBinaryNow = current.state === "present" && /(^|[\\/])wicked-estate-mcp(\.exe)?$/i.test(String(current.transport.command ?? ""));
   if (runsBinaryNow && isConfigTier(current.transport) && !(typeof table === "object" && "ambiguous" in table)) {
     notes.push("wicked-estate MCP: this config entry runs the binary directly and overrides the plugin's server (whose launcher adds --readonly for WICKED_ESTATE_READONLY and run markers); `codex mcp remove wicked-estate` lets the plugin serve it");
@@ -1511,17 +1521,28 @@ function configPluginEnabled(options: Options, pluginId: string): boolean | unde
   if (!existsSync(file)) return undefined;
   let table: string[] = [];
   let found: boolean | undefined;
+  let open: OpenValue | undefined;
   try {
     for (const raw of readFileSync(file, "utf8").split("\n")) {
       const l = raw.replace(/\r$/, "");
+      if (open) {
+        if (open.kind === "array") {
+          const depth = scanBrackets(l, 0, open.depth);
+          open = depth > 0 ? { kind: "array", depth } : undefined;
+        } else if (open.kind === "basic3" ? tripleBasicClose(l, 0) >= 0 : l.includes(TRIPLE_LITERAL)) {
+          open = undefined;
+        }
+        continue;
+      }
       if (/^\s*(#|$)/.test(l)) continue;
       const lead = l.search(/\S/);
       if (l[lead] === "[") {
         table = scanKeyPath(l, lead + (l[lead + 1] === "[" ? 2 : 1)).path;
         continue;
       }
-      if (table.length !== 2 || table[0] !== "plugins" || table[1] !== pluginId) continue;
       const { path, end } = scanKeyPath(l, lead);
+      if (l[end] === "=") open = openValueAfter(l, end + 1);
+      if (table.length !== 2 || table[0] !== "plugins" || table[1] !== pluginId) continue;
       if (path.length === 1 && path[0] === "enabled" && l[end] === "=") {
         const v = l.slice(end + 1).replace(/#.*$/, "").trim();
         found = v === "true" ? true : v === "false" ? false : undefined;
@@ -1664,14 +1685,19 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   const list = codexJson<PluginList>(["plugin", "list", "--json"], options);
   if (!list) throw new Error(`codex plugin list --json gave no answer${changedSource ? rollBackMarketplace() : ""}`);
   const installed = (list.installed ?? []).find((p) => p.pluginId === pluginId && p.installed !== false);
+  if (installed && installed.enabled === false && !options.force) {
+    notes.push(`plugin ${pluginId} ${installed.version} is disabled — left as you set it; re-enable it, then re-run`);
+    return { ...record, version: installed.version ?? src.version, enabled: false };
+  }
   const viaForeign = record.source !== src.root;
   // The version wanted is the one the marketplace actually in use offers (a foreign one may be
   // behind or ahead of src). Unknown (a source the installer cannot read) → leave it installed.
   const wanted = viaForeign ? marketplacePluginVersion(existing?.root ?? record.source, src.pluginName) : src.version;
   // A marketplace that now points at a different root must re-copy the plugin even at the same version.
   if (installed && (wanted === undefined || installed.version === wanted) && !changedSource && !options.force) {
-    notes.push(`plugin ${pluginId} ${installed.version} already installed${wanted === undefined ? " (its marketplace's version could not be read)" : ""}${installed.enabled === false ? " (disabled — `codex plugin` settings; left as you set it)" : ""}`);
+    notes.push(`plugin ${pluginId} ${installed.version} already installed${wanted === undefined ? " (its marketplace's version could not be read)" : ""}`);
     record.version = installed.version ?? src.version;
+    record.enabled = installed.enabled !== false;
     return record;
   }
   if (options.dryRun) {
@@ -1694,6 +1720,7 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   if (!landed) throw new Error(`codex plugin add ${pluginId} exited 0 but codex plugin list does not show it installed${changedSource ? rollBackMarketplace() : ""}`);
   version = landed.version ?? version;
   record.version = version;
+  record.enabled = landed.enabled !== false;
   notes.push(!installed ? `installed plugin ${pluginId} ${version}`
     : installed.version === version ? `re-copied plugin ${pluginId} ${version} from ${homeTilde(record.source)}`
     : `updated plugin ${pluginId} ${installed.version} -> ${version}`);
@@ -1880,10 +1907,12 @@ function installAsPlugin(product: Product, src: PluginSource, prior: MarkerProdu
   const skills = countSkillFiles(join(src.root, "skills"));
   // Every loose skill the installer copied for this product is now duplicated by the plugin —
   // unless the plugin is disabled: then the loose copies are still what works, and stay owned.
-  const leftover = record.enabled === false
+  const leftover = record.enabled !== true && !options.dryRun
     ? (Array.isArray(prior?.skills) ? prior!.skills.filter((n): n is string => typeof n === "string") : [])
     : pruneLooseSkills(product.id, prior, new Set(), options, notes);
-  if (product.id === "wicked-garden") {
+  if (product.id === "wicked-garden" && record.enabled === false) {
+    notes.push("wicked-estate MCP: not checked — the garden plugin is disabled, so it serves no estate server");
+  } else if (product.id === "wicked-garden") {
     // The plugin is registered by now; an estate repair problem is reported, not a failed install
     // (failing here would drop the marker's record of the marketplace just added).
     try {
@@ -2183,9 +2212,14 @@ async function main(): Promise<void> {
     if (marker?.warning) report.notes.push(marker.warning);
     reports.push(report);
   }
+  const gardenDisabled = reports.some((r) => r.productId === "wicked-garden" && r.codexPlugin?.enabled === false);
   for (const [i, product] of products.entries()) {
     const report = reports[i];
     if (product.type !== "mcp-binary" || !report.success) continue;
+    if (product.id === "wicked-estate" && gardenDisabled) {
+      report.notes.push("Codex MCP server wicked-estate: not registered — the garden plugin is disabled, and a direct-binary entry would shadow its launcher once re-enabled; re-enable it and re-run");
+      continue;
+    }
     try {
       report.notes.push(...registerCodexMcp(product, options));
     } catch (err) {
