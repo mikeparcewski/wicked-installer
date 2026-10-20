@@ -102,7 +102,22 @@ function pluginServers() {
 }
 
 const [a0, a1, a2, a3] = argv;
+// Like codex 0.163: every listing fails while a configured local marketplace root is gone.
+function failOnMissingRoots(what) {
+  const gone = Object.entries(state.marketplaces).filter(([, m]) => (m.sourceType ?? "local") === "local" && !existsSync(m.source));
+  if (gone.length) fail(`Error: failed to load ${what}:\n${gone.map(([n, m]) => `- \`${n}\` at ${m.source}: marketplace root does not contain a supported manifest`).join("\n")}`);
+}
+// CODEX_STUB_FAIL_PLUGIN_LIST_ON=<n>: the n-th `plugin list` fails.
+function maybeFailPluginList() {
+  const at = Number(process.env.CODEX_STUB_FAIL_PLUGIN_LIST_ON || 0);
+  if (!at) return;
+  const counter = join(home, "stub-plugin-list-count");
+  const n = (existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0) + 1;
+  writeFileSync(counter, String(n));
+  if (n === at) fail("stub: plugin list failed");
+}
 if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
+  failOnMissingRoots("marketplace(s)");
   out({ marketplaces: Object.entries(state.marketplaces).map(([name, m]) => ({ name, root: m.source, marketplaceSource: { sourceType: m.sourceType ?? "local", source: m.source } })) });
 } else if (a0 === "plugin" && a1 === "marketplace" && a2 === "add") {
   if (process.env.CODEX_STUB_FAIL === "marketplace-add") fail("stub: marketplace add failed");
@@ -122,6 +137,8 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
 } else if (a0 === "plugin" && a1 === "list" && process.env.CODEX_STUB_FAIL === "plugin-list") {
   fail("stub: plugin list failed");
 } else if (a0 === "plugin" && a1 === "list") {
+  failOnMissingRoots("configured marketplace snapshot(s)");
+  maybeFailPluginList();
   out({ installed: Object.entries(state.plugins).map(([id, p]) => ({ pluginId: id, name: id.split("@")[0], marketplaceName: id.split("@")[1], version: p.version, installed: true, enabled: p.enabled !== false })), available: [] });
 } else if (a0 === "plugin" && a1 === "add") {
   if (process.env.CODEX_STUB_FAIL === "plugin-add") fail("stub: plugin add failed");

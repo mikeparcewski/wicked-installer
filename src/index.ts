@@ -256,8 +256,11 @@ export async function dispatchToClis(
   }
 
   for (const [index, cli] of clis.entries()) {
-    // Binaries are machine-scoped: acquire once (first script), skip thereafter.
-    const skipBinaries = index > 0;
+    // Binaries are machine-scoped: acquire once (first script), skip thereafter. Codex is the
+    // exception for a product it registers as a plugin: the global npm package IS that plugin's
+    // marketplace, and no other CLI's script installs it.
+    const codexNeedsPackage = cli.cli === "codex" && productIds.some((id) => getProduct(id)?.install.codexPlugin === true);
+    const skipBinaries = index > 0 && !codexNeedsPackage;
     const suffix = skipBinaries ? chalk.dim(" (binaries already acquired)") : "";
     console.log(`\n${chalk.cyan("→")} Installing into ${chalk.bold(cli.displayName)}${suffix}${flags.dryRun ? chalk.dim(" [dry-run]") : ""}...`);
     // The Claude script never receives plugin products — they are registered below. Other

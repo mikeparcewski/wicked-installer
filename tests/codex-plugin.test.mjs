@@ -422,7 +422,9 @@ test("repointing the installer's own marketplace re-copies the plugin even at th
     rmSync(join(sb.src, "wicked-garden"), { recursive: true });
     garden(join(sb.tmp, "global", "wicked-garden"), "1.0.0");
     const r = run(sb);
-    assert.ok(r.garden.notes.some((n) => /repointed marketplace wicked-garden/.test(n)), r.garden.notes.join("\n"));
+    // The old checkout is gone, so Codex refuses every listing until its marketplace is removed.
+    assert.ok(r.garden.notes.some((n) => /removed marketplace wicked-garden: its root .* is gone/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(r.garden.notes.some((n) => /added marketplace wicked-garden ->/.test(n)), r.garden.notes.join("\n"));
     assert.ok(calls(sb).slice(before).some((c) => c.argv[0] === "plugin" && c.argv[1] === "add"), "plugin re-added from the new root");
     assert.ok(state(sb).plugins["wicked-garden@wicked-garden"].path.length > 0);
   } finally {
@@ -548,6 +550,84 @@ test("another mcp-binary product registers its own binary, not wicked-estate-mcp
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(configToml(sb), /\[mcp_servers\.acme\]\ncommand = "[^"]+\/acme-mcp"/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--dry-run never removes a marketplace, even when a later query fails", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const other = join(sb.tmp, "user-garden");
+    garden(other, "0.9.0");
+    mkdirSync(sb.codexHome, { recursive: true });
+    write(join(sb.codexHome, "stub-state.json"), JSON.stringify({ marketplaces: { "wicked-garden": { source: other } }, plugins: {}, mcp: {} }));
+    run(sb, ["--dry-run", "--force"], { CODEX_STUB_FAIL_PLUGIN_LIST_ON: "2" });
+    assert.ok(!calls(sb).some((c) => c.argv.slice(0, 3).join(" ") === "plugin marketplace remove" || c.argv.slice(0, 3).join(" ") === "plugin marketplace add"));
+    assert.equal(state(sb).marketplaces["wicked-garden"].source, other);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate + garden in one run: no direct-binary entry shadows the plugin's launcher", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    const reg = JSON.parse(readFileSync(sb.registry, "utf8"));
+    reg.products.reverse(); // registry.json order: wicked-estate before wicked-garden
+    writeFileSync(sb.registry, JSON.stringify(reg));
+    const res = spawnSync(process.execPath, [script, "wicked-estate", "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.doesNotMatch(configToml(sb), /mcp_servers/);
+    assert.match(res.stdout, /runs garden's estate launcher .* left as it is/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("another mcp-binary product ignores WICKED_ESTATE_MCP_BIN", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
+    write(join(sb.home, ".cargo", "bin", "acme-mcp"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(sb.home, ".cargo", "bin", "acme-mcp"), 0o755);
+    const reg = JSON.parse(readFileSync(sb.registry, "utf8"));
+    reg.products.push({ id: "acme", displayName: "Acme", description: "d", type: "mcp-binary", standalone: true, opinionated: false, status: "stable", requires: [], install: { type: "cargo", crate: "acme-mcp" } });
+    writeFileSync(sb.registry, JSON.stringify(reg));
+    mkdirSync(sb.codexHome, { recursive: true });
+    const res = spawnSync(process.execPath, [script, "acme", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log, WICKED_ESTATE_MCP_BIN: join(sb.home, ".cargo", "bin", "wicked-estate-mcp") }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(configToml(sb), /\[mcp_servers\.acme\]\ncommand = "[^"]+\/acme-mcp"/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("dispatch: Codex gets no --skip-binaries for a Codex-plugin product even after another CLI", { skip }, async () => {
+  const sb = sandbox();
+  try {
+    const mk = (cli) => {
+      const log = join(sb.tmp, `${cli}.args`);
+      const p = join(sb.tmp, `install-${cli}.mjs`);
+      writeFileSync(p, `import { appendFileSync } from "node:fs"; appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(" ") + "\\n"); console.log("{}");\n`);
+      return { opt: { cli, displayName: cli, scriptPath: p, detected: true, binOnPath: true, homeDetected: false }, log };
+    };
+    const pi = mk("pi");
+    const cx = mk("codex");
+    const index = await import(join(root, "dist", "index.js"));
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      await index.dispatchToClis([pi.opt, cx.opt], ["wicked-garden"], { dryRun: false, force: false, claudeHomes: [], offline: true });
+    } finally {
+      console.log = origLog;
+    }
+    assert.doesNotMatch(readFileSync(cx.log, "utf8"), /--skip-binaries/);
   } finally {
     cleanup(sb);
   }

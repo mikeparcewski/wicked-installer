@@ -611,7 +611,7 @@ function pluginLauncherResolves(): string | undefined {
   return undefined;
 }
 
-function resolveEstateMcpBinary(name = "wicked-estate-mcp", overrideEnv: string | undefined = "WICKED_ESTATE_MCP_BIN"): EstateResolution {
+function resolveEstateMcpBinary(name = "wicked-estate-mcp", overrideEnv: string | null = "WICKED_ESTATE_MCP_BIN"): EstateResolution {
   const seen = new Set<string>();
   const candidates: EstateCandidate[] = [];
   const add = (p: string, source: string, needExec: boolean) => {
@@ -627,7 +627,7 @@ function resolveEstateMcpBinary(name = "wicked-estate-mcp", overrideEnv: string 
     candidates.push({ path: p, source });
   };
   const override = overrideEnv ? process.env[overrideEnv] : undefined;
-  if (override) add(resolve(expandHome(override)), overrideEnv ?? "", false);
+  if (override && overrideEnv) add(resolve(expandHome(override)), overrideEnv, false);
   for (const dir of pathDirs()) for (const n of exeNames(name)) add(join(dir, n), "PATH", true);
   for (const n of exeNames(name)) add(join(homedir(), ".local", "bin", n), "~/.local/bin", false);
   add(cargoBinaryPath(name), "~/.cargo/bin", true);
@@ -958,6 +958,12 @@ function pointCodexMcpAt(name: string, binary: string, version: string | undefin
   }
   cpSync(configFile, backup);
   chmodSync(backup, mode);
+  if (readFileSync(backup, "utf8") !== text) {
+    // Another writer got in between the check and the backup: keep theirs, write nothing.
+    rmSync(tmp, { force: true });
+    rmSync(backup, { force: true });
+    return `Codex MCP server ${name}: not changed — config.toml changed while it was being repaired; re-run to repair it`;
+  }
   renameSync(tmp, configFile);
   const after = codexMcpGet(name, options);
   const ok = after.state === "present" && after.transport.command === binary
@@ -985,7 +991,7 @@ function registerCodexMcp(product: Product, options: Options): string[] {
   // mcp-binary product resolves its own binary by name (PATH → ~/.local/bin → ~/.cargo/bin).
   const binaryName = product.install.crate ?? product.install.package ?? product.id;
   const estate = product.id === "wicked-estate";
-  const resolution = estate ? resolveEstateMcpBinary() : resolveEstateMcpBinary(binaryName, undefined);
+  const resolution = estate ? resolveEstateMcpBinary() : resolveEstateMcpBinary(binaryName, null);
   notes.push(...resolution.warnings);
   const chosen = resolution.chosen;
   if (!chosen) {
@@ -1073,7 +1079,8 @@ function repairEstateForPlugin(options: Options): string[] {
     return notes;
   }
   notes.push(pointCodexMcpAt("wicked-estate", chosen.path, chosen.version, current, options));
-  if (current.state === "present" && isConfigTier(current.transport) && !isLauncherEntry(current.transport)) {
+  const runsBinaryNow = current.state === "present" && /(^|[\\/])wicked-estate-mcp(\.exe)?$/i.test(String(current.transport.command ?? ""));
+  if (runsBinaryNow && isConfigTier(current.transport) && !(typeof table === "object" && "ambiguous" in table)) {
     notes.push("wicked-estate MCP: this config entry runs the binary directly and overrides the plugin's server (whose launcher adds --readonly for WICKED_ESTATE_READONLY and run markers); `codex mcp remove wicked-estate` lets the plugin serve it");
   }
   return notes;
@@ -1429,7 +1436,11 @@ function npmGlobalRoot(): string | undefined {
  * else the global npm package (`npm install -g <pkg>` first, unless --skip-binaries/--dry-run).
  */
 function resolvePluginSource(product: Product, options: Options, notes: string[]): PluginSource | "planned" | undefined {
-  const local = localProductRoot(product, options);
+  // A "local source" that is really the global npm package (a globally installed installer's
+  // default source root is that node_modules) takes the npm path, so it is refreshed.
+  const localCandidate = localProductRoot(product, options);
+  const globalRootNow = product.install.codexPlugin === true ? npmGlobalRoot() : undefined;
+  const local = localCandidate && globalRootNow && samePath(dirname(localCandidate), globalRootNow) ? undefined : localCandidate;
   if (local) {
     const found = pluginSourceAt(local, "local");
     if (typeof found !== "string") return found;
@@ -1515,8 +1526,24 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   }
 
   // 1. The marketplace.
-  const mkts = codexJson<MarketplaceList>(["plugin", "marketplace", "list", "--json"], options);
-  if (!mkts) throw new Error("codex plugin marketplace list --json gave no answer");
+  let mkts = codexJson<MarketplaceList>(["plugin", "marketplace", "list", "--json"], options);
+  if (!mkts) {
+    // Codex refuses every listing while a configured local marketplace root is gone (a moved
+    // checkout). The installer's OWN marketplace in that state is removed so it can be re-added.
+    const why = codex(["plugin", "marketplace", "list", "--json"], options).out;
+    const gone = !!prior && prior.addedByInstaller !== false && prior.enabled !== false && prior.marketplace === src.marketplace
+      && !existsSync(prior.source) && why.includes(`\`${src.marketplace}\``);
+    if (!gone) throw new Error(`codex plugin marketplace list --json gave no answer: ${why.trim().slice(0, 300)}`);
+    if (options.dryRun) {
+      notes.push(`would remove marketplace ${src.marketplace} (its root ${homeTilde(prior!.source)} is gone) and add it -> ${homeTilde(src.root)}`);
+      return record;
+    }
+    const rm = codex(["plugin", "marketplace", "remove", src.marketplace], options);
+    if (rm.error || rm.status !== 0) throw new Error(`codex plugin marketplace remove ${src.marketplace} failed: ${rm.error ?? rm.out.trim().slice(0, 300)}`);
+    notes.push(`removed marketplace ${src.marketplace}: its root ${homeTilde(prior!.source)} is gone`);
+    mkts = codexJson<MarketplaceList>(["plugin", "marketplace", "list", "--json"], options);
+    if (!mkts) throw new Error("codex plugin marketplace list --json gave no answer");
+  }
   const existing = (mkts.marketplaces ?? []).find((m) => m.name === src.marketplace);
   const existingSource = existing?.marketplaceSource?.source ?? existing?.root;
   const ours = !!prior && prior.addedByInstaller !== false && !!existingSource && samePath(prior.source, existingSource);
@@ -1569,6 +1596,7 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   notes.push(marketplace);
   /** Undo this run's marketplace change (the marker still holds the previous record). */
   const rollBackMarketplace = (): string => {
+    if (options.dryRun) return ""; // a dry run changed nothing, so there is nothing to undo
     const rm = codex(["plugin", "marketplace", "remove", src.marketplace], options);
     if (rm.error || rm.status !== 0) return `; removing the marketplace it just added failed too`;
     if (existing && existingSource) { // only ever a local marketplace (non-local ones are never repointed)
@@ -1727,11 +1755,9 @@ async function installOne(product: Product, options: Options, prior: MarkerProdu
 
     notes.push(...installProductBinaries(product, options));
 
-    // Register (or repair) the MCP server with the Codex CLI after its binary is
-    // installed — an mcp-binary product is only usable in Codex once registered.
-    if (product.type === "mcp-binary") {
-      notes.push(...registerCodexMcp(product, options));
-    }
+    // An mcp-binary product's MCP server is registered by main() after EVERY product of the run
+    // is in place: a garden plugin installed later in the same run serves wicked-estate through
+    // its launcher, and registering the raw binary first would shadow it.
 
     source = stageProduct(product, options);
     let copied: string[] = [];
@@ -2087,6 +2113,16 @@ async function main(): Promise<void> {
     const report = await installOne(product, options, prior);
     if (marker?.warning) report.notes.push(marker.warning);
     reports.push(report);
+  }
+  for (const [i, product] of products.entries()) {
+    const report = reports[i];
+    if (product.type !== "mcp-binary" || !report.success) continue;
+    try {
+      report.notes.push(...registerCodexMcp(product, options));
+    } catch (err) {
+      report.success = false;
+      report.message = `${product.displayName}: failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
   writeInstallMarker(options, reports, marker?.warning ? [] : previous);
 
