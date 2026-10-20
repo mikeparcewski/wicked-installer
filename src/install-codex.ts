@@ -696,57 +696,158 @@ function codexMcpGet(name: string, options: Options): { state: "absent" } | { st
 // or the backup is restored. A new entry (none in config.toml) is created with `codex mcp add`.
 // ---------------------------------------------------------------------------
 
-function escapeRegExp(v: string): string {
-  return v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 type ConfigTable = { lines: string[]; commandLine: number } | "none" | { ambiguous: string };
 
+// A small TOML reader for exactly what the repair needs: the decoded key path of every table
+// header and key/value line (bare, "basic" with escapes, 'literal' segments), with values,
+// multi-line strings and multi-line arrays skipped correctly and comments ignored. Anything it
+// cannot read is an error, which the caller turns into "ambiguous" (never into "absent").
+
+class TomlScanError extends Error {}
+
+const TRIPLE_BASIC = '"""';
+const TRIPLE_LITERAL = "'''";
+
+/** Decode one key path starting at `pos`; returns the segments and where it ended. */
+function scanKeyPath(line: string, pos: number): { path: string[]; end: number } {
+  const path: string[] = [];
+  let i = pos;
+  for (;;) {
+    while (line[i] === " " || line[i] === "\t") i += 1;
+    const c = line[i];
+    if (c === '"') {
+      let out = "";
+      i += 1;
+      for (;;) {
+        const ch = line[i];
+        if (ch === undefined) throw new TomlScanError("unterminated quoted key");
+        if (ch === '"') { i += 1; break; }
+        if (ch === "\\") {
+          const e = line[i + 1];
+          const simple: Record<string, string> = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", '"': '"', "\\": "\\", e: "\u001b" };
+          if (e in simple) { out += simple[e]; i += 2; continue; }
+          const hexLen = e === "u" ? 4 : e === "U" ? 8 : e === "x" ? 2 : 0;
+          const hex = line.slice(i + 2, i + 2 + hexLen);
+          if (!hexLen || hex.length !== hexLen || !/^[0-9A-Fa-f]+$/.test(hex)) throw new TomlScanError("bad escape in key");
+          out += String.fromCodePoint(Number.parseInt(hex, 16));
+          i += 2 + hexLen;
+          continue;
+        }
+        out += ch;
+        i += 1;
+      }
+      path.push(out);
+    } else if (c === "'") {
+      const close = line.indexOf("'", i + 1);
+      if (close < 0) throw new TomlScanError("unterminated literal key");
+      path.push(line.slice(i + 1, close));
+      i = close + 1;
+    } else {
+      const m = /^[A-Za-z0-9_-]+/.exec(line.slice(i));
+      if (!m) throw new TomlScanError("bad key");
+      path.push(m[0]);
+      i += m[0].length;
+    }
+    while (line[i] === " " || line[i] === "\t") i += 1;
+    if (line[i] === ".") { i += 1; continue; }
+    return { path, end: i };
+  }
+}
+
+/** Bracket depth after scanning `line` from `pos` (strings and comments respected). */
+function scanBrackets(line: string, pos: number, depth: number): number {
+  for (let i = pos; i < line.length; i += 1) {
+    const c = line[i];
+    if (c === "#") break;
+    if (c === '"') {
+      for (i += 1; i < line.length && line[i] !== '"'; i += 1) if (line[i] === "\\") i += 1;
+    } else if (c === "'") {
+      const close = line.indexOf("'", i + 1);
+      i = close < 0 ? line.length : close;
+    } else if (c === "[" || c === "{") depth += 1;
+    else if (c === "]" || c === "}") depth -= 1;
+  }
+  return depth;
+}
+
+type OpenValue = { kind: "basic3" | "literal3" } | { kind: "array"; depth: number };
+
+/** A value that continues past its line (a multi-line string or array), else undefined. */
+function openValueAfter(line: string, pos: number): OpenValue | undefined {
+  let i = pos;
+  while (line[i] === " " || line[i] === "\t") i += 1;
+  if (line.startsWith(TRIPLE_BASIC, i)) return line.indexOf(TRIPLE_BASIC, i + 3) >= 0 ? undefined : { kind: "basic3" };
+  if (line.startsWith(TRIPLE_LITERAL, i)) return line.indexOf(TRIPLE_LITERAL, i + 3) >= 0 ? undefined : { kind: "literal3" };
+  if (line[i] === "[") {
+    const depth = scanBrackets(line, i, 0);
+    return depth > 0 ? { kind: "array", depth } : undefined;
+  }
+  return undefined;
+}
+
 /**
- * Locate `[mcp_servers.<name>]` (bare or quoted keys) and its single-line `command = "…"` in
- * config.toml text. Deliberately conservative: ANY other way the name could be defined —
- * dotted keys (`mcp_servers."x".command = …`), a key under `[mcp_servers]`, an inline
- * `mcp_servers = {…}`, a repeated table, a multi-line command — is `ambiguous`, never `none`,
- * so nothing that might be an existing entry is ever treated as absent and overwritten.
+ * Locate `[mcp_servers.<name>]` (any key spelling, escapes decoded) and its single-line
+ * `command = "…"` in config.toml text. Conservative: any OTHER way the server could be
+ * defined — dotted keys, a key or inline table under `[mcp_servers]`, an inline `mcp_servers`,
+ * a repeated table, only subtables, an array of tables, a multi-line command, or a line the
+ * reader cannot parse — is `ambiguous`, never `none`, so nothing that might be an existing
+ * entry is ever treated as absent and overwritten.
  */
 function findConfigServerTable(text: string, name: string): ConfigTable {
   const lines = text.split("\n");
-  const tok = (x: string) => `(?:${escapeRegExp(x)}(?![\\w-])|"${escapeRegExp(x)}"|'${escapeRegExp(x)}')`;
-  const MS = tok("mcp_servers");
-  const NM = tok(name);
-  const mainHeader = new RegExp(`^\\s*\\[\\s*${MS}\\s*\\.\\s*${NM}\\s*\\]\\s*(?:#.*)?$`);
-  const subHeader = new RegExp(`^\\s*\\[\\s*${MS}\\s*\\.\\s*${NM}\\s*\\.`);
-  const serversHeader = new RegExp(`^\\s*\\[\\s*${MS}\\s*\\]\\s*(?:#.*)?$`);
-  const dotted = new RegExp(`${MS}\\s*\\.\\s*${NM}`);
-  const keyAtStart = new RegExp(`^\\s*${NM}\\s*[.=]`);
-  const inlineServers = new RegExp(`^\\s*${MS}\\s*=`);
-  const anyHeader = /^\s*\[/;
-  const clean = (l: string) => l.replace(/\r$/, "");
   const starts: number[] = [];
-  let inServersTable = false;
-  for (let i = 0; i < lines.length; i += 1) {
-    const l = clean(lines[i]);
-    if (/^\s*(#|$)/.test(l)) continue;
-    // A quoted key may spell any name with escapes (`"wicked\u002destate"`): with an escape in a
-    // header or a key, absence can no longer be established by text, so nothing is changed.
-    const keyPart = anyHeader.test(l) ? l : l.split("=")[0];
-    if (keyPart.includes("\\")) return { ambiguous: "config.toml spells a key with escapes" };
-    if (anyHeader.test(l)) {
-      inServersTable = serversHeader.test(l);
-      if (mainHeader.test(l)) starts.push(i);
-      else if (!subHeader.test(l) && dotted.test(l)) return { ambiguous: `${name} appears in an unexpected table header` };
-      continue;
+  let sawSubtable = false;
+  let table: string[] = [];
+  let open: OpenValue | undefined;
+  const isServer = (path: string[]) => path.length >= 2 && path[0] === "mcp_servers" && path[1] === name;
+  try {
+    for (let i = 0; i < lines.length; i += 1) {
+      const l = lines[i].replace(/\r$/, "");
+      if (open) {
+        if (open.kind === "array") {
+          const depth = scanBrackets(l, 0, open.depth);
+          open = depth > 0 ? { kind: "array", depth } : undefined;
+        } else if (l.includes(open.kind === "basic3" ? TRIPLE_BASIC : TRIPLE_LITERAL)) {
+          open = undefined;
+        }
+        continue;
+      }
+      if (/^\s*(#|$)/.test(l)) continue;
+      const lead = l.search(/\S/);
+      if (l[lead] === "[") {
+        const arrayTable = l[lead + 1] === "[";
+        const { path, end } = scanKeyPath(l, lead + (arrayTable ? 2 : 1));
+        const close = arrayTable ? "]]" : "]";
+        if (!l.startsWith(close, end) || !/^\s*(#.*)?$/.test(l.slice(end + close.length))) throw new TomlScanError("bad table header");
+        table = path;
+        if (arrayTable && path[0] === "mcp_servers" && (path.length === 1 || path[1] === name)) return { ambiguous: "mcp_servers uses an array of tables" };
+        if (isServer(path)) {
+          if (path.length === 2) starts.push(i);
+          else sawSubtable = true;
+        }
+        continue;
+      }
+      const { path, end } = scanKeyPath(l, lead);
+      if (l[end] !== "=") throw new TomlScanError("expected = after a key");
+      const full = [...table, ...path];
+      open = openValueAfter(l, end + 1);
+      if (full.length === 1 && full[0] === "mcp_servers") return { ambiguous: "mcp_servers is an inline table" };
+      // A key of the server from outside its own tables (dotted keys, an inline table under
+      // [mcp_servers]) — inside [mcp_servers.<name>] or one of its subtables it is ordinary.
+      if (isServer(full) && !isServer(table)) {
+        return { ambiguous: `${name} is defined in a form other than one [mcp_servers.${name}] table` };
+      }
     }
-    if (inlineServers.test(l)) return { ambiguous: "mcp_servers is an inline table" };
-    if (dotted.test(l) || (inServersTable && keyAtStart.test(l))) {
-      return { ambiguous: `${name} is defined in a form other than one [mcp_servers.${name}] table` };
-    }
+  } catch (err) {
+    return { ambiguous: `config.toml could not be read safely (${err instanceof Error ? err.message : String(err)})` };
   }
+  if (open) return { ambiguous: "config.toml ends inside a multi-line value" };
   if (starts.length > 1) return { ambiguous: `[mcp_servers.${name}] appears ${starts.length} times` };
-  if (starts.length === 0) return "none";
+  if (starts.length === 0) return sawSubtable ? { ambiguous: `only subtables of [mcp_servers.${name}] exist` } : "none";
   let commandLine = -1;
-  for (let i = starts[0] + 1; i < lines.length && !anyHeader.test(clean(lines[i])); i += 1) {
-    const l = clean(lines[i]);
+  for (let i = starts[0] + 1; i < lines.length; i += 1) {
+    const l = lines[i].replace(/\r$/, "");
+    if (/^\s*\[/.test(l)) break;
     if (/^\s*command\s*=/.test(l)) {
       if (!COMMAND_LINE.test(l) || commandLine >= 0) return { ambiguous: `the command line of [mcp_servers.${name}] is not a single quoted string` };
       commandLine = i;

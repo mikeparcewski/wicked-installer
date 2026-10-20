@@ -573,8 +573,9 @@ for (const [label, toml] of [
   ["dotted keys at the root", 'mcp_servers."wicked-estate".command = "wicked-garden"\nmcp_servers."wicked-estate".args = ["run", "scripts/estate_mcp.mjs"]\nmcp_servers."wicked-estate".enabled = false\n'],
   ["a key under [mcp_servers]", '[mcp_servers]\n"wicked-estate" = { command = "wicked-garden", args = ["run", "scripts/estate_mcp.mjs"], enabled = false }\n'],
   ["a repeated table", '[mcp_servers.wicked-estate]\ncommand = "a"\n[mcp_servers."wicked-estate"]\ncommand = "b"\n'],
-  ["an escaped server key", '[mcp_servers."wicked\\u002destate"]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\nenabled = false\n'],
-  ["an escaped table key", '["mcp\\u005fservers".wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\nrequired = true\n'],
+  ["only a subtable", '[mcp_servers.wicked-estate.env]\nWICKED_ESTATE_DB = "/db"\n'],
+  ["an array of tables", '[[mcp_servers.wicked-estate]]\ncommand = "a"\n'],
+  ["a line the reader cannot parse", '[mcp_servers.wicked-estate]\ncommand = "a"\n= broken\n'],
 ]) {
   test(`estate: an entry written as ${label} is never treated as absent (no \`codex mcp add\` over it)`, { skip }, () => {
     const sb = sandbox();
@@ -585,6 +586,30 @@ for (const [label, toml] of [
       assert.ok(configToml(sb).startsWith(toml), configToml(sb));
       assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"), "no mcp add");
       assert.ok(r.garden.notes.some((n) => /Codex MCP server wicked-estate: not changed/.test(n)), r.garden.notes.join("\n"));
+    } finally {
+      cleanup(sb);
+    }
+  });
+}
+
+for (const [label, toml] of [
+  ["an escaped server key", '[mcp_servers."wicked\\u002destate"]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\nenabled = false\n'],
+  ["an escaped table key", '["mcp\\u005fservers".wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\nrequired = true\n'],
+  ["Windows project tables and backslashes in comments and values", "[projects.'C:\\work\\repo']\ntrust_level = \"trusted\"\n\n[mcp_servers.wicked-estate] # was C:\\old\ncommand = \"wicked-garden\" # mcp_servers.wicked-estate\nargs = [\n  \"run\",\n  \"scripts/estate_mcp.mjs\", # C:\\x\n]\n\n[notes]\ntext = \"\"\"\n[mcp_servers.wicked-estate]\ncommand = \"not a table\"\n\"\"\"\n"],
+]) {
+  test(`estate: an entry spelled with ${label} is found and gets only its command line replaced`, { skip }, () => {
+    const sb = sandbox();
+    try {
+      fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0"); // off PATH: an absent entry WOULD be added
+      seedConfig(sb, toml);
+      const r = run(sb);
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"), "no mcp add");
+      const lines = toml.split("\n");
+      const i = lines.findIndex((l) => /^command = "wicked-garden"/.test(l));
+      lines[i] = lines[i].replace('"wicked-garden"', JSON.stringify(join(sb.home, ".cargo", "bin", "wicked-estate-mcp")));
+      assert.equal(configToml(sb).slice(0, lines.join("\n").length), lines.join("\n"), configToml(sb));
+      assert.ok(r.garden.notes.some((n) => /only its command line changed/.test(n)), r.garden.notes.join("\n"));
     } finally {
       cleanup(sb);
     }

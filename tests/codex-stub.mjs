@@ -46,8 +46,12 @@ function configServers() {
   const servers = {};
   let cur;
   let env = false;
+  let inTriple = false;
   for (const rawLine of configText().split("\n")) {
-    const line = rawLine.replace(/\r$/, "");
+    // Decode \uXXXX in keys and skip """ blocks, the TOML the tests write.
+    const line = rawLine.replace(/\r$/, "").replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+    const triples = (line.match(/"""/g) ?? []).length;
+    if (inTriple || triples % 2 === 1) { if (triples % 2 === 1) inTriple = !inTriple; continue; }
     const h = HEADER.exec(line);
     if (h) { cur = servers[h[1]] ??= {}; env = !!h[2]; continue; }
     if (/^\s*\[/.test(line)) { cur = undefined; continue; }

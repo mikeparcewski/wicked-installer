@@ -39,8 +39,10 @@ All notable changes to wicked-installer are documented here. The format follows
   and read back through `codex mcp get --json`; the backup is restored unless everything but the
   command reads back unchanged. The file's permissions are kept, and a symlinked `config.toml`
   is edited at its target. An entry in another form (dotted keys, a key under `[mcp_servers]`,
-  an inline or repeated table, an escaped key) is left alone, with the edit to make, and is never
-  mistaken for a missing one.
+  an inline or repeated table, only subtables, a line it cannot read) is left alone, with the edit
+  to make, and is never mistaken for a missing one. Keys are read with a small TOML key scanner
+  (escapes decoded, literal keys, comments and multi-line values skipped), so Windows project
+  tables and backslashes in comments do not block a repair.
   When the garden plugin serves the server, a new entry is added only if the plugin's launcher
   would not start the current binary. It warns when an older `~/.cargo/bin`
   copy shadows the current one on PATH.
