@@ -13,8 +13,9 @@ All notable changes to wicked-installer are documented here. The format follows
   npm package, which it now installs (`npm install -g wicked-garden`; only a product registry.json
   marks `install.codexPlugin: true` is installed this way). It is then installed with
   `codex plugin add wicked-garden@wicked-garden`, and its skills appear as `wicked-garden:<skill>`.
-  A re-run re-adds the plugin only when the version changes. A plugin the user disabled is never
-  updated, because `codex plugin add` would re-enable it. A same-name marketplace this
+  A re-run re-adds the plugin only when the version changes. A plugin the user disabled is left
+  exactly as it is: no repoint, no update (`codex plugin add` would re-enable it), and its loose
+  skills are not removed. A failed `codex plugin list` changes nothing. A same-name marketplace this
   installer did not add is used as it is, not repointed, and its plugin still updates when that
   marketplace offers a new version. `--force` repoints a local one; a git one is never
   repointed. Older Codex
@@ -30,7 +31,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ### Fixed
 
-- **The Codex `wicked-estate` MCP entry is repaired to the current binary.** Registration used to
+- **The Codex `wicked-estate` MCP entry is repaired to the current binary** (other `mcp-binary`
+  products still resolve their own binary by name). Registration used to
   hard-code `~/.cargo/bin/wicked-estate-mcp`. It now resolves the binary from
   `WICKED_ESTATE_MCP_BIN`, PATH, `~/.local/bin` and `~/.cargo/bin`, and picks the highest
   `wicked-estate --version` (an explicit `WICKED_ESTATE_MCP_BIN` wins). It repairs a config entry

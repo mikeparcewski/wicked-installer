@@ -482,7 +482,7 @@ test("a plugin the user disabled is not updated (codex plugin add would re-enabl
     const r = run(sb);
     assert.ok(!calls(sb).slice(before).some((c) => c.argv[0] === "plugin" && c.argv[1] === "add"));
     assert.equal(state(sb).plugins["wicked-garden@wicked-garden"].enabled, false);
-    assert.ok(r.garden.notes.some((n) => /is disabled — left as you set it; 1\.1\.0 is available/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(r.garden.notes.some((n) => /is disabled — left as you set it \(marketplace and plugin untouched\); 1\.1\.0 is available/.test(n)), r.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
   }
@@ -498,6 +498,56 @@ test("a --source-root checkout without .codex-plugin is copied from, never swapp
     const npmLog = existsSync(join(sb.tmp, "npm.log")) ? readFileSync(join(sb.tmp, "npm.log"), "utf8") : "";
     assert.doesNotMatch(npmLog, /install -g/);
     assert.ok(existsSync(join(sb.codexHome, "skills", "wicked-garden-alpha")), "copied from the local source");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("with the plugin disabled, the loose skills it would replace stay (and stay owned)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    assert.equal(run(sb).status, 0);
+    const st = state(sb);
+    st.plugins["wicked-garden@wicked-garden"].enabled = false;
+    writeFileSync(join(sb.codexHome, "stub-state.json"), JSON.stringify(st));
+    skill(join(sb.codexHome, "skills", "wicked-garden-old"), "wicked-garden-old");
+    const m = marker(sb);
+    m.products.find((p) => p.id === "wicked-garden").skills = ["wicked-garden-old"];
+    writeFileSync(join(sb.codexHome, "wicked-installer", "codex-install.json"), JSON.stringify(m));
+    run(sb);
+    assert.ok(existsSync(join(sb.codexHome, "skills", "wicked-garden-old")));
+    assert.deepEqual(marker(sb).products.find((p) => p.id === "wicked-garden").skills, ["wicked-garden-old"]);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a failed `codex plugin list` adds nothing (it could re-enable a disabled plugin)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const r = run(sb, [], { CODEX_STUB_FAIL: "plugin-list" });
+    assert.equal(r.garden.success, false);
+    assert.ok(!calls(sb).some((c) => c.argv[0] === "plugin" && (c.argv[1] === "add" || (c.argv[1] === "marketplace" && c.argv[2] === "add"))));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("another mcp-binary product registers its own binary, not wicked-estate-mcp", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
+    write(join(sb.home, ".cargo", "bin", "acme-mcp"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(sb.home, ".cargo", "bin", "acme-mcp"), 0o755);
+    const reg = JSON.parse(readFileSync(sb.registry, "utf8"));
+    reg.products.push({ id: "acme", displayName: "Acme", description: "d", type: "mcp-binary", standalone: true, opinionated: false, status: "stable", requires: [], install: { type: "cargo", crate: "acme-mcp" } });
+    writeFileSync(sb.registry, JSON.stringify(reg));
+    mkdirSync(sb.codexHome, { recursive: true });
+    const res = spawnSync(process.execPath, [script, "acme", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(configToml(sb), /\[mcp_servers\.acme\]\ncommand = "[^"]+\/acme-mcp"/);
   } finally {
     cleanup(sb);
   }

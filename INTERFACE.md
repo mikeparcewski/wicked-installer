@@ -297,8 +297,9 @@ registered as a Codex plugin instead of having its skills copied:
 - **Registration.** `codex plugin marketplace add <root> --json`, then
   `codex plugin add <plugin>@<marketplace> --json`, verified with `codex plugin list --json`.
   Converges: the marketplace is added only when absent; the plugin is re-added only when its
-  installed version differs (or with `--force`). A disabled plugin is never updated, because
-  `plugin add` re-enables it. A same-name marketplace the installer did not
+  installed version differs (or with `--force`). A disabled plugin is left exactly as it is
+  (no repoint, no update, since `plugin add` re-enables it; no loose-skill removal), and a failed
+  installed-list query changes nothing. A same-name marketplace the installer did not
   add (`codexPlugin.addedByInstaller` in the marker) is used as it is and repointed only with
   `--force`, and only when it is a local one. The plugin's wanted version is the one the
   marketplace in use offers, so a user-managed marketplace that moves ahead still updates the

@@ -12,7 +12,7 @@
 // `mcp add` rewrites the whole entry (other keys are dropped), as codex 0.163 does.
 //
 //   CODEX_STUB_NO_PLUGIN=1   behave like a codex without `codex plugin` (exit 2)
-//   CODEX_STUB_FAIL=<sub>    make one subcommand exit 1: plugin-add | marketplace-add | mcp-add | mcp-get
+//   CODEX_STUB_FAIL=<sub>    make one subcommand exit 1: plugin-add | plugin-list | marketplace-add | mcp-add | mcp-get
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -119,6 +119,8 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   delete state.marketplaces[a3];
   save();
   out(`Removed marketplace \`${a3}\`.\n`);
+} else if (a0 === "plugin" && a1 === "list" && process.env.CODEX_STUB_FAIL === "plugin-list") {
+  fail("stub: plugin list failed");
 } else if (a0 === "plugin" && a1 === "list") {
   out({ installed: Object.entries(state.plugins).map(([id, p]) => ({ pluginId: id, name: id.split("@")[0], marketplaceName: id.split("@")[1], version: p.version, installed: true, enabled: p.enabled !== false })), available: [] });
 } else if (a0 === "plugin" && a1 === "add") {
