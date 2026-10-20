@@ -702,32 +702,57 @@ function escapeRegExp(v: string): string {
 
 type ConfigTable = { lines: string[]; commandLine: number } | "none" | { ambiguous: string };
 
-/** Locate `[mcp_servers.<name>]` and its single-line `command = "…"` in config.toml text. */
+/**
+ * Locate `[mcp_servers.<name>]` (bare or quoted keys) and its single-line `command = "…"` in
+ * config.toml text. Deliberately conservative: ANY other way the name could be defined —
+ * dotted keys (`mcp_servers."x".command = …`), a key under `[mcp_servers]`, an inline
+ * `mcp_servers = {…}`, a repeated table, a multi-line command — is `ambiguous`, never `none`,
+ * so nothing that might be an existing entry is ever treated as absent and overwritten.
+ */
 function findConfigServerTable(text: string, name: string): ConfigTable {
   const lines = text.split("\n");
-  const n = escapeRegExp(name);
-  const key = `(?:${n}|"${n}"|'${n}')`;
-  const header = new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*${key}\\s*\\]\\s*(?:#.*)?$`);
+  const tok = (x: string) => `(?:${escapeRegExp(x)}(?![\\w-])|"${escapeRegExp(x)}"|'${escapeRegExp(x)}')`;
+  const MS = tok("mcp_servers");
+  const NM = tok(name);
+  const mainHeader = new RegExp(`^\\s*\\[\\s*${MS}\\s*\\.\\s*${NM}\\s*\\]\\s*(?:#.*)?$`);
+  const subHeader = new RegExp(`^\\s*\\[\\s*${MS}\\s*\\.\\s*${NM}\\s*\\.`);
+  const serversHeader = new RegExp(`^\\s*\\[\\s*${MS}\\s*\\]\\s*(?:#.*)?$`);
+  const dotted = new RegExp(`${MS}\\s*\\.\\s*${NM}`);
+  const keyAtStart = new RegExp(`^\\s*${NM}\\s*[.=]`);
+  const inlineServers = new RegExp(`^\\s*${MS}\\s*=`);
   const anyHeader = /^\s*\[/;
-  const mentions = new RegExp(`mcp_servers\\s*\\.\\s*${key}\\b|^\\s*${key}\\s*[.=]`);
-  const starts = lines.map((l, i) => (header.test(l) ? i : -1)).filter((i) => i >= 0);
-  if (starts.length > 1) return { ambiguous: `[mcp_servers.${name}] appears ${starts.length} times` };
-  if (starts.length === 0) {
-    // Defined some other way (dotted keys, an inline table): not something to edit by line.
-    const other = lines.some((l) => !/^\s*#/.test(l) && mentions.test(l) && !new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*${key}\\s*\\.`).test(l));
-    return other ? { ambiguous: `${name} is defined in a form other than a [mcp_servers.${name}] table` } : "none";
+  const clean = (l: string) => l.replace(/\r$/, "");
+  const starts: number[] = [];
+  let inServersTable = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const l = clean(lines[i]);
+    if (/^\s*(#|$)/.test(l)) continue;
+    if (anyHeader.test(l)) {
+      inServersTable = serversHeader.test(l);
+      if (mainHeader.test(l)) starts.push(i);
+      else if (!subHeader.test(l) && dotted.test(l)) return { ambiguous: `${name} appears in an unexpected table header` };
+      continue;
+    }
+    if (inlineServers.test(l)) return { ambiguous: "mcp_servers is an inline table" };
+    if (dotted.test(l) || (inServersTable && keyAtStart.test(l))) {
+      return { ambiguous: `${name} is defined in a form other than one [mcp_servers.${name}] table` };
+    }
   }
-  const commandRe = /^(\s*command\s*=\s*)("(?:[^"\\]|\\.)*"|'[^']*')(\s*(?:#.*)?)$/;
+  if (starts.length > 1) return { ambiguous: `[mcp_servers.${name}] appears ${starts.length} times` };
+  if (starts.length === 0) return "none";
   let commandLine = -1;
-  for (let i = starts[0] + 1; i < lines.length && !anyHeader.test(lines[i]); i += 1) {
-    if (/^\s*command\s*=/.test(lines[i])) {
-      if (!commandRe.test(lines[i]) || commandLine >= 0) return { ambiguous: `the command line of [mcp_servers.${name}] is not a single quoted string` };
+  for (let i = starts[0] + 1; i < lines.length && !anyHeader.test(clean(lines[i])); i += 1) {
+    const l = clean(lines[i]);
+    if (/^\s*command\s*=/.test(l)) {
+      if (!COMMAND_LINE.test(l) || commandLine >= 0) return { ambiguous: `the command line of [mcp_servers.${name}] is not a single quoted string` };
       commandLine = i;
     }
   }
   if (commandLine < 0) return { ambiguous: `[mcp_servers.${name}] has no command line` };
   return { lines, commandLine };
 }
+
+const COMMAND_LINE = /^(\s*command\s*=\s*)("(?:[^"\\]|\\.)*"|'[^']*')(\s*(?:#.*)?)$/;
 
 /** Everything `codex mcp get --json` shows, minus the command — must not change in a repair. */
 function visibleSettings(s: CodexMcpServer): string {
@@ -761,14 +786,20 @@ function pointCodexMcpAt(name: string, binary: string, version: string | undefin
   if (current.state === "present" && current.transport.command === binary) return `Codex MCP server ${name}: config entry already -> ${label}`;
   const was = current.state === "present" ? homeTilde(String(current.transport.command ?? "?")) : "?";
   if (options.dryRun) return `would repair Codex MCP server ${name}: ${was} -> ${label} (only its command line changes)`;
-  const m = /^(\s*command\s*=\s*)("(?:[^"\\]|\\.)*"|'[^']*')(\s*(?:#.*)?)$/.exec(table.lines[table.commandLine]);
+  const raw = table.lines[table.commandLine];
+  const cr = raw.endsWith("\r") ? "\r" : "";
+  const m = COMMAND_LINE.exec(raw.replace(/\r$/, ""));
   if (!m) return `Codex MCP server ${name}: not changed (unexpected command line)`;
   const lines = [...table.lines];
-  lines[table.commandLine] = `${m[1]}${JSON.stringify(binary)}${m[3]}`;
+  lines[table.commandLine] = `${m[1]}${JSON.stringify(binary)}${m[3]}${cr}`;
+  // The new file keeps the old one's permission bits (config.toml may hold secrets: 0600 stays 0600).
+  const mode = statSync(configFile).mode & 0o777;
   const backup = `${configFile}.wicked-bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
   cpSync(configFile, backup);
+  chmodSync(backup, mode);
   const tmp = `${configFile}.wicked-tmp-${process.pid}`;
-  writeFileSync(tmp, lines.join("\n"));
+  writeFileSync(tmp, lines.join("\n"), { mode });
+  chmodSync(tmp, mode);
   renameSync(tmp, configFile);
   const after = codexMcpGet(name, options);
   const ok = after.state === "present" && after.transport.command === binary
@@ -1272,11 +1303,15 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
     // Same root — but only the marker proves the installer added it (a user may have, by hand).
     record.addedByInstaller = ours;
     marketplace = `marketplace ${src.marketplace} already -> ${homeTilde(src.root)}${ours ? "" : " (added outside wicked-installer)"}`;
-  } else if (existing && !ours && !options.force) {
-    // Somebody else's marketplace of the same name: use it, never repoint it silently.
+  } else if (existing && ((!ours && !options.force) || existing.marketplaceSource?.sourceType !== "local")) {
+    // Somebody else's marketplace of the same name: use it, never repoint it silently. A
+    // non-local one (a git clone with its ref / sparse paths) is never repointed at all —
+    // a remove + add could not put those settings back.
+    const local = existing.marketplaceSource?.sourceType === "local";
     record.source = existingSource ?? "";
     record.addedByInstaller = false;
-    marketplace = `marketplace ${src.marketplace} is configured from ${homeTilde(existingSource ?? "?")} (not by wicked-installer) — installing from it; --force repoints it at ${homeTilde(src.root)}`;
+    marketplace = `marketplace ${src.marketplace} is configured from ${homeTilde(existingSource ?? "?")} (${local ? "not by wicked-installer" : `a ${existing.marketplaceSource?.sourceType ?? "non-local"} source`}) — installing from it; ` +
+      (local ? `--force repoints it at ${homeTilde(src.root)}` : `to use ${homeTilde(src.root)}, run \`codex plugin marketplace remove ${src.marketplace}\` first`);
   } else {
     if (options.dryRun) {
       marketplace = `would ${existing ? "repoint" : "add"} marketplace ${src.marketplace} -> ${homeTilde(src.root)}`;
@@ -1302,7 +1337,7 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   const rollBackMarketplace = (): string => {
     const rm = codex(["plugin", "marketplace", "remove", src.marketplace], options);
     if (rm.error || rm.status !== 0) return `; removing the marketplace it just added failed too`;
-    if (existing && existingSource) {
+    if (existing && existingSource) { // only ever a local marketplace (non-local ones are never repointed)
       const back = codex(["plugin", "marketplace", "add", existingSource, "--json"], options);
       return back.status === 0 ? `; marketplace ${src.marketplace} restored to ${homeTilde(existingSource)}` : `; restoring marketplace ${homeTilde(existingSource)} failed`;
     }
@@ -1400,8 +1435,11 @@ function pruneLooseSkills(productId: string, prior: MarkerProduct | undefined, k
   const failed: string[] = [];
   const skippedForeign: string[] = [];
   for (const name of candidates) {
-    if (keep.has(name) || name !== basename(name) || name.startsWith(".")) continue;
+    if (!name || keep.has(name) || name !== basename(name) || name.startsWith(".")) continue;
     const dir = join(skillsDir, name);
+    // Only a strict child of <codexHome>/skills is ever moved (an empty or odd name never
+    // resolves to the skills dir itself).
+    if (resolve(dirname(dir)) !== resolve(skillsDir) || resolve(dir) === resolve(skillsDir)) continue;
     let st;
     try {
       st = lstatSync(dir);

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -224,6 +224,21 @@ test("a v1.1 marker's recorded skill list is exactly what gets pruned", { skip }
   }
 });
 
+test("an empty or odd recorded name never moves the skills directory itself", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const skills = join(sb.codexHome, "skills");
+    skill(join(skills, "my-own"), "my-own");
+    write(join(sb.codexHome, "wicked-installer", "codex-install.json"), JSON.stringify({ products: [{ id: "wicked-garden", success: true, assets: { skills: 1 }, skills: ["", ".", "..", "/", "a/../.."] }] }));
+    const r = run(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(skills), ["my-own"]);
+    assert.ok(!existsSync(join(sb.codexHome, "wicked-installer", "pruned-skills")), "nothing was moved");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("without a marker record, installer-named skills are left (and named); --prune-legacy-skills removes them", { skip }, () => {
   const sb = sandbox();
   try {
@@ -415,6 +430,22 @@ test("repointing the installer's own marketplace re-copies the plugin even at th
   }
 });
 
+test("a non-local (git) marketplace is never repointed, even with --force", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const clone = join(sb.tmp, "git-clone");
+    garden(clone, "0.9.0");
+    mkdirSync(sb.codexHome, { recursive: true });
+    write(join(sb.codexHome, "stub-state.json"), JSON.stringify({ marketplaces: { "wicked-garden": { source: clone, sourceType: "git" } }, plugins: {}, mcp: {} }));
+    const r = run(sb, ["--force"]);
+    assert.equal(state(sb).marketplaces["wicked-garden"].source, clone);
+    assert.ok(r.garden.notes.some((n) => /a git source\) — installing from it; to use .* run `codex plugin marketplace remove wicked-garden` first/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(!calls(sb).some((c) => c.argv.slice(0, 3).join(" ") === "plugin marketplace remove"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("a marketplace another source configured is used, not repointed, unless --force", { skip }, () => {
   const sb = sandbox();
   try {
@@ -503,6 +534,42 @@ test("estate: an entry in a form other than one [mcp_servers.<name>] table is no
     cleanup(sb);
   }
 });
+
+test("estate: a quoted-key table header is edited like a bare one; CRLF and the file mode are kept", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    const before = '["mcp_servers"."wicked-estate"] # mine\r\ncommand = "/opt/old/wicked-estate-mcp" # stale\r\nrequired = true\r\n';
+    seedConfig(sb, before);
+    chmodSync(join(sb.codexHome, "config.toml"), 0o600);
+    const r = run(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(configToml(sb).startsWith(before.replace('"/opt/old/wicked-estate-mcp"', JSON.stringify(join(sb.home, ".local", "bin", "wicked-estate-mcp")))), configToml(sb));
+    assert.equal(statSync(join(sb.codexHome, "config.toml")).mode & 0o777, 0o600);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+for (const [label, toml] of [
+  ["dotted keys at the root", 'mcp_servers."wicked-estate".command = "wicked-garden"\nmcp_servers."wicked-estate".args = ["run", "scripts/estate_mcp.mjs"]\nmcp_servers."wicked-estate".enabled = false\n'],
+  ["a key under [mcp_servers]", '[mcp_servers]\n"wicked-estate" = { command = "wicked-garden", args = ["run", "scripts/estate_mcp.mjs"], enabled = false }\n'],
+  ["a repeated table", '[mcp_servers.wicked-estate]\ncommand = "a"\n[mcp_servers."wicked-estate"]\ncommand = "b"\n'],
+]) {
+  test(`estate: an entry written as ${label} is never treated as absent (no \`codex mcp add\` over it)`, { skip }, () => {
+    const sb = sandbox();
+    try {
+      fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0"); // off PATH: an absent entry WOULD be added
+      seedConfig(sb, toml);
+      const r = run(sb);
+      assert.ok(configToml(sb).startsWith(toml), configToml(sb));
+      assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"), "no mcp add");
+      assert.ok(r.garden.notes.some((n) => /Codex MCP server wicked-estate: not changed/.test(n)), r.garden.notes.join("\n"));
+    } finally {
+      cleanup(sb);
+    }
+  });
+}
 
 test("estate: a plugin-served server whose launcher finds the current binary is left to the plugin", { skip }, () => {
   const sb = sandbox();

@@ -102,7 +102,7 @@ On a Codex with `codex plugin` (codex-cli 0.163+), the Codex script registers ga
    the marketplace root.
 2. `codex plugin marketplace add <that root>` registers the local marketplace `wicked-garden`.
    A marketplace of that name that this installer did not add is used as it is; `--force`
-   repoints it. Then `codex plugin add wicked-garden@wicked-garden` installs the plugin (Codex
+   repoints a local one (never a git one, whose ref and sparse paths a re-add would lose). Then `codex plugin add wicked-garden@wicked-garden` installs the plugin (Codex
    copies it to `plugins/cache/wicked-garden/wicked-garden/<version>/`). The plugin is re-added
    only when the version changes.
 3. Every loose skill the marker records this installer copying for garden is removed. A removed
@@ -121,8 +121,9 @@ On a Codex with `codex plugin` (codex-cli 0.163+), the Codex script registers ga
      `$CODEX_HOME/config.toml`, so every other setting stays (`codex mcp add` would rewrite the
      whole entry). The file is backed up and written atomically; if `codex mcp get` does not read
      back the new command with everything else unchanged, the backup is restored;
-   - an entry written in any other form (an inline table, dotted keys) is not touched, and the
-     summary says what to change;
+   - an entry written in any other form (dotted keys, a key under `[mcp_servers]`, an inline
+     table, a repeated table) is not touched and is never treated as missing; the summary says
+     what to change. The file's permissions are kept;
    - with no entry, the installer adds one (`codex mcp add`) only when the launcher would not start
      the current binary, for example when the binary sits only in `~/.cargo/bin` off PATH.
 

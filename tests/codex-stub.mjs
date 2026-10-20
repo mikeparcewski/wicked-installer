@@ -41,12 +41,13 @@ const save = () => writeFileSync(stateFile, JSON.stringify(state, null, 2));
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; } };
 const configFile = join(home, "config.toml");
 const configText = () => (existsSync(configFile) ? readFileSync(configFile, "utf8") : "");
-const HEADER = /^\s*\[\s*mcp_servers\s*\.\s*"?([A-Za-z0-9_-]+)"?\s*(\.\s*env\s*)?\]\s*(?:#.*)?$/;
+const HEADER = /^\s*\[\s*["']?mcp_servers["']?\s*\.\s*["']?([A-Za-z0-9_-]+)["']?\s*(\.\s*env\s*)?\]\s*(?:#.*)?$/;
 function configServers() {
   const servers = {};
   let cur;
   let env = false;
-  for (const line of configText().split("\n")) {
+  for (const rawLine of configText().split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
     const h = HEADER.exec(line);
     if (h) { cur = servers[h[1]] ??= {}; env = !!h[2]; continue; }
     if (/^\s*\[/.test(line)) { cur = undefined; continue; }
@@ -86,7 +87,7 @@ function pluginServers() {
 
 const [a0, a1, a2, a3] = argv;
 if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
-  out({ marketplaces: Object.entries(state.marketplaces).map(([name, m]) => ({ name, root: m.source, marketplaceSource: { sourceType: "local", source: m.source } })) });
+  out({ marketplaces: Object.entries(state.marketplaces).map(([name, m]) => ({ name, root: m.source, marketplaceSource: { sourceType: m.sourceType ?? "local", source: m.source } })) });
 } else if (a0 === "plugin" && a1 === "marketplace" && a2 === "add") {
   if (process.env.CODEX_STUB_FAIL === "marketplace-add") fail("stub: marketplace add failed");
   const root = resolve(a3);

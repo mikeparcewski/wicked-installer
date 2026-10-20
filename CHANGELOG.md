@@ -14,7 +14,8 @@ All notable changes to wicked-installer are documented here. The format follows
   marks `install.codexPlugin: true` is installed this way). It is then installed with
   `codex plugin add wicked-garden@wicked-garden`, and its skills appear as `wicked-garden:<skill>`.
   A re-run re-adds the plugin only when the version changes. A same-name marketplace this
-  installer did not add is used as it is, not repointed (`--force` repoints it). Older Codex
+  installer did not add is used as it is, not repointed. `--force` repoints a local one; a git
+  one is never repointed. Older Codex
   versions, and garden releases without the manifest, keep the copy path.
 - **The loose skills `install-codex` copied before are removed (they used to accumulate).**
   The plugin path removes every `wicked-garden-*` skill it can attribute to itself. The copy path
@@ -35,7 +36,9 @@ All notable changes to wicked-installer are documented here. The format follows
   `config.toml`. `codex mcp add` would rewrite the whole entry and drop `cwd`, `env_vars`,
   `enabled`, `required`, tool lists, approval modes and timeouts. The write is backed up, atomic,
   and read back through `codex mcp get --json`; the backup is restored unless everything but the
-  command reads back unchanged. An entry in another form is left alone, with the edit to make.
+  command reads back unchanged. The file's permissions are kept. An entry in another form
+  (dotted keys, a key under `[mcp_servers]`, an inline or repeated table) is left alone, with the
+  edit to make, and is never mistaken for a missing one.
   When the garden plugin serves the server, a new entry is added only if the plugin's launcher
   would not start the current binary. It warns when an older `~/.cargo/bin`
   copy shadows the current one on PATH.
