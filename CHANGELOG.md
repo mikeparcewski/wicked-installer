@@ -62,11 +62,14 @@ All notable changes to wicked-installer are documented here. The format follows
   plugin is registered is reported as a note, not as a failed install.
 - **MCP servers are registered after every product of the run is in place.** Before this,
   `wicked-estate` followed by `wicked-garden` wrote a direct-binary entry that shadowed the
-  plugin's launcher. The picker no longer passes `--skip-binaries` to Codex for a Codex-plugin
-  product, because no other CLI installs the package that is its marketplace. A garden found
+  plugin's launcher. For a Codex-plugin product the picker now passes Codex `--plugin-packages`
+  next to `--skip-binaries`, so the package that is its marketplace is installed. No other CLI
+  installs it, and no other binary is re-acquired. A garden found
   next to a globally installed wicked-installer is treated as the global npm package and
   refreshed. An installer-owned marketplace whose root was moved or deleted (Codex then refuses
-  every listing) is removed and re-added.
+  every listing) is removed and re-added. That happens only while the configured source is still
+  the recorded one and `config.toml` shows the plugin enabled; otherwise the run stops and says
+  why.
 - **Every `codex` call `install-codex` makes now carries `CODEX_HOME` = `--codex-home`.** MCP
   registration used to run against the default home even when `--codex-home` named another.
 - **The Codex marker keeps the entries of products a run did not touch.** It used to record only the

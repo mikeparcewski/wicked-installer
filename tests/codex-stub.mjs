@@ -139,7 +139,8 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
 } else if (a0 === "plugin" && a1 === "list") {
   failOnMissingRoots("configured marketplace snapshot(s)");
   maybeFailPluginList();
-  out({ installed: Object.entries(state.plugins).map(([id, p]) => ({ pluginId: id, name: id.split("@")[0], marketplaceName: id.split("@")[1], version: p.version, installed: true, enabled: p.enabled !== false })), available: [] });
+  // Like codex 0.163: a plugin whose marketplace was removed is no longer listed.
+  out({ installed: Object.entries(state.plugins).filter(([id]) => state.marketplaces[id.split("@")[1]]).map(([id, p]) => ({ pluginId: id, name: id.split("@")[0], marketplaceName: id.split("@")[1], version: p.version, installed: true, enabled: p.enabled !== false })), available: [] });
 } else if (a0 === "plugin" && a1 === "add") {
   if (process.env.CODEX_STUB_FAIL === "plugin-add") fail("stub: plugin add failed");
   const [plugin, mkt] = a2.split("@");
@@ -153,6 +154,11 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   cpSync(m.source, join(base, manifest.version), { recursive: true });
   state.plugins[a2] = { version: manifest.version, path: join(base, manifest.version), enabled: true };
   save();
+  // Like codex: `plugin add` writes [plugins."<id>"] enabled = true into config.toml.
+  const header = `[plugins.${JSON.stringify(a2)}]`;
+  const text = configText();
+  if (!text.includes(header)) writeFileSync(configFile, `${text.replace(/\n*$/, "")}${text ? "\n\n" : ""}${header}\nenabled = true\n`);
+  else writeFileSync(configFile, text.replace(new RegExp(`(${header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\nenabled = )(true|false)`), "$1true"));
   out({ pluginId: a2, name: plugin, marketplaceName: mkt, version: manifest.version, installedPath: join(base, manifest.version) });
 } else if (a0 === "mcp" && a1 === "get") {
   if (process.env.CODEX_STUB_FAIL === "mcp-get") fail("stub: mcp get failed");

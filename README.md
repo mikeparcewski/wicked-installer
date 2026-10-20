@@ -139,7 +139,11 @@ On a Codex with `codex plugin` (codex-cli 0.163+), the Codex script registers ga
 A re-run with nothing new changes nothing and says so line by line. A Codex without
 `codex plugin`, or a garden release without `.codex-plugin/`, gets the copy path as before. On
 the copy path, skills are now recorded by name, so a skill a later release drops is removed.
-Every `codex` call carries `CODEX_HOME` = the target home (`--codex-home`).
+Every `codex` call carries `CODEX_HOME` = the target home (`--codex-home`). After another CLI,
+the picker runs Codex with `--skip-binaries --plugin-packages`: binaries are not re-acquired,
+but garden's npm package (the plugin's marketplace) is installed. An installer-owned
+marketplace whose checkout was moved or deleted is removed and re-added, but only while the
+plugin is enabled.
 
 ### `cleanup-legacy` — remove old unregistered wicked-garden copies
 

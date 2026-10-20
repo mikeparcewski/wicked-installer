@@ -151,9 +151,11 @@ function runCliScript(
   productIds: string[],
   flags: DispatchFlags,
   skipBinaries: boolean,
+  pluginPackages = false,
 ): CliRunResult {
   const args = [cli.scriptPath, ...productIds, "--json"];
   if (skipBinaries) args.push("--skip-binaries");
+  if (pluginPackages) args.push("--plugin-packages");
   if (flags.dryRun) args.push("--dry-run");
   if (flags.force) args.push("--force");
   // --source-root is part of the shared flag surface (§3.2); --claude-home is the Claude script's own.
@@ -256,11 +258,11 @@ export async function dispatchToClis(
   }
 
   for (const [index, cli] of clis.entries()) {
-    // Binaries are machine-scoped: acquire once (first script), skip thereafter. Codex is the
-    // exception for a product it registers as a plugin: the global npm package IS that plugin's
-    // marketplace, and no other CLI's script installs it.
-    const codexNeedsPackage = cli.cli === "codex" && productIds.some((id) => getProduct(id)?.install.codexPlugin === true);
-    const skipBinaries = index > 0 && !codexNeedsPackage;
+    // Binaries are machine-scoped: acquire once (first script), skip thereafter. A Codex-plugin
+    // product's npm package is the exception (it IS that plugin's marketplace and no other CLI's
+    // script installs it): Codex gets --plugin-packages for exactly that, nothing else.
+    const skipBinaries = index > 0;
+    const pluginPackages = cli.cli === "codex" && skipBinaries && productIds.some((id) => getProduct(id)?.install.codexPlugin === true);
     const suffix = skipBinaries ? chalk.dim(" (binaries already acquired)") : "";
     console.log(`\n${chalk.cyan("→")} Installing into ${chalk.bold(cli.displayName)}${suffix}${flags.dryRun ? chalk.dim(" [dry-run]") : ""}...`);
     // The Claude script never receives plugin products — they are registered below. Other
@@ -268,7 +270,7 @@ export async function dispatchToClis(
     const forScript = cli.cli === "claude" ? productIds.filter((id) => !pluginIds.includes(id)) : productIds;
     // Legacy-copy detection must see the marker as it is NOW, before the script may upgrade it.
     const legacy = cli.cli === "claude" && pluginIds.length > 0 ? reportLegacyCopies(pluginIds, flags) : {};
-    const result = forScript.length > 0 ? runCliScript(cli, forScript, flags, skipBinaries) : presentWithoutScript(cli, flags);
+    const result = forScript.length > 0 ? runCliScript(cli, forScript, flags, skipBinaries, pluginPackages) : presentWithoutScript(cli, flags);
     if (cli.cli === "claude") {
       for (const id of pluginIds) result.entries.push(await registerPluginViaClaude(id, flags, legacy[id] ?? []));
     }

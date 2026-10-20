@@ -608,7 +608,7 @@ test("another mcp-binary product ignores WICKED_ESTATE_MCP_BIN", { skip }, () =>
   }
 });
 
-test("dispatch: Codex gets no --skip-binaries for a Codex-plugin product even after another CLI", { skip }, async () => {
+test("dispatch: after another CLI, Codex keeps --skip-binaries but gets --plugin-packages for a Codex-plugin product", { skip }, async () => {
   const sb = sandbox();
   try {
     const mk = (cli) => {
@@ -627,7 +627,98 @@ test("dispatch: Codex gets no --skip-binaries for a Codex-plugin product even af
     } finally {
       console.log = origLog;
     }
-    assert.doesNotMatch(readFileSync(cx.log, "utf8"), /--skip-binaries/);
+    const args = readFileSync(cx.log, "utf8");
+    assert.match(args, /--skip-binaries/, "machine-scoped binaries are still not re-acquired");
+    assert.match(args, /--plugin-packages/, "but the plugin's own npm package is");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+function setDisabled(sb) {
+  const st = state(sb);
+  st.plugins["wicked-garden@wicked-garden"].enabled = false;
+  writeFileSync(join(sb.codexHome, "stub-state.json"), JSON.stringify(st));
+  seedConfig(sb, configToml(sb).replace(/(\[plugins\."wicked-garden@wicked-garden"\]\nenabled = )true/, "$1false"));
+}
+
+test("a vanished root of a DISABLED plugin's marketplace is not recovered (that would re-enable it)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const first = join(sb.tmp, "first");
+    mkdirSync(first, { recursive: true });
+    cpSync(join(sb.src, "wicked-garden"), join(first, "wicked-garden"), { recursive: true });
+    const firstRun = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", first, "--skip-binaries", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(firstRun.status, 0, firstRun.stderr);
+    setDisabled(sb);
+    rmSync(first, { recursive: true });
+    const r = run(sb);
+    assert.equal(r.garden.success, false);
+    assert.ok(!calls(sb).some((c) => c.argv.slice(0, 3).join(" ") === "plugin marketplace remove"));
+    assert.equal(state(sb).plugins["wicked-garden@wicked-garden"].enabled, false);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a vanished root is not recovered when the configured source is no longer the recorded one", { skip }, () => {
+  const sb = sandbox();
+  try {
+    assert.equal(run(sb).status, 0);
+    const userRoot = join(sb.tmp, "user-replaced");
+    const st = state(sb);
+    st.marketplaces["wicked-garden"] = { source: userRoot }; // replaced by the user, now gone too
+    writeFileSync(join(sb.codexHome, "stub-state.json"), JSON.stringify(st));
+    rmSync(join(sb.src, "wicked-garden"), { recursive: true });
+    garden(join(sb.tmp, "global", "wicked-garden"), "1.0.0");
+    const r = run(sb);
+    assert.equal(r.garden.success, false);
+    assert.ok(!calls(sb).some((c) => c.argv.slice(0, 3).join(" ") === "plugin marketplace remove"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("an unreadable or odd loose skill never fails the run", { skip }, () => {
+  const sb = sandbox();
+  try {
+    mkdirSync(join(sb.codexHome, "skills", "wicked-garden-odd", "SKILL.md"), { recursive: true }); // a DIRECTORY named SKILL.md
+    const r = run(sb);
+    assert.equal(r.garden.success, true, r.garden.message);
+    assert.ok(marker(sb).products.find((p) => p.id === "wicked-garden").codexPlugin);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a launcher entry whose own env pins an older binary is reported against that env", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    fakeEstate(join(sb.tmp, "old"), "0.29.0");
+    seedConfig(sb, `[mcp_servers.wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\n\n[mcp_servers.wicked-estate.env]\nWICKED_ESTATE_MCP_BIN = ${JSON.stringify(join(sb.tmp, "old", "wicked-estate-mcp"))}\n`);
+    const r = run(sb);
+    assert.ok(r.garden.notes.some((n) => /its \[mcp_servers\.wicked-estate\.env\] sets WICKED_ESTATE_MCP_BIN\/PATH/.test(n)), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--dry-run that plans the npm install still previews the loose-skill and estate steps", { skip }, () => {
+  const sb = sandbox();
+  try {
+    rmSync(join(sb.src, "wicked-garden"), { recursive: true });
+    skill(join(sb.codexHome, "skills", "wicked-garden-old"), "wicked-garden-old");
+    write(join(sb.codexHome, "wicked-installer", "codex-install.json"), JSON.stringify({ products: [{ id: "wicked-garden", success: true, assets: { skills: 1 }, skills: ["wicked-garden-old"] }] }));
+    const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--dry-run", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    const g = JSON.parse(res.stdout.slice(res.stdout.indexOf("{"))).reports.find((x) => x.productId === "wicked-garden");
+    assert.equal(g.delivery, "planned");
+    assert.ok(g.notes.some((n) => /would remove 1 loose wicked-garden skill/.test(n)), g.notes.join("\n"));
+    assert.ok(g.notes.some((n) => /wicked-estate MCP/.test(n)), g.notes.join("\n"));
   } finally {
     cleanup(sb);
   }
@@ -700,7 +791,7 @@ test("estate: a stale config entry gets only its command line replaced (every ot
       encoding: "utf8", env: { PATH: `${cargo}:${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(configToml(sb), before.replace('"/opt/old/wicked-estate-mcp"', JSON.stringify(join(local, "wicked-estate-mcp"))));
+    assert.ok(configToml(sb).startsWith(before.replace('"/opt/old/wicked-estate-mcp"', JSON.stringify(join(local, "wicked-estate-mcp")))), configToml(sb));
     assert.match(res.stdout, /only its command line changed/);
     assert.match(res.stdout, /stale ~\/\.cargo\/bin\/wicked-estate-mcp \(0\.29\.2\) shadows ~\/\.local\/bin\/wicked-estate-mcp \(0\.30\.0\) on PATH/);
     assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && (c.argv[1] === "add" || c.argv[1] === "remove")), "no lossy add/remove on an existing entry");
@@ -720,7 +811,7 @@ test("estate: a config entry that runs garden's launcher is never repointed at t
     assert.equal(r.status, 0, r.stderr);
     assert.ok(configToml(sb).startsWith(before), configToml(sb));
     assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"));
-    assert.ok(r.garden.notes.some((n) => /launcher would start nothing/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(r.garden.notes.some((n) => /would start nothing/.test(n)), r.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
   }
@@ -822,7 +913,7 @@ test("estate: escaped triple quotes and quoted command keys are read like Codex 
     const r = run(sb);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"));
-    assert.equal(configToml(sb), toml.replace('"command" = "/opt/old/wicked-estate-mcp"', `"command" = ${JSON.stringify(join(sb.home, ".local", "bin", "wicked-estate-mcp"))}`), r.garden.notes.join("\n"));
+    assert.ok(configToml(sb).startsWith(toml.replace('"command" = "/opt/old/wicked-estate-mcp"', `"command" = ${JSON.stringify(join(sb.home, ".local", "bin", "wicked-estate-mcp"))}`)), configToml(sb));
   } finally {
     cleanup(sb);
   }
@@ -918,7 +1009,7 @@ test("estate: with the binary only in ~/.cargo/bin (off PATH) no direct-binary e
     const r = run(sb);
     assert.doesNotMatch(configToml(sb), /mcp_servers/);
     assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "add"));
-    assert.ok(r.garden.notes.some((n) => /launcher would start nothing .* put ~\/\.cargo\/bin first on PATH, or set WICKED_ESTATE_MCP_BIN=/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(r.garden.notes.some((n) => /would start nothing .* put ~\/\.cargo\/bin first on PATH, or set WICKED_ESTATE_MCP_BIN=/.test(n)), r.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
   }

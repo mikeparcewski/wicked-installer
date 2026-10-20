@@ -75,6 +75,9 @@ interface Options {
   force: boolean;
   skipBinaries: boolean;
   pruneLegacySkills: boolean;
+  /** Install a codexPlugin product's npm package even under --skip-binaries (the dispatcher's
+   *  "binaries already acquired" does not cover it: no other CLI installs that package). */
+  pluginPackages: boolean;
 }
 
 interface AssetCounts {
@@ -184,6 +187,7 @@ function parseArgs(argv: string[]): Options {
   let force = false;
   let skipBinaries = false;
   let pruneLegacySkills = false;
+  let pluginPackages = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -199,6 +203,8 @@ function parseArgs(argv: string[]): Options {
       skipBinaries = true;
     } else if (arg === "--prune-legacy-skills") {
       pruneLegacySkills = true;
+    } else if (arg === "--plugin-packages") {
+      pluginPackages = true;
     } else if (arg === "--codex-home" && argv[i + 1]) {
       i += 1;
       codexHome = expandHome(argv[i]);
@@ -240,6 +246,7 @@ function parseArgs(argv: string[]): Options {
     force,
     skipBinaries,
     pruneLegacySkills,
+    pluginPackages,
   };
 }
 
@@ -263,6 +270,8 @@ function printHelp(): void {
     "                       wicked-garden marketplace another source configured",
     "  --prune-legacy-skills Also remove <product>-* loose skills that a marker written",
     "                       before skill names were recorded cannot attribute",
+    "  --plugin-packages    Under --skip-binaries, still install a Codex-plugin product's",
+    "                       npm package (the picker passes it: that package is the plugin)",
     "",
     "Codex with `codex plugin` (0.163+): a product that ships .codex-plugin/plugin.json",
     "(wicked-garden) is registered as a plugin through a local marketplace at its",
@@ -600,11 +609,14 @@ function pathDirs(): string[] {
  * What garden's plugin launcher (scripts/estate_mcp.mjs, = `_estate_client.resolve_mcp_bin`)
  * would start: WICKED_ESTATE_MCP_BIN if a file → the first executable on PATH → ~/.local/bin.
  */
-function pluginLauncherResolves(): string | undefined {
+function pluginLauncherResolves(envOverlay: Record<string, string> | null | undefined = undefined): string | undefined {
   const name = "wicked-estate-mcp";
-  const override = process.env.WICKED_ESTATE_MCP_BIN;
+  // A config entry's own env (`[mcp_servers.x.env]`) is what the launcher sees first.
+  const env = { ...process.env, ...(envOverlay ?? {}) };
+  const override = env.WICKED_ESTATE_MCP_BIN;
   if (override && isRegularFile(override)) return override;
-  for (const dir of pathDirs()) {
+  const dirs = (env.PATH ?? env.Path ?? "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
+  for (const dir of dirs) {
     for (const n of exeNames(name)) if (isExecutableFile(join(dir, n))) return join(dir, n);
   }
   for (const n of [name, `${name}.exe`]) if (isRegularFile(join(homedir(), ".local", "bin", n))) return join(homedir(), ".local", "bin", n);
@@ -1070,11 +1082,16 @@ function repairEstateForPlugin(options: Options): string[] {
     // The plugin's launcher stays in the path: it is what adds --readonly for
     // WICKED_ESTATE_READONLY / run markers and refuses an unpinned governed unit. A config entry
     // that runs the binary directly would bypass that, so none is written; the fix is reported.
-    const launcher = pluginLauncherResolves();
+    const entryEnv = homeEntry && current.state === "present" ? current.transport.env : undefined;
+    const launcher = pluginLauncherResolves(entryEnv);
     if (launcher && samePath(launcher, chosen.path)) {
       notes.push(`wicked-estate MCP: served by the plugin; its launcher starts ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`);
     } else {
-      notes.push(`wicked-estate MCP: served by the plugin, but its launcher would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}, not ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""} — put ${homeTilde(dirname(chosen.path))} first on PATH, or set WICKED_ESTATE_MCP_BIN=${chosen.path} in the environment Codex starts from`);
+      const pinnedInEntry = !!entryEnv && ("WICKED_ESTATE_MCP_BIN" in entryEnv || "PATH" in entryEnv);
+      notes.push(`wicked-estate MCP: served by garden's launcher, but it would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}, not ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""} — ` +
+        (pinnedInEntry
+          ? `its [mcp_servers.wicked-estate.env] sets WICKED_ESTATE_MCP_BIN/PATH: point that at ${chosen.path}`
+          : `put ${homeTilde(dirname(chosen.path))} first on PATH, or set WICKED_ESTATE_MCP_BIN=${chosen.path} in the environment Codex starts from`));
     }
     return notes;
   }
@@ -1451,7 +1468,8 @@ function resolvePluginSource(product: Product, options: Options, notes: string[]
   const pkg = product.install.package;
   // Only a product the registry marks as a Codex plugin is ever installed globally for it.
   if (product.install.type !== "npm-run" || !pkg || product.install.codexPlugin !== true) return undefined;
-  if (!options.skipBinaries) {
+  const installPackage = !options.skipBinaries || options.pluginPackages;
+  if (installPackage) {
     if (options.dryRun) {
       log(options, `  dry-run: npm install -g ${pkg}`);
     } else {
@@ -1467,7 +1485,7 @@ function resolvePluginSource(product: Product, options: Options, notes: string[]
   }
   const root = join(globalRoot, pkg);
   if (!existsSync(root)) {
-    if (options.dryRun && !options.skipBinaries) {
+    if (options.dryRun && installPackage) {
       // The real run installs it first; say what would follow instead of planning the copy path.
       notes.push(`${pkg} is not installed globally yet; a real run installs it, then registers it as a Codex plugin from ${homeTilde(root)} if that release ships .codex-plugin/`);
       return "planned";
@@ -1477,7 +1495,39 @@ function resolvePluginSource(product: Product, options: Options, notes: string[]
   }
   const found = pluginSourceAt(root, "npm-global");
   if (typeof found === "string") {
+    if (options.dryRun && installPackage) {
+      notes.push(`installed ${pkg} is not a Codex plugin (${found}); a real run upgrades it first, then registers it as a Codex plugin if the new release ships .codex-plugin/`);
+      return "planned";
+    }
     notes.push(`installed ${pkg} is not a Codex plugin: ${found}`);
+    return undefined;
+  }
+  return found;
+}
+
+/** `[plugins."<id>"] enabled` from config.toml: true / false, or undefined when not readable. */
+function configPluginEnabled(options: Options, pluginId: string): boolean | undefined {
+  const file = join(options.codexHome, "config.toml");
+  if (!existsSync(file)) return undefined;
+  let table: string[] = [];
+  let found: boolean | undefined;
+  try {
+    for (const raw of readFileSync(file, "utf8").split("\n")) {
+      const l = raw.replace(/\r$/, "");
+      if (/^\s*(#|$)/.test(l)) continue;
+      const lead = l.search(/\S/);
+      if (l[lead] === "[") {
+        table = scanKeyPath(l, lead + (l[lead + 1] === "[" ? 2 : 1)).path;
+        continue;
+      }
+      if (table.length !== 2 || table[0] !== "plugins" || table[1] !== pluginId) continue;
+      const { path, end } = scanKeyPath(l, lead);
+      if (path.length === 1 && path[0] === "enabled" && l[end] === "=") {
+        const v = l.slice(end + 1).replace(/#.*$/, "").trim();
+        found = v === "true" ? true : v === "false" ? false : undefined;
+      }
+    }
+  } catch {
     return undefined;
   }
   return found;
@@ -1531,8 +1581,12 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
     // Codex refuses every listing while a configured local marketplace root is gone (a moved
     // checkout). The installer's OWN marketplace in that state is removed so it can be re-added.
     const why = codex(["plugin", "marketplace", "list", "--json"], options).out;
+    // Only the installer's own, enabled install is recovered: the configured source in the error
+    // must still be the recorded one, and config.toml must show the plugin enabled.
+    const reported = new RegExp(`\`${src.marketplace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\` at (.+?): `).exec(why)?.[1];
     const gone = !!prior && prior.addedByInstaller !== false && prior.enabled !== false && prior.marketplace === src.marketplace
-      && !existsSync(prior.source) && why.includes(`\`${src.marketplace}\``);
+      && !existsSync(prior.source) && !!reported && resolve(reported) === resolve(prior.source)
+      && configPluginEnabled(options, pluginId) === true;
     if (!gone) throw new Error(`codex plugin marketplace list --json gave no answer: ${why.trim().slice(0, 300)}`);
     if (options.dryRun) {
       notes.push(`would remove marketplace ${src.marketplace} (its root ${homeTilde(prior!.source)} is gone) and add it -> ${homeTilde(src.root)}`);
@@ -1667,7 +1721,11 @@ function looksInstallerCopied(productId: string, dir: string, name: string): boo
   } catch {
     return false;
   }
-  return readSkillName(dir) === name;
+  try {
+    return readSkillName(dir) === name;
+  } catch {
+    return false; // an unreadable SKILL.md (or a dir named SKILL.md) is never attributed
+  }
 }
 
 /**
@@ -1750,6 +1808,15 @@ async function installOne(product: Product, options: Options, prior: MarkerProdu
     if (product.type !== "mcp-binary" && codexSupportsPlugins(options)) {
       const pluginSrc = resolvePluginSource(product, options, notes);
       if (pluginSrc === "planned") {
+        // Preview what the real run would also do (both are read-only under --dry-run).
+        pruneLooseSkills(product.id, prior, new Set(), options, notes);
+        if (product.id === "wicked-garden") {
+          try {
+            notes.push(...repairEstateForPlugin(options));
+          } catch (err) {
+            notes.push(`wicked-estate MCP not checked: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         return { productId: product.id, displayName: product.displayName, success: true, skipped: false, message: `${product.displayName}: planned (Codex plugin after npm install -g)`, delivery: "planned", pending: [], assets, notes };
       }
       if (pluginSrc) return installAsPlugin(product, pluginSrc, prior, options, notes);
