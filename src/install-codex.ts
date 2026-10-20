@@ -1640,7 +1640,9 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   if (!landed) throw new Error(`codex plugin add ${pluginId} exited 0 but codex plugin list does not show it installed${changedSource ? rollBackMarketplace() : ""}`);
   version = landed.version ?? version;
   record.version = version;
-  notes.push(installed ? `updated plugin ${pluginId} ${installed.version} -> ${version}` : `installed plugin ${pluginId} ${version}`);
+  notes.push(!installed ? `installed plugin ${pluginId} ${version}`
+    : installed.version === version ? `re-copied plugin ${pluginId} ${version} from ${homeTilde(record.source)}`
+    : `updated plugin ${pluginId} ${installed.version} -> ${version}`);
   return record;
 }
 
