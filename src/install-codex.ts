@@ -529,10 +529,11 @@ function homeTilde(p: string): string {
 interface EstateCandidate { path: string; version?: string; source: string }
 interface EstateResolution { chosen?: EstateCandidate; candidates: EstateCandidate[]; warnings: string[] }
 
+/** Names to probe for `name`: on Windows the PATHEXT forms first (a bare file is not runnable there). */
 function exeNames(name: string): string[] {
   if (process.platform !== "win32") return [name];
   const exts = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
-  return [name, ...exts.map((e) => name + e.toLowerCase())];
+  return exts.map((e) => name + e.toLowerCase());
 }
 
 function isRegularFile(p: string): boolean {
@@ -543,14 +544,27 @@ function isRegularFile(p: string): boolean {
   }
 }
 
+/** shutil.which's test (garden's resolver uses it for PATH): a file this user may execute. */
+function isExecutableFile(p: string): boolean {
+  if (!isRegularFile(p)) return false;
+  if (process.platform === "win32") return true;
+  try {
+    accessSync(p, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Read-only probe, also under --dry-run (it writes nothing). */
 function estateVersionNextTo(mcpBin: string): string | undefined {
   const dir = dirname(mcpBin);
   for (const name of exeNames("wicked-estate")) {
     const cli = join(dir, name);
-    if (!isRegularFile(cli)) continue;
-    const r = spawnSync(cli, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 });
+    if (!isExecutableFile(cli)) continue;
+    const r = mcpSpawn(cli, ["--version"], process.env, 10000);
     const m = /(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)/.exec(r.stdout ?? "");
-    if (r.status === 0 && m) return m[1];
+    if (!r.error && r.status === 0 && m) return m[1];
   }
   return undefined;
 }
@@ -565,12 +579,42 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-function resolveEstateMcpBinary(options: Options): EstateResolution {
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  return norm(a) === norm(b);
+}
+
+function pathDirs(): string[] {
+  return (process.env.PATH ?? process.env.Path ?? "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
+}
+
+/**
+ * What garden's plugin launcher (scripts/estate_mcp.mjs, = `_estate_client.resolve_mcp_bin`)
+ * would start: WICKED_ESTATE_MCP_BIN if a file → the first executable on PATH → ~/.local/bin.
+ */
+function pluginLauncherResolves(): string | undefined {
+  const name = "wicked-estate-mcp";
+  const override = process.env.WICKED_ESTATE_MCP_BIN;
+  if (override && isRegularFile(override)) return override;
+  for (const dir of pathDirs()) {
+    for (const n of exeNames(name)) if (isExecutableFile(join(dir, n))) return join(dir, n);
+  }
+  for (const n of [name, `${name}.exe`]) if (isRegularFile(join(homedir(), ".local", "bin", n))) return join(homedir(), ".local", "bin", n);
+  return undefined;
+}
+
+function resolveEstateMcpBinary(): EstateResolution {
   const name = "wicked-estate-mcp";
   const seen = new Set<string>();
   const candidates: EstateCandidate[] = [];
-  const add = (p: string, source: string) => {
-    if (!isRegularFile(p)) return;
+  const add = (p: string, source: string, needExec: boolean) => {
+    if (needExec ? !isExecutableFile(p) : !isRegularFile(p)) return;
     let key = p;
     try {
       key = realpathSync(p);
@@ -582,15 +626,14 @@ function resolveEstateMcpBinary(options: Options): EstateResolution {
     candidates.push({ path: p, source });
   };
   const override = process.env.WICKED_ESTATE_MCP_BIN;
-  if (override) add(resolve(expandHome(override)), "WICKED_ESTATE_MCP_BIN");
-  const pathDirs = (process.env.PATH ?? process.env.Path ?? "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
-  for (const dir of pathDirs) for (const n of exeNames(name)) add(join(dir, n), "PATH");
-  for (const n of exeNames(name)) add(join(homedir(), ".local", "bin", n), "~/.local/bin");
-  add(cargoBinaryPath(name), "~/.cargo/bin");
+  if (override) add(resolve(expandHome(override)), "WICKED_ESTATE_MCP_BIN", false);
+  for (const dir of pathDirs()) for (const n of exeNames(name)) add(join(dir, n), "PATH", true);
+  for (const n of exeNames(name)) add(join(homedir(), ".local", "bin", n), "~/.local/bin", false);
+  add(cargoBinaryPath(name), "~/.cargo/bin", true);
 
   const warnings: string[] = [];
   if (candidates.length === 0) return { candidates, warnings };
-  if (!options.dryRun) for (const c of candidates) c.version = estateVersionNextTo(c.path);
+  for (const c of candidates) c.version = estateVersionNextTo(c.path);
   const explicit = candidates.find((c) => c.source === "WICKED_ESTATE_MCP_BIN");
   let chosen = explicit ?? candidates[0];
   if (!explicit) {
@@ -614,9 +657,19 @@ function resolveEstateMcpBinary(options: Options): EstateResolution {
   return { chosen, candidates, warnings };
 }
 
-interface CodexMcpTransport { type?: string; command?: string; args?: unknown[]; env?: Record<string, string> | null }
+interface CodexMcpTransport { type?: string; command?: string; args?: unknown[]; env?: Record<string, string> | null; env_vars?: unknown[] | null; cwd?: string | null }
+interface CodexMcpServer {
+  enabled?: boolean;
+  transport?: CodexMcpTransport;
+  enabled_tools?: unknown;
+  disabled_tools?: unknown;
+  startup_timeout_sec?: unknown;
+  tool_timeout_sec?: unknown;
+}
 
-function codexMcpGet(name: string, options: Options): { state: "absent" } | { state: "present"; transport: CodexMcpTransport } | { state: "error"; detail: string } {
+function codexMcpGet(name: string, options: Options): { state: "absent" } | { state: "present"; server: CodexMcpServer; transport: CodexMcpTransport } | { state: "error"; detail: string } {
+  // A home that does not exist yet (a --dry-run before the first install) holds no server.
+  if (!existsSync(options.codexHome)) return { state: "absent" };
   const r = codex(["mcp", "get", name, "--json"], options);
   if (r.error) return { state: "error", detail: r.error };
   if (r.status !== 0) {
@@ -625,25 +678,67 @@ function codexMcpGet(name: string, options: Options): { state: "absent" } | { st
   }
   try {
     const text = r.stdout ?? r.out;
-    const parsed = JSON.parse(text.slice(text.indexOf("{"))) as { transport?: CodexMcpTransport };
-    return { state: "present", transport: parsed.transport ?? {} };
+    const server = JSON.parse(text.slice(text.indexOf("{"))) as CodexMcpServer;
+    return { state: "present", server, transport: server.transport ?? {} };
   } catch {
-    return { state: "present", transport: {} };
+    return { state: "error", detail: `codex mcp get ${name} --json printed no JSON` };
   }
 }
 
 /**
- * Point Codex's config-tier `name` server at `binary`, keeping its args and env. A config entry
- * outranks a plugin's server of the same name in Codex, so this is what Codex runs.
+ * The settings `codex mcp add` cannot express. It rewrites the whole entry from command, args
+ * and --env, so an entry carrying any of these is never rewritten automatically.
  */
-function writeCodexMcp(name: string, binary: string, args: string[], env: Record<string, string>, replace: boolean, options: Options): void {
-  if (replace) {
-    const rm = codex(["mcp", "remove", name], options);
-    if (rm.error || rm.status !== 0) throw new Error(`codex mcp remove ${name} failed: ${rm.error ?? rm.out.trim().slice(0, 300)}`);
+function unportableSettings(s: CodexMcpServer): string[] {
+  const t = s.transport ?? {};
+  const out: string[] = [];
+  if (t.type && t.type !== "stdio") out.push(`transport ${t.type}`);
+  if (s.enabled === false) out.push("enabled = false");
+  if (t.cwd) out.push("cwd");
+  if (Array.isArray(t.env_vars) && t.env_vars.length > 0) out.push("env_vars");
+  for (const k of ["enabled_tools", "disabled_tools", "startup_timeout_sec", "tool_timeout_sec"] as const) {
+    if (s[k] !== null && s[k] !== undefined) out.push(k);
   }
+  return out;
+}
+
+/**
+ * Point Codex's config-tier `name` server at `binary` with `codex mcp add`, which replaces an
+ * existing entry in one write (no remove first: a failed add leaves the old entry in place). A
+ * config entry outranks a plugin's server of the same name in Codex, so this is what Codex runs.
+ */
+function writeCodexMcp(name: string, binary: string, args: string[], env: Record<string, string>, options: Options): void {
   const envArgs = Object.entries(env).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
   const add = codex(["mcp", "add", name, ...envArgs, "--", binary, ...args], options);
   if (add.error || add.status !== 0) throw new Error(`codex mcp add ${name} failed: ${add.error ?? add.out.trim().slice(0, 300)}`);
+}
+
+/**
+ * Repair (or create) the config entry `name` so it runs `binary`. Returns the note. An existing
+ * config entry keeps its args and env; one with settings `codex mcp add` would drop is left as
+ * it is, with the exact edit to make.
+ */
+function pointCodexMcpAt(name: string, binary: string, version: string | undefined, current: { state: "absent" } | { state: "present"; server: CodexMcpServer; transport: CodexMcpTransport }, options: Options): string {
+  const label = `${homeTilde(binary)}${version ? ` (${version})` : ""}`;
+  const configEntry = current.state === "present" && isConfigTier(current.transport);
+  if (configEntry && current.transport.command === binary) return `Codex MCP server ${name}: config entry already -> ${label}`;
+  if (configEntry) {
+    const blocked = unportableSettings(current.server);
+    if (blocked.length > 0) {
+      return `Codex MCP server ${name}: config entry -> ${homeTilde(String(current.transport.command ?? "?"))} left as it is (it sets ${blocked.join(", ")}, which \`codex mcp add\` would drop) — set \`command = "${binary}"\` under [mcp_servers.${name}] in ${homeTilde(join(options.codexHome, "config.toml"))}`;
+    }
+  }
+  const args = configEntry ? stringArgs(current.transport.args) : [];
+  const env = configEntry ? current.transport.env ?? {} : {};
+  if (options.dryRun) {
+    return configEntry
+      ? `would repair Codex MCP server ${name}: ${homeTilde(String(current.transport.command ?? "?"))} -> ${label}`
+      : `would register Codex MCP server ${name} -> ${label}`;
+  }
+  writeCodexMcp(name, binary, args, env, options);
+  return configEntry
+    ? `repaired Codex MCP server ${name}: ${homeTilde(String(current.transport.command ?? "?"))} -> ${label}`
+    : `registered Codex MCP server ${name} -> ${label}`;
 }
 
 function registerCodexMcp(product: Product, options: Options): string[] {
@@ -653,30 +748,15 @@ function registerCodexMcp(product: Product, options: Options): string[] {
     throw new Error("codex CLI not found; cannot register MCP server");
   }
 
-  const resolution = resolveEstateMcpBinary(options);
+  const resolution = resolveEstateMcpBinary();
   notes.push(...resolution.warnings);
-  const binaryPath = resolution.chosen?.path;
-  if (!binaryPath) {
+  const chosen = resolution.chosen;
+  if (!chosen) {
     throw new Error(`no ${product.install.crate ?? product.id} binary found (WICKED_ESTATE_MCP_BIN, PATH, ~/.local/bin, ~/.cargo/bin)`);
   }
-
-  if (options.dryRun) {
-    notes.push(`would register Codex MCP server ${product.id} -> ${homeTilde(binaryPath)}`);
-    return notes;
-  }
-
   const current = codexMcpGet(product.id, options);
   if (current.state === "error") throw new Error(current.detail);
-  if (current.state === "present" && current.transport.command === binaryPath) {
-    notes.push(`Codex MCP server ${product.id} already registered -> ${homeTilde(binaryPath)}`);
-    return notes;
-  }
-  const keepArgs = current.state === "present" && isConfigTier(current.transport) ? stringArgs(current.transport.args) : [];
-  const keepEnv = current.state === "present" && isConfigTier(current.transport) ? current.transport.env ?? {} : {};
-  writeCodexMcp(product.id, binaryPath, keepArgs, keepEnv ?? {}, current.state === "present", options);
-  notes.push(current.state === "present"
-    ? `repaired Codex MCP server ${product.id}: ${homeTilde(String(current.transport.command ?? "?"))} -> ${homeTilde(binaryPath)}`
-    : `registered Codex MCP server ${product.id} -> ${homeTilde(binaryPath)}`);
+  notes.push(pointCodexMcpAt(product.id, chosen.path, chosen.version, current, options));
   return notes;
 }
 
@@ -698,13 +778,15 @@ function isConfigTier(t: CodexMcpTransport): boolean {
 }
 
 /**
- * After the garden plugin is registered: the plugin declares `wicked-estate` itself (its
- * launcher resolves the binary at start). A config-tier `wicked-estate` entry overrides it,
- * so an entry that points somewhere else than the binary resolved now is repaired.
+ * After the garden plugin is registered. The plugin declares `wicked-estate` itself, and its
+ * launcher resolves the binary at start (override → PATH → ~/.local/bin). A config entry
+ * outranks it, so: an entry that points elsewhere than the current binary is repaired, and when
+ * the launcher would NOT start the current binary (it is only in ~/.cargo/bin off PATH, or an
+ * older copy comes first) an entry is written so Codex runs the right one.
  */
 function repairEstateForPlugin(options: Options): string[] {
   const notes: string[] = [];
-  const resolution = resolveEstateMcpBinary(options);
+  const resolution = resolveEstateMcpBinary();
   notes.push(...resolution.warnings);
   const chosen = resolution.chosen;
   const current = codexMcpGet("wicked-estate", options);
@@ -712,27 +794,22 @@ function repairEstateForPlugin(options: Options): string[] {
     notes.push(`wicked-estate MCP not checked: ${current.detail}`);
     return notes;
   }
-  if (current.state === "absent" || !isConfigTier(current.transport)) {
-    notes.push(chosen
-      ? `wicked-estate MCP: served by the plugin; its launcher resolves ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`
+  const configEntry = current.state === "present" && isConfigTier(current.transport);
+  if (!chosen) {
+    notes.push(configEntry
+      ? `wicked-estate MCP: config entry -> ${homeTilde(String(current.transport.command ?? "?"))} kept; no wicked-estate-mcp binary resolves to repair it with`
       : "wicked-estate MCP: served by the plugin, but no wicked-estate-mcp is installed yet — `npx wicked-installer install wicked-estate`");
     return notes;
   }
-  const command = String(current.transport.command ?? "");
-  if (!chosen) {
-    notes.push(`wicked-estate MCP: config entry -> ${homeTilde(command)} kept; no wicked-estate-mcp binary resolves to repair it with`);
-    return notes;
+  if (!configEntry) {
+    const launcher = pluginLauncherResolves();
+    if (launcher && samePath(launcher, chosen.path)) {
+      notes.push(`wicked-estate MCP: served by the plugin; its launcher starts ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`);
+      return notes;
+    }
+    notes.push(`wicked-estate MCP: the plugin's launcher would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}, not ${homeTilde(chosen.path)}`);
   }
-  if (command === chosen.path) {
-    notes.push(`wicked-estate MCP: config entry already -> ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`);
-    return notes;
-  }
-  if (options.dryRun) {
-    notes.push(`would repair wicked-estate MCP config entry: ${homeTilde(command)} -> ${homeTilde(chosen.path)}`);
-    return notes;
-  }
-  writeCodexMcp("wicked-estate", chosen.path, stringArgs(current.transport.args), current.transport.env ?? {}, true, options);
-  notes.push(`repaired wicked-estate MCP config entry: ${homeTilde(command)} -> ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`);
+  notes.push(pointCodexMcpAt("wicked-estate", chosen.path, chosen.version, current, options));
   return notes;
 }
 
@@ -950,6 +1027,12 @@ function writeInstallMarker(options: Options, reports: InstallReport[], previous
   const entries: MarkerProduct[] = previous.filter((p) => !touched.has(p.id));
   for (const report of reports) {
     const prior = previous.find((p) => p.id === report.productId);
+    if (!report.success && prior) {
+      // A failed run proves nothing about what is on disk: keep the earlier entry (its ownership
+      // evidence included) and note the failure beside it.
+      entries.push({ ...prior, lastFailure: { at: new Date().toISOString(), message: report.message } });
+      continue;
+    }
     const entry: MarkerProduct = {
       id: report.productId,
       success: report.success,
@@ -957,11 +1040,10 @@ function writeInstallMarker(options: Options, reports: InstallReport[], previous
       assets: report.assets,
       notes: report.notes,
     };
-    // A failed run proves nothing about what is on disk: keep the earlier record of ownership.
-    const skills = report.success ? report.skills : prior?.skills;
-    const plugin = report.success ? report.codexPlugin : prior?.codexPlugin;
-    if (skills) entry.skills = skills;
-    if (plugin) entry.codexPlugin = plugin;
+    // With an unreadable previous marker, ownership is unknown: record no `skills` list (it would
+    // read as "owns nothing" next time).
+    if (report.skills && !markerUnreadable) entry.skills = report.skills;
+    if (report.codexPlugin) entry.codexPlugin = report.codexPlugin;
     entries.push(entry);
   }
   const body = {
@@ -975,6 +1057,10 @@ function writeInstallMarker(options: Options, reports: InstallReport[], previous
     return;
   }
   mkdirSync(dirname(file), { recursive: true });
+  if (markerUnreadable && existsSync(file)) {
+    // Keep the unreadable marker for the operator instead of overwriting it.
+    renameSync(file, `${file}.unreadable-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+  }
   const tmp = `${file}.wicked-tmp-${process.pid}`;
   writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`);
   renameSync(tmp, file);
@@ -1076,7 +1162,7 @@ function npmGlobalRoot(): string | undefined {
  * Where the plugin's marketplace root lives: a --source-root checkout first (development),
  * else the global npm package (`npm install -g <pkg>` first, unless --skip-binaries/--dry-run).
  */
-function resolvePluginSource(product: Product, options: Options, notes: string[]): PluginSource | undefined {
+function resolvePluginSource(product: Product, options: Options, notes: string[]): PluginSource | "planned" | undefined {
   const local = localProductRoot(product, options);
   if (local) {
     const found = pluginSourceAt(local, "local");
@@ -1102,7 +1188,12 @@ function resolvePluginSource(product: Product, options: Options, notes: string[]
   }
   const root = join(globalRoot, pkg);
   if (!existsSync(root)) {
-    notes.push(`${pkg} is not installed globally (${homeTilde(root)})${options.dryRun ? " — npm install -g would provide it" : ""}`);
+    if (options.dryRun && !options.skipBinaries) {
+      // The real run installs it first; say what would follow instead of planning the copy path.
+      notes.push(`${pkg} is not installed globally yet; a real run installs it, then registers it as a Codex plugin from ${homeTilde(root)} if that release ships .codex-plugin/`);
+      return "planned";
+    }
+    notes.push(`${pkg} is not installed globally (${homeTilde(root)})`);
     return undefined;
   }
   const found = pluginSourceAt(root, "npm-global");
@@ -1111,17 +1202,6 @@ function resolvePluginSource(product: Product, options: Options, notes: string[]
     return undefined;
   }
   return found;
-}
-
-function samePath(a: string, b: string): boolean {
-  const norm = (p: string) => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return resolve(p);
-    }
-  };
-  return norm(a) === norm(b);
 }
 
 interface MarketplaceList { marketplaces?: Array<{ name?: string; root?: string; marketplaceSource?: { sourceType?: string; source?: string } }> }
@@ -1143,8 +1223,11 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   const existingSource = existing?.marketplaceSource?.source ?? existing?.root;
   const ours = !!prior && prior.addedByInstaller !== false && !!existingSource && samePath(prior.source, existingSource);
   let marketplace = "";
+  let changedSource = false;
   if (existing && existingSource && existing.marketplaceSource?.sourceType === "local" && samePath(existingSource, src.root)) {
-    marketplace = `marketplace ${src.marketplace} already -> ${homeTilde(src.root)}`;
+    // Same root — but only the marker proves the installer added it (a user may have, by hand).
+    record.addedByInstaller = ours;
+    marketplace = `marketplace ${src.marketplace} already -> ${homeTilde(src.root)}${ours ? "" : " (added outside wicked-installer)"}`;
   } else if (existing && !ours && !options.force) {
     // Somebody else's marketplace of the same name: use it, never repoint it silently.
     record.source = existingSource ?? "";
@@ -1155,11 +1238,18 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
       marketplace = `would ${existing ? "repoint" : "add"} marketplace ${src.marketplace} -> ${homeTilde(src.root)}`;
     } else {
       if (existing) {
+        // Codex refuses to add a marketplace name from a second source, so a repoint is
+        // remove + add; a failed add puts the previous source back.
         const rm = codex(["plugin", "marketplace", "remove", src.marketplace], options);
         if (rm.error || rm.status !== 0) throw new Error(`codex plugin marketplace remove ${src.marketplace} failed: ${rm.error ?? rm.out.trim().slice(0, 300)}`);
       }
       const add = codex(["plugin", "marketplace", "add", src.root, "--json"], options);
-      if (add.error || add.status !== 0) throw new Error(`codex plugin marketplace add failed: ${add.error ?? add.out.trim().slice(0, 300)}`);
+      if (add.error || add.status !== 0) {
+        const restored = existing && existingSource ? codex(["plugin", "marketplace", "add", existingSource, "--json"], options) : undefined;
+        throw new Error(`codex plugin marketplace add failed: ${add.error ?? add.out.trim().slice(0, 300)}` +
+          (restored ? (restored.status === 0 ? `; restored ${src.marketplace} -> ${homeTilde(existingSource ?? "")}` : `; restoring ${homeTilde(existingSource ?? "")} failed too`) : ""));
+      }
+      changedSource = true;
       marketplace = `${existing ? "repointed" : "added"} marketplace ${src.marketplace} -> ${homeTilde(src.root)}`;
     }
   }
@@ -1169,7 +1259,8 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   const list = codexJson<PluginList>(["plugin", "list", "--json"], options);
   const installed = (list?.installed ?? []).find((p) => p.pluginId === pluginId && p.installed !== false);
   const viaForeign = record.source !== src.root;
-  if (installed && (installed.version === src.version || viaForeign) && !options.force) {
+  // A marketplace that now points at a different root must re-copy the plugin even at the same version.
+  if (installed && (installed.version === src.version || viaForeign) && !changedSource && !options.force) {
     notes.push(`plugin ${pluginId} ${installed.version} already installed${installed.enabled === false ? " (disabled — `codex plugin` settings; left as you set it)" : ""}`);
     record.version = installed.version ?? src.version;
     return record;
@@ -1236,15 +1327,17 @@ function pruneLooseSkills(productId: string, prior: MarkerProduct | undefined, k
   // A pre-1.1 marker recorded only a count: the installer's own naming is the attribution.
   const legacyRecorded = !!prior && !recorded && prior.success !== false && (prior.assets?.skills ?? 0) > 0;
   const installerNamed = readdirSync(skillsDir).filter((n) => !keep.has(n) && looksInstallerCopied(productId, join(skillsDir, n), n));
-  const scan = legacyRecorded || options.pruneLegacySkills ? installerNamed : [];
+  // A count proves the product was installed, not which directories: naming alone is opt-in.
+  const scan = options.pruneLegacySkills ? installerNamed : [];
   const candidates = [...new Set([...(recorded ?? []), ...scan])];
   const unattributed = installerNamed.filter((n) => !candidates.includes(n));
   if (unattributed.length > 0) {
-    notes.push(`${unattributed.length} loose ${productId}-* skill dir(s) in ${homeTilde(skillsDir)} are not recorded as installed by wicked-installer — left in place (re-run with --prune-legacy-skills to remove them)`);
+    const why = legacyRecorded
+      ? `the marker (written before skill names were recorded) lists ${productId} but not which dirs`
+      : "the marker does not record them";
+    notes.push(`${unattributed.length} loose ${productId}-* skill dir(s) in ${homeTilde(skillsDir)} look installer-copied, but ${why} — left in place; re-run with --prune-legacy-skills to remove them${options.dryRun ? `: ${unattributed.join(", ")}` : ""}`);
   }
-  const basis = options.pruneLegacySkills && !legacyRecorded
-    ? "recorded in the marker or named by the installer (--prune-legacy-skills)"
-    : legacyRecorded ? "named by the installer, product recorded in a pre-1.1 marker" : "recorded in the marker";
+  const basis = options.pruneLegacySkills ? "recorded in the marker or named by the installer (--prune-legacy-skills)" : "recorded in the marker";
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backup = join(options.codexHome, "wicked-installer", "pruned-skills", stamp);
   const pruned: string[] = [];
@@ -1277,7 +1370,7 @@ function pruneLooseSkills(productId: string, prior: MarkerProduct | undefined, k
     }
   }
   if (pruned.length > 0) {
-    notes.push(`${options.dryRun ? "would remove" : "removed"} ${pruned.length} loose ${productId} skill(s) from ${homeTilde(skillsDir)} (${basis})${options.dryRun ? "" : `; moved to ${homeTilde(backup)}`}`);
+    notes.push(`${options.dryRun ? "would remove" : "removed"} ${pruned.length} loose ${productId} skill(s) from ${homeTilde(skillsDir)} (${basis})${options.dryRun ? `: ${pruned.join(", ")}` : `; moved to ${homeTilde(backup)}`}`);
   }
   if (skippedForeign.length > 0) notes.push(`left ${skippedForeign.length} ${productId}-* skill path(s) that are not plain directories (a symlink is never removed): ${skippedForeign.join(", ")}`);
   return failed;
@@ -1294,6 +1387,9 @@ async function installOne(product: Product, options: Options, prior: MarkerProdu
     // Plugin path: a codex with `codex plugin`, and a product that ships a Codex plugin.
     if (product.type !== "mcp-binary" && codexSupportsPlugins(options)) {
       const pluginSrc = resolvePluginSource(product, options, notes);
+      if (pluginSrc === "planned") {
+        return { productId: product.id, displayName: product.displayName, success: true, skipped: false, message: `${product.displayName}: planned (Codex plugin after npm install -g)`, delivery: "planned", pending: [], assets, notes };
+      }
       if (pluginSrc) return installAsPlugin(product, pluginSrc, prior, options, notes);
     }
 
@@ -1352,7 +1448,7 @@ async function installOne(product: Product, options: Options, prior: MarkerProdu
 }
 
 function installAsPlugin(product: Product, src: PluginSource, prior: MarkerProduct | undefined, options: Options, notes: string[]): InstallReport {
-  notes.push(`Codex plugin source: ${src.kind === "local" ? "local checkout" : "global npm package"} ${homeTilde(src.root)}`);
+  notes.push(`Codex plugin source: ${src.kind === "local" ? "local source" : "global npm package"} ${homeTilde(src.root)}`);
   const record = installCodexPlugin(src, prior?.codexPlugin, options, notes);
   const skills = countSkillFiles(join(src.root, "skills"));
   // Every loose skill the installer copied for this product is now duplicated by the plugin.
@@ -1482,9 +1578,14 @@ function mcpSpawn(cmd: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs
   let shim = false;
   let exe = cmd;
   if (process.platform === "win32") {
-    const where = spawnSync("where", [cmd], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    const first = (where.stdout ?? "").split(/\r?\n/).find(Boolean)?.trim() ?? "";
+    // `where` can list an extensionless sh wrapper (npm ships one) before npm.cmd: take the first
+    // candidate Windows can launch. An absolute path is its own candidate.
+    const lines = isAbsolute(cmd)
+      ? [cmd]
+      : (spawnSync("where", [cmd], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).stdout ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const first = lines.find((l) => /\.(exe|com|cmd|bat)$/i.test(l)) ?? "";
     shim = /\.(cmd|bat)$/i.test(first);
+    if (/\.(exe|com)$/i.test(first)) exe = first;
     // Run exactly the shim `where` resolved (quoted: it may sit under "Program Files").
     if (shim) exe = mcpWinQuote(first);
     if (shim && [first, ...args].some((a) => /[%!]/.test(a))) {

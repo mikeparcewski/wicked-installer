@@ -303,15 +303,20 @@ registered as a Codex plugin instead of having its skills copied:
 - **Loose-skill removal.** After the plugin is registered, every loose skill in
   `<codexHome>/skills` that the installer can attribute to itself for that product is moved to
   `<codexHome>/wicked-installer/pruned-skills/<time>/`. The copy path does the same for skills a
-  release stopped shipping. Attribution: the marker's `skills` list (§10.1); for a marker that
-  records only a count, the product's entry plus the installer's naming (`<product>-*` whose
-  `SKILL.md` `name` is the directory name); `--prune-legacy-skills` extends the naming rule to
-  dirs without any record. A symlink, a non-directory, a name that is not a plain directory
-  name, or anything at all when the marker is unreadable, is never removed.
+  release stopped shipping. Attribution is the marker's `skills` list (§10.1). A count-only
+  (pre-1.1) marker proves no directory. The installer-named dirs (`<product>-*` plain dirs whose
+  `SKILL.md` `name` is the dir name) are reported, but are removed only with
+  `--prune-legacy-skills`. A symlink, a non-directory, a name that is not a plain directory name,
+  or anything at all when the marker is unreadable, is never removed. An unreadable marker is
+  renamed to `codex-install.json.unreadable-<time>`, not overwritten.
 - **MCP.** A Codex config-tier server outranks a plugin's server of the same name, and
   `codex mcp get` shows the effective one. A config entry for `wicked-estate` that does not point
-  at the currently resolved binary is therefore repaired (args and env kept). A plugin-served
-  `wicked-estate` with no config entry is left alone. Resolution order: `WICKED_ESTATE_MCP_BIN`,
+  at the currently resolved binary is repaired with one `codex mcp add`. That call is an upsert,
+  so nothing is removed first; it keeps args and env. An entry that sets anything `codex mcp add`
+  cannot express (`cwd`, `env_vars`, `enabled = false`, tool lists, timeouts) is left as it is,
+  with the edit reported. A plugin-served `wicked-estate` with no config entry is left to the
+  plugin when its launcher (override → executable on PATH → `~/.local/bin`) would start the
+  current binary; otherwise a config entry is written. Resolution order: `WICKED_ESTATE_MCP_BIN`,
   PATH, `~/.local/bin`, `~/.cargo/bin`. The highest sibling `wicked-estate --version` wins, unless
   the override is set. An older `~/.cargo/bin` copy shadowing it on PATH is reported.
 - **Every `codex` call** carries `CODEX_HOME` = the target home.
@@ -343,7 +348,7 @@ Every write to a shared config file (`~/.claude.json`, `settings.json`) and the 
 **Two distinct MCP mechanisms — do not conflate them.** "MCP wiring" is not one thing:
 
 1. **Registry-block JSON-file wiring (this section).** Read-modify-write a config file's server map, driven by the registry `mcp` block (§4.1). This is the mechanism whose *target — file path + top-level key — is not derivable and must never be inferred*; it is opt-in per CLI and requires an explicit, verified target. **Claude adopts mechanism 1** (`~/.claude.json` → `mcpServers`).
-2. **CLI-native subcommand registration.** Invoke the CLI's own MCP-registration command (e.g. an `mcp add` subcommand); the CLI owns its MCP store behind that subcommand, so there is **no config-file target to state or verify**, and the guess-a-target prohibition does not apply to it. **The codex script uses mechanism 2:** it registers an `mcp-binary` product with `codex mcp add <id> -- <binary>` (state read from `codex mcp get <id> --json`; a drifted entry is removed and re-added with its args and env kept) and repairs the `wicked-estate` entry for the garden plugin (§7.6). It reads no `mcp` block. That code is codex-specific, not a template: a mechanism-2 adopter writes its own `<cli> mcp add` call from this section. A CLI whose runtime exposes such a subcommand MAY use this mechanism; if it does, that is the CLI team's own integration detail, not something this contract prescribes or that you model on another CLI.
+2. **CLI-native subcommand registration.** Invoke the CLI's own MCP-registration command (e.g. an `mcp add` subcommand); the CLI owns its MCP store behind that subcommand, so there is **no config-file target to state or verify**, and the guess-a-target prohibition does not apply to it. **The codex script uses mechanism 2:** it registers an `mcp-binary` product with `codex mcp add <id> -- <binary>` (state read from `codex mcp get <id> --json`; `mcp add` upserts, so a drifted entry is rewritten in one call with its args and env kept, and an entry with settings `mcp add` cannot express is left alone) and repairs the `wicked-estate` entry for the garden plugin (§7.6). It reads no `mcp` block. That code is codex-specific, not a template: a mechanism-2 adopter writes its own `<cli> mcp add` call from this section. A CLI whose runtime exposes such a subcommand MAY use this mechanism; if it does, that is the CLI team's own integration detail, not something this contract prescribes or that you model on another CLI.
 
 **Which a new CLI should use.** If your CLI exposes an `mcp add`-style subcommand, mechanism 2 is the simplest, safest option — invoke `<cli> mcp add <server> -- <binaryPath>` for the `mcp-binary` products (e.g. wicked-estate) and never touch a config file. If your CLI has no such subcommand, you MAY adopt mechanism 1 after stating and verifying your JSON target **in this section**. Doing neither is always conforming: a script that wires no MCP simply surfaces `install.mcpInstructions` prose — which is exactly what the codex and antigravity references do. A future Gemini-family adopter, for instance, would pick one mechanism and document it here (a verified target line for mechanism 1, or its own `mcp add` call for mechanism 2) — it never invents `~/.gemini/????.json`.
 
@@ -452,7 +457,7 @@ Path: `<cliHome>/wicked-installer/<cli>-install.json`
 }
 ```
 
-v1 semantics: the codex script now **keeps the entries of products a run did not touch** and replaces only the ones it ran (it used to record the last run only — Appendix A D-5/J-3), and writes atomically (tmp + rename). Two additive keys per product entry, both optional for readers: `skills` (the directory names of the loose skills it copied into `<codexHome>/skills`, or that it still owns after a removal attempt) and `codexPlugin` (`{pluginId, marketplace, source, version, addedByInstaller}` for the plugin path, §7.6). A failed run keeps the earlier `skills`/`codexPlugin` record. Written even under partial failure; skipped under `--dry-run` (logged instead). A marker without `markerVersion` is legacy: `status` reports `state: "legacy-marker"` with the note "exact uninstall unavailable — re-run install to upgrade bookkeeping"; `uninstall` falls back to heuristics (§12.3). The first v1.1 install run rewrites it as v2, preserving legacy product entries it can still verify on disk.
+v1 semantics: the codex script now **keeps the entries of products a run did not touch** and replaces only the ones it ran (it used to record the last run only — Appendix A D-5/J-3), and writes atomically (tmp + rename). Two additive keys per product entry, both optional for readers: `skills` (the directory names of the loose skills it copied into `<codexHome>/skills`, or that it still owns after a removal attempt) and `codexPlugin` (`{pluginId, marketplace, source, version, addedByInstaller}` for the plugin path, §7.6). A failed run keeps the product's earlier entry whole and adds `lastFailure: {at, message}`. Written even under partial failure; skipped under `--dry-run` (logged instead). A marker without `markerVersion` is legacy: `status` reports `state: "legacy-marker"` with the note "exact uninstall unavailable — re-run install to upgrade bookkeeping"; `uninstall` falls back to heuristics (§12.3). The first v1.1 install run rewrites it as v2, preserving legacy product entries it can still verify on disk.
 
 ### 10.2 v2 (v1.1 — the files manifest that makes exact uninstall possible)
 

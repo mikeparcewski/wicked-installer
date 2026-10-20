@@ -90,8 +90,10 @@ on PATH but not run makes the capability `unchecked`, never `ready`), and
 
 ### Codex — wicked-garden as a plugin
 
-On a Codex with `codex plugin` (codex-cli 0.163+), `install-codex wicked-garden` registers garden
-as a **plugin** instead of copying its skills into `$CODEX_HOME/skills`:
+On a Codex with `codex plugin` (codex-cli 0.163+), the Codex script registers garden as a
+**plugin** instead of copying its skills into `$CODEX_HOME/skills`. Run it by picking Codex in
+`npx wicked-installer`, or directly with
+`node "$(npm root -g)/wicked-installer/dist/install-codex.js" wicked-garden [--dry-run]`:
 
 1. The plugin source is a durable copy of garden that ships `.codex-plugin/plugin.json`: a
    `--source-root` checkout, else the global npm package (`npm install -g wicked-garden`, then
@@ -103,19 +105,25 @@ as a **plugin** instead of copying its skills into `$CODEX_HOME/skills`:
    repoints it. Then `codex plugin add wicked-garden@wicked-garden` installs the plugin (Codex
    copies it to `plugins/cache/wicked-garden/wicked-garden/<version>/`). The plugin is re-added
    only when the version changes.
-3. Every loose `wicked-garden-*` skill this installer copied earlier is removed. A removed skill is
-   moved to `$CODEX_HOME/wicked-installer/pruned-skills/<time>/`. Ownership comes from the marker:
-   the skill names it now records, or, for a marker written before names were recorded, garden's
-   entry in it plus the installer's naming (`<product>-*` whose `SKILL.md` name is the directory
-   name). Skills the installer cannot attribute to itself are left in place and counted in the
-   summary; `--prune-legacy-skills` removes those too. A symlink is never removed. When the marker
-   is unreadable, nothing is removed.
+3. Every loose skill the marker records this installer copying for garden is removed. A removed
+   skill is moved to `$CODEX_HOME/wicked-installer/pruned-skills/<time>/`. A marker written before
+   skill names were recorded holds only a count, which proves garden was installed but not which
+   directories. In that case the `<product>-*` directories named the way the installer names them
+   (`SKILL.md` name = directory name) are counted and listed under `--dry-run`, but left in place.
+   `--prune-legacy-skills` removes them. A symlink is never removed. When the marker is unreadable,
+   nothing is removed and the file is kept aside as `codex-install.json.unreadable-<time>`.
 4. `wicked-estate` MCP: the plugin declares the server itself, and its launcher finds the binary at
-   start. A `wicked-estate` entry in your Codex config takes precedence over the plugin's, so
-   such an entry is repaired to point at the current binary. Its args and env are kept. The
-   current binary is the highest `wicked-estate --version` among `WICKED_ESTATE_MCP_BIN`, PATH,
-   `~/.local/bin` and `~/.cargo/bin`, unless `WICKED_ESTATE_MCP_BIN` is set, in which case that
-   one wins. An older `~/.cargo/bin` copy that shadows it on PATH is reported.
+   start, looking at `WICKED_ESTATE_MCP_BIN`, then PATH, then `~/.local/bin`. The current binary is
+   the highest `wicked-estate --version` among those locations and `~/.cargo/bin`, unless
+   `WICKED_ESTATE_MCP_BIN` is set, in which case that one wins. A `wicked-estate` entry in your
+   Codex config takes precedence over the plugin's. So:
+   - an entry pointing elsewhere is repaired with `codex mcp add`, keeping its args and env;
+   - an entry that also sets `cwd`, `env_vars`, `enabled = false`, a tool list or a timeout is left
+     as it is, and the summary gives the one-line edit (`codex mcp add` would drop those settings);
+   - with no entry, the installer writes one only when the launcher would not start the current
+     binary (for example, the binary sits only in `~/.cargo/bin` off PATH).
+
+   An older `~/.cargo/bin` copy that shadows the current binary on PATH is reported.
 
 A re-run with nothing new changes nothing and says so line by line. A Codex without
 `codex plugin`, or a garden release without `.codex-plugin/`, gets the copy path as before. On

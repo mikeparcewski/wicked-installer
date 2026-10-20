@@ -155,7 +155,27 @@ test("a new garden version re-adds the plugin", { skip }, () => {
   }
 });
 
-test("prunes the loose skills the installer copied (pre-1.1 marker), leaves everything it did not install", { skip }, () => {
+test("a pre-1.1 (count-only) marker proves no directory: nothing is removed without --prune-legacy-skills", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const skills = join(sb.codexHome, "skills");
+    skill(join(skills, "wicked-garden-old"), "wicked-garden-old");
+    skill(join(skills, "wicked-garden-user-private"), "wicked-garden-user-private");
+    write(join(sb.codexHome, "wicked-installer", "codex-install.json"), JSON.stringify({
+      products: [{ id: "wicked-garden", success: true, skipped: false, assets: { skills: 1 }, notes: [] }],
+    }));
+    const r = run(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(readdirSync(skills).sort(), ["wicked-garden-old", "wicked-garden-user-private"]);
+    assert.ok(r.garden.notes.some((n) => /2 loose wicked-garden-\* skill dir\(s\).*lists wicked-garden but not which dirs.*--prune-legacy-skills/.test(n)), r.garden.notes.join("\n"));
+    const dry = run(sb, ["--dry-run"]);
+    assert.ok(dry.garden.notes.some((n) => /wicked-garden-old, wicked-garden-user-private/.test(n)), "a dry run names them");
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--prune-legacy-skills removes the installer-named loose skills, leaves everything else", { skip }, () => {
   const sb = sandbox();
   try {
     const skills = join(sb.codexHome, "skills");
@@ -167,7 +187,7 @@ test("prunes the loose skills the installer copied (pre-1.1 marker), leaves ever
     write(join(sb.codexHome, "wicked-installer", "codex-install.json"), JSON.stringify({
       installedAt: "x", codexHome: sb.codexHome, products: [{ id: "wicked-garden", success: true, skipped: false, assets: { skills: 3 }, notes: [] }],
     }));
-    const r = run(sb);
+    const r = run(sb, ["--prune-legacy-skills"]);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(readdirSync(skills).sort(), ["my-own", "wicked-garden-linked", "wicked-garden-mine"]);
     assert.ok(lstatSync(join(skills, "wicked-garden-linked")).isSymbolicLink(), "the symlink is untouched");
@@ -178,7 +198,7 @@ test("prunes the loose skills the installer copied (pre-1.1 marker), leaves ever
     assert.ok(r.garden.notes.some((n) => /removed 3 loose wicked-garden skill\(s\)/.test(n)));
     assert.deepEqual(marker(sb).products.find((p) => p.id === "wicked-garden").skills, [], "nothing loose is owned any more");
     // Idempotent: nothing left to prune, and the user's symlink is not offered for --prune-legacy-skills.
-    const again = run(sb);
+    const again = run(sb, ["--prune-legacy-skills"]);
     assert.ok(!again.garden.notes.some((n) => /removed|not recorded/.test(n)), again.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
@@ -219,7 +239,7 @@ test("without a marker record, installer-named skills are left (and named); --pr
   }
 });
 
-test("an unreadable marker prunes nothing", { skip }, () => {
+test("an unreadable marker prunes nothing and is kept aside, not overwritten", { skip }, () => {
   const sb = sandbox();
   try {
     skill(join(sb.codexHome, "skills", "wicked-garden-old"), "wicked-garden-old");
@@ -227,6 +247,10 @@ test("an unreadable marker prunes nothing", { skip }, () => {
     const r = run(sb, ["--prune-legacy-skills"]);
     assert.ok(existsSync(join(sb.codexHome, "skills", "wicked-garden-old")));
     assert.ok(r.garden.notes.some((n) => /unreadable/.test(n)));
+    const kept = readdirSync(join(sb.codexHome, "wicked-installer")).filter((n) => n.startsWith("codex-install.json.unreadable-"));
+    assert.equal(kept.length, 1);
+    assert.equal(readFileSync(join(sb.codexHome, "wicked-installer", kept[0]), "utf8"), "{not json");
+    assert.equal(marker(sb).products.find((p) => p.id === "wicked-garden").skills, undefined, "no ownership list is invented");
   } finally {
     cleanup(sb);
   }
@@ -242,6 +266,22 @@ test("a failed plugin add removes nothing and keeps the earlier ownership record
     assert.equal(r.garden.success, false);
     assert.ok(existsSync(join(sb.codexHome, "skills", "wicked-garden-old")));
     assert.deepEqual(marker(sb).products.find((p) => p.id === "wicked-garden").skills, ["wicked-garden-old"]);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a failed run keeps a count-only marker entry whole (its evidence is not erased)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const legacy = { id: "wicked-garden", success: true, skipped: false, assets: { skills: 3 }, notes: ["x"] };
+    write(join(sb.codexHome, "wicked-installer", "codex-install.json"), JSON.stringify({ products: [legacy] }));
+    const r = run(sb, [], { CODEX_STUB_FAIL: "plugin-add" });
+    assert.equal(r.status, 1);
+    const entry = marker(sb).products.find((p) => p.id === "wicked-garden");
+    assert.equal(entry.success, true);
+    assert.deepEqual(entry.assets, { skills: 3 });
+    assert.match(entry.lastFailure.message, /codex plugin add .* failed/);
   } finally {
     cleanup(sb);
   }
@@ -326,6 +366,40 @@ test("without --skip-binaries the marked package is installed globally first", {
   }
 });
 
+test("a marketplace already at the same root but added by hand is not claimed", { skip }, () => {
+  const sb = sandbox();
+  try {
+    mkdirSync(sb.codexHome, { recursive: true });
+    write(join(sb.codexHome, "stub-state.json"), JSON.stringify({ marketplaces: { "wicked-garden": { source: join(sb.src, "wicked-garden") } }, plugins: {}, mcp: {} }));
+    const r = run(sb);
+    assert.ok(r.garden.notes.some((n) => /added outside wicked-installer/.test(n)));
+    assert.equal(marker(sb).products.find((p) => p.id === "wicked-garden").codexPlugin.addedByInstaller, false);
+    // A later run from another root must not repoint it without --force.
+    rmSync(join(sb.src, "wicked-garden"), { recursive: true });
+    garden(join(sb.tmp, "global", "wicked-garden"), "1.0.0");
+    run(sb);
+    assert.equal(state(sb).marketplaces["wicked-garden"].source, join(sb.src, "wicked-garden"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("repointing the installer's own marketplace re-copies the plugin even at the same version", { skip }, () => {
+  const sb = sandbox();
+  try {
+    assert.equal(run(sb).status, 0);
+    const before = calls(sb).length;
+    rmSync(join(sb.src, "wicked-garden"), { recursive: true });
+    garden(join(sb.tmp, "global", "wicked-garden"), "1.0.0");
+    const r = run(sb);
+    assert.ok(r.garden.notes.some((n) => /repointed marketplace wicked-garden/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(calls(sb).slice(before).some((c) => c.argv[0] === "plugin" && c.argv[1] === "add"), "plugin re-added from the new root");
+    assert.ok(state(sb).plugins["wicked-garden@wicked-garden"].path.length > 0);
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("a marketplace another source configured is used, not repointed, unless --force", { skip }, () => {
   const sb = sandbox();
   try {
@@ -368,13 +442,72 @@ test("estate: a stale config entry is repaired to the newest binary (args/env ke
   }
 });
 
-test("estate: a plugin-served server is left to the plugin (no config entry written)", { skip }, () => {
+test("estate: a plugin-served server whose launcher finds the current binary is left to the plugin", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    const r = run(sb);
+    assert.equal(state(sb).mcp["wicked-estate"], undefined);
+    assert.ok(r.garden.notes.some((n) => /served by the plugin; its launcher starts ~\/\.local\/bin\/wicked-estate-mcp \(0\.30\.0\)/.test(n)), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a binary only in ~/.cargo/bin (off PATH) gets a config entry — the plugin's launcher cannot find it", { skip }, () => {
   const sb = sandbox();
   try {
     fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
     const r = run(sb);
-    assert.equal(state(sb).mcp["wicked-estate"], undefined);
-    assert.ok(r.garden.notes.some((n) => /served by the plugin; its launcher resolves ~\/\.cargo\/bin\/wicked-estate-mcp \(0\.30\.0\)/.test(n)), r.garden.notes.join("\n"));
+    assert.deepEqual(state(sb).mcp["wicked-estate"], { command: join(sb.home, ".cargo", "bin", "wicked-estate-mcp"), args: [], env: {} });
+    assert.ok(r.garden.notes.some((n) => /launcher would start nothing/.test(n)), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a config entry with settings `codex mcp add` would drop is left alone, with the edit to make", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    mkdirSync(sb.codexHome, { recursive: true });
+    const custom = { command: "/opt/old/wicked-estate-mcp", args: [], env: {}, cwd: "/work", env_vars: ["TOKEN"], enabled: false, enabled_tools: ["Recall"] };
+    write(join(sb.codexHome, "stub-state.json"), JSON.stringify({ marketplaces: {}, plugins: {}, mcp: { "wicked-estate": custom } }));
+    const r = run(sb);
+    assert.deepEqual(state(sb).mcp["wicked-estate"], custom);
+    assert.ok(r.garden.notes.some((n) => /left as it is \(it sets enabled = false, cwd, env_vars, enabled_tools/.test(n) && /set `command = /.test(n)), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a failed `codex mcp add` leaves the previous entry in place (no remove first)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    mkdirSync(sb.codexHome, { recursive: true });
+    const old = { command: "/opt/old/wicked-estate-mcp", args: ["--readonly"], env: {} };
+    write(join(sb.codexHome, "stub-state.json"), JSON.stringify({ marketplaces: {}, plugins: {}, mcp: { "wicked-estate": old } }));
+    const r = run(sb, [], { CODEX_STUB_FAIL: "mcp-add" });
+    assert.equal(r.garden.success, false);
+    assert.deepEqual(state(sb).mcp["wicked-estate"], old);
+    assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && c.argv[1] === "remove"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("--dry-run without the global package plans the plugin path instead of the copy path", { skip }, () => {
+  const sb = sandbox();
+  try {
+    rmSync(join(sb.src, "wicked-garden"), { recursive: true });
+    const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--dry-run", "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const g = JSON.parse(res.stdout.slice(res.stdout.indexOf("{"))).reports.find((x) => x.productId === "wicked-garden");
+    assert.equal(g.delivery, "planned");
+    assert.ok(g.notes.some((n) => /a real run installs it, then registers it as a Codex plugin/.test(n)), g.notes.join("\n"));
   } finally {
     cleanup(sb);
   }

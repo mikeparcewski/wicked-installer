@@ -88,7 +88,12 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
 } else if (a0 === "mcp" && a1 === "get") {
   const s = state.mcp[a2] ?? pluginServers()[a2];
   if (!s) fail(`Error: No MCP server named '${a2}' found.`);
-  out({ name: a2, enabled: true, transport: { type: "stdio", command: s.command, args: s.args ?? [], env: s.env && Object.keys(s.env).length ? s.env : null, env_vars: [], cwd: null } });
+  out({
+    name: a2, enabled: s.enabled !== false, disabled_reason: null,
+    transport: { type: "stdio", command: s.command, args: s.args ?? [], env: s.env && Object.keys(s.env).length ? s.env : null, env_vars: s.env_vars ?? [], cwd: s.cwd ?? null },
+    enabled_tools: s.enabled_tools ?? null, disabled_tools: s.disabled_tools ?? null,
+    startup_timeout_sec: s.startup_timeout_sec ?? null, tool_timeout_sec: s.tool_timeout_sec ?? null,
+  });
 } else if (a0 === "mcp" && a1 === "add") {
   if (process.env.CODEX_STUB_FAIL === "mcp-add") fail("stub: mcp add failed");
   const name = a2;
@@ -97,6 +102,7 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   const env = {};
   for (let i = 0; i < sep; i += 1) if (rest[i] === "--env") { const [k, ...v] = rest[i + 1].split("="); env[k] = v.join("="); i += 1; }
   const [command, ...args] = rest.slice(sep + 1);
+  // Like codex 0.163: `mcp add` rewrites the whole entry (extra keys such as cwd are dropped).
   state.mcp[name] = { command, args, env };
   save();
   out(`Added global MCP server '${name}'.\n`);
