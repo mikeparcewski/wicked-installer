@@ -31,16 +31,20 @@ All notable changes to wicked-installer are documented here. The format follows
   hard-code `~/.cargo/bin/wicked-estate-mcp`. It now resolves the binary from
   `WICKED_ESTATE_MCP_BIN`, PATH, `~/.local/bin` and `~/.cargo/bin`, and picks the highest
   `wicked-estate --version` (an explicit `WICKED_ESTATE_MCP_BIN` wins). It repairs a config entry
-  that points elsewhere with one `codex mcp add` (no remove first, so a failed add leaves the old
-  entry). That entry's args and env are kept. An entry with settings `codex mcp add` would drop
-  (`cwd`, `env_vars`, disabled, tool lists, timeouts) is left alone, and the summary gives the
-  edit to make. When the garden plugin serves the server, an entry is written only if the
-  plugin's launcher would not start the current binary. It warns when an older `~/.cargo/bin`
+  that points elsewhere by replacing only the `command = …` line of `[mcp_servers.<name>]` in
+  `config.toml`. `codex mcp add` would rewrite the whole entry and drop `cwd`, `env_vars`,
+  `enabled`, `required`, tool lists, approval modes and timeouts. The write is backed up, atomic,
+  and read back through `codex mcp get --json`; the backup is restored unless everything but the
+  command reads back unchanged. An entry in another form is left alone, with the edit to make.
+  When the garden plugin serves the server, a new entry is added only if the plugin's launcher
+  would not start the current binary. It warns when an older `~/.cargo/bin`
   copy shadows the current one on PATH.
 - **On Windows, `codex`/`npm` calls pick a candidate Windows can launch.** `where` can list an
   extensionless sh wrapper before `npm.cmd`, and the first `.exe`/`.cmd`/`.bat` is now used.
 - **A failed run keeps the product's earlier marker entry whole** (with `lastFailure` beside it),
-  so a failed migration does not erase the evidence a retry needs.
+  so a failed migration does not erase the evidence a retry needs. A failed `codex plugin add`
+  also rolls back the marketplace change made in the same run. An estate MCP problem after the
+  plugin is registered is reported as a note, not as a failed install.
 - **Every `codex` call `install-codex` makes now carries `CODEX_HOME` = `--codex-home`.** MCP
   registration used to run against the default home even when `--codex-home` named another.
 - **The Codex marker keeps the entries of products a run did not touch.** It used to record only the

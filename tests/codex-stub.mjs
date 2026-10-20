@@ -5,8 +5,11 @@
 // $CODEX_STUB_LOG and keeps its state in $CODEX_HOME/stub-state.json, emulating only what
 // install-codex drives: `plugin list --help`, `plugin marketplace list|add|remove`,
 // `plugin list|add`, `mcp get|add|remove`. Output shapes were copied from codex-cli 0.163.0
-// (`--json` variants). Effective MCP servers follow Codex's precedence: a config entry
-// outranks a plugin's server of the same name; `mcp remove` acts on config only.
+// (`--json` variants). MCP config entries live where Codex keeps them, in
+// $CODEX_HOME/config.toml as `[mcp_servers.<name>]` tables (+ `.env` subtables), parsed here for
+// the JSON-compatible value subset the tests write. Effective servers follow Codex's precedence:
+// a config entry outranks a plugin's server of the same name; `mcp remove` acts on config only;
+// `mcp add` rewrites the whole entry (other keys are dropped), as codex 0.163 does.
 //
 //   CODEX_STUB_NO_PLUGIN=1   behave like a codex without `codex plugin` (exit 2)
 //   CODEX_STUB_FAIL=<sub>    make one subcommand exit 1: plugin-add | marketplace-add | mcp-add
@@ -36,6 +39,36 @@ const state = existsSync(stateFile)
   : { marketplaces: {}, plugins: {}, mcp: {} };
 const save = () => writeFileSync(stateFile, JSON.stringify(state, null, 2));
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; } };
+const configFile = join(home, "config.toml");
+const configText = () => (existsSync(configFile) ? readFileSync(configFile, "utf8") : "");
+const HEADER = /^\s*\[\s*mcp_servers\s*\.\s*"?([A-Za-z0-9_-]+)"?\s*(\.\s*env\s*)?\]\s*(?:#.*)?$/;
+function configServers() {
+  const servers = {};
+  let cur;
+  let env = false;
+  for (const line of configText().split("\n")) {
+    const h = HEADER.exec(line);
+    if (h) { cur = servers[h[1]] ??= {}; env = !!h[2]; continue; }
+    if (/^\s*\[/.test(line)) { cur = undefined; continue; }
+    const kv = /^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*(?:#.*)?$/.exec(line);
+    if (!cur || !kv) continue;
+    let value;
+    try { value = JSON.parse(kv[2]); } catch { value = kv[2]; }
+    if (env) (cur.env ??= {})[kv[1]] = value; else cur[kv[1]] = value;
+  }
+  return servers;
+}
+function dropConfigServer(name) {
+  const out = [];
+  let skipping = false;
+  for (const line of configText().split("\n")) {
+    const h = HEADER.exec(line);
+    if (h) { skipping = h[1] === name; if (skipping) continue; }
+    else if (/^\s*\[/.test(line)) skipping = false;
+    if (!skipping) out.push(line);
+  }
+  writeFileSync(configFile, out.join("\n"));
+}
 const MKT = [".agents/plugins/marketplace.json", ".claude-plugin/marketplace.json"];
 const marketplaceName = (root) => {
   for (const rel of MKT) { const m = readJson(join(root, rel)); if (m) return m.name; }
@@ -86,7 +119,7 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   save();
   out({ pluginId: a2, name: plugin, marketplaceName: mkt, version: manifest.version, installedPath: join(base, manifest.version) });
 } else if (a0 === "mcp" && a1 === "get") {
-  const s = state.mcp[a2] ?? pluginServers()[a2];
+  const s = configServers()[a2] ?? pluginServers()[a2];
   if (!s) fail(`Error: No MCP server named '${a2}' found.`);
   out({
     name: a2, enabled: s.enabled !== false, disabled_reason: null,
@@ -103,11 +136,14 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   for (let i = 0; i < sep; i += 1) if (rest[i] === "--env") { const [k, ...v] = rest[i + 1].split("="); env[k] = v.join("="); i += 1; }
   const [command, ...args] = rest.slice(sep + 1);
   // Like codex 0.163: `mcp add` rewrites the whole entry (extra keys such as cwd are dropped).
-  state.mcp[name] = { command, args, env };
-  save();
+  dropConfigServer(name);
+  let toml = `${configText().replace(/\n*$/, "")}\n\n[mcp_servers.${name}]\ncommand = ${JSON.stringify(command)}\n`;
+  if (args.length) toml += `args = ${JSON.stringify(args)}\n`;
+  if (Object.keys(env).length) toml += `\n[mcp_servers.${name}.env]\n${Object.entries(env).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join("\n")}\n`;
+  writeFileSync(configFile, toml.replace(/^\n+/, ""));
   out(`Added global MCP server '${name}'.\n`);
 } else if (a0 === "mcp" && a1 === "remove") {
-  if (state.mcp[a2]) { delete state.mcp[a2]; save(); out(`Removed global MCP server '${a2}'.\n`); }
+  if (configServers()[a2]) { dropConfigServer(a2); out(`Removed global MCP server '${a2}'.\n`); }
   else out(`No MCP server named '${a2}' found.\n`);
 } else {
   fail(`codex-stub: unhandled ${argv.join(" ")}`, 9);

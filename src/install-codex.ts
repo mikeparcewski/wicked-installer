@@ -685,60 +685,100 @@ function codexMcpGet(name: string, options: Options): { state: "absent" } | { st
   }
 }
 
-/**
- * The settings `codex mcp add` cannot express. It rewrites the whole entry from command, args
- * and --env, so an entry carrying any of these is never rewritten automatically.
- */
-function unportableSettings(s: CodexMcpServer): string[] {
-  const t = s.transport ?? {};
-  const out: string[] = [];
-  if (t.type && t.type !== "stdio") out.push(`transport ${t.type}`);
-  if (s.enabled === false) out.push("enabled = false");
-  if (t.cwd) out.push("cwd");
-  if (Array.isArray(t.env_vars) && t.env_vars.length > 0) out.push("env_vars");
-  for (const k of ["enabled_tools", "disabled_tools", "startup_timeout_sec", "tool_timeout_sec"] as const) {
-    if (s[k] !== null && s[k] !== undefined) out.push(k);
+// ---------------------------------------------------------------------------
+// Repairing a Codex config-tier MCP entry. `codex mcp add` rewrites the WHOLE entry from
+// command/args/--env and drops everything else (cwd, env_vars, enabled, required, tool lists,
+// approval modes, timeouts — and `codex mcp get --json` does not even show all of those), so an
+// existing entry is never rewritten through it. Instead the one `command = …` line of
+// `[mcp_servers.<name>]` in <codexHome>/config.toml is replaced in place (mechanism 1 with a
+// stated target, INTERFACE.md §8.3; verified against codex-cli 0.163.0): backup, atomic write,
+// then `codex mcp get --json` must show the new command and every other visible field unchanged,
+// or the backup is restored. A new entry (none in config.toml) is created with `codex mcp add`.
+// ---------------------------------------------------------------------------
+
+function escapeRegExp(v: string): string {
+  return v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+type ConfigTable = { lines: string[]; commandLine: number } | "none" | { ambiguous: string };
+
+/** Locate `[mcp_servers.<name>]` and its single-line `command = "…"` in config.toml text. */
+function findConfigServerTable(text: string, name: string): ConfigTable {
+  const lines = text.split("\n");
+  const n = escapeRegExp(name);
+  const key = `(?:${n}|"${n}"|'${n}')`;
+  const header = new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*${key}\\s*\\]\\s*(?:#.*)?$`);
+  const anyHeader = /^\s*\[/;
+  const mentions = new RegExp(`mcp_servers\\s*\\.\\s*${key}\\b|^\\s*${key}\\s*[.=]`);
+  const starts = lines.map((l, i) => (header.test(l) ? i : -1)).filter((i) => i >= 0);
+  if (starts.length > 1) return { ambiguous: `[mcp_servers.${name}] appears ${starts.length} times` };
+  if (starts.length === 0) {
+    // Defined some other way (dotted keys, an inline table): not something to edit by line.
+    const other = lines.some((l) => !/^\s*#/.test(l) && mentions.test(l) && !new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*${key}\\s*\\.`).test(l));
+    return other ? { ambiguous: `${name} is defined in a form other than a [mcp_servers.${name}] table` } : "none";
   }
-  return out;
+  const commandRe = /^(\s*command\s*=\s*)("(?:[^"\\]|\\.)*"|'[^']*')(\s*(?:#.*)?)$/;
+  let commandLine = -1;
+  for (let i = starts[0] + 1; i < lines.length && !anyHeader.test(lines[i]); i += 1) {
+    if (/^\s*command\s*=/.test(lines[i])) {
+      if (!commandRe.test(lines[i]) || commandLine >= 0) return { ambiguous: `the command line of [mcp_servers.${name}] is not a single quoted string` };
+      commandLine = i;
+    }
+  }
+  if (commandLine < 0) return { ambiguous: `[mcp_servers.${name}] has no command line` };
+  return { lines, commandLine };
+}
+
+/** Everything `codex mcp get --json` shows, minus the command — must not change in a repair. */
+function visibleSettings(s: CodexMcpServer): string {
+  const { command: _command, ...transport } = s.transport ?? {};
+  void _command;
+  return JSON.stringify({ ...s, transport });
 }
 
 /**
- * Point Codex's config-tier `name` server at `binary` with `codex mcp add`, which replaces an
- * existing entry in one write (no remove first: a failed add leaves the old entry in place). A
- * config entry outranks a plugin's server of the same name in Codex, so this is what Codex runs.
- */
-function writeCodexMcp(name: string, binary: string, args: string[], env: Record<string, string>, options: Options): void {
-  const envArgs = Object.entries(env).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
-  const add = codex(["mcp", "add", name, ...envArgs, "--", binary, ...args], options);
-  if (add.error || add.status !== 0) throw new Error(`codex mcp add ${name} failed: ${add.error ?? add.out.trim().slice(0, 300)}`);
-}
-
-/**
- * Repair (or create) the config entry `name` so it runs `binary`. Returns the note. An existing
- * config entry keeps its args and env; one with settings `codex mcp add` would drop is left as
- * it is, with the exact edit to make.
+ * Point the config-tier entry `name` at `binary`. Returns the note; throws only when Codex
+ * cannot be asked at all. Never deletes an entry, never drops a setting.
  */
 function pointCodexMcpAt(name: string, binary: string, version: string | undefined, current: { state: "absent" } | { state: "present"; server: CodexMcpServer; transport: CodexMcpTransport }, options: Options): string {
   const label = `${homeTilde(binary)}${version ? ` (${version})` : ""}`;
-  const configEntry = current.state === "present" && isConfigTier(current.transport);
-  if (configEntry && current.transport.command === binary) return `Codex MCP server ${name}: config entry already -> ${label}`;
-  if (configEntry) {
-    const blocked = unportableSettings(current.server);
-    if (blocked.length > 0) {
-      return `Codex MCP server ${name}: config entry -> ${homeTilde(String(current.transport.command ?? "?"))} left as it is (it sets ${blocked.join(", ")}, which \`codex mcp add\` would drop) — set \`command = "${binary}"\` under [mcp_servers.${name}] in ${homeTilde(join(options.codexHome, "config.toml"))}`;
+  const configFile = join(options.codexHome, "config.toml");
+  const text = existsSync(configFile) ? readFileSync(configFile, "utf8") : "";
+  const table = findConfigServerTable(text, name);
+  if (typeof table === "object" && "ambiguous" in table) {
+    return `Codex MCP server ${name}: not changed (${table.ambiguous}) — point its command at ${binary} in ${homeTilde(configFile)}`;
+  }
+  if (table === "none") {
+    if (current.state === "present" && isConfigTier(current.transport)) {
+      return `Codex MCP server ${name}: -> ${homeTilde(String(current.transport.command ?? "?"))} comes from a config layer other than ${homeTilde(configFile)}; left as it is`;
     }
+    if (options.dryRun) return `would register Codex MCP server ${name} -> ${label}`;
+    // Nothing configured for this name: a fresh entry has no settings to lose.
+    const add = codex(["mcp", "add", name, "--", binary], options);
+    if (add.error || add.status !== 0) throw new Error(`codex mcp add ${name} failed: ${add.error ?? add.out.trim().slice(0, 300)}`);
+    return `registered Codex MCP server ${name} -> ${label}`;
   }
-  const args = configEntry ? stringArgs(current.transport.args) : [];
-  const env = configEntry ? current.transport.env ?? {} : {};
-  if (options.dryRun) {
-    return configEntry
-      ? `would repair Codex MCP server ${name}: ${homeTilde(String(current.transport.command ?? "?"))} -> ${label}`
-      : `would register Codex MCP server ${name} -> ${label}`;
+  if (current.state === "present" && current.transport.command === binary) return `Codex MCP server ${name}: config entry already -> ${label}`;
+  const was = current.state === "present" ? homeTilde(String(current.transport.command ?? "?")) : "?";
+  if (options.dryRun) return `would repair Codex MCP server ${name}: ${was} -> ${label} (only its command line changes)`;
+  const m = /^(\s*command\s*=\s*)("(?:[^"\\]|\\.)*"|'[^']*')(\s*(?:#.*)?)$/.exec(table.lines[table.commandLine]);
+  if (!m) return `Codex MCP server ${name}: not changed (unexpected command line)`;
+  const lines = [...table.lines];
+  lines[table.commandLine] = `${m[1]}${JSON.stringify(binary)}${m[3]}`;
+  const backup = `${configFile}.wicked-bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  cpSync(configFile, backup);
+  const tmp = `${configFile}.wicked-tmp-${process.pid}`;
+  writeFileSync(tmp, lines.join("\n"));
+  renameSync(tmp, configFile);
+  const after = codexMcpGet(name, options);
+  const ok = after.state === "present" && after.transport.command === binary
+    && (current.state !== "present" || visibleSettings(after.server) === visibleSettings(current.server));
+  if (!ok) {
+    renameSync(backup, configFile);
+    return `Codex MCP server ${name}: repair to ${label} not kept — Codex did not read it back unchanged, the previous config.toml was restored`;
   }
-  writeCodexMcp(name, binary, args, env, options);
-  return configEntry
-    ? `repaired Codex MCP server ${name}: ${homeTilde(String(current.transport.command ?? "?"))} -> ${label}`
-    : `registered Codex MCP server ${name} -> ${label}`;
+  rmSync(backup, { force: true });
+  return `repaired Codex MCP server ${name}: ${was} -> ${label} (only its command line changed)`;
 }
 
 function registerCodexMcp(product: Product, options: Options): string[] {
@@ -794,14 +834,18 @@ function repairEstateForPlugin(options: Options): string[] {
     notes.push(`wicked-estate MCP not checked: ${current.detail}`);
     return notes;
   }
-  const configEntry = current.state === "present" && isConfigTier(current.transport);
+  // Whether a config entry exists is read from config.toml itself — a user entry may look
+  // exactly like the plugin's (`wicked-garden run scripts/estate_mcp.mjs`).
+  const configFile = join(options.codexHome, "config.toml");
+  const homeEntry = findConfigServerTable(existsSync(configFile) ? readFileSync(configFile, "utf8") : "", "wicked-estate") !== "none";
+  const pluginServed = !homeEntry && !(current.state === "present" && isConfigTier(current.transport));
   if (!chosen) {
-    notes.push(configEntry
-      ? `wicked-estate MCP: config entry -> ${homeTilde(String(current.transport.command ?? "?"))} kept; no wicked-estate-mcp binary resolves to repair it with`
-      : "wicked-estate MCP: served by the plugin, but no wicked-estate-mcp is installed yet — `npx wicked-installer install wicked-estate`");
+    notes.push(pluginServed
+      ? "wicked-estate MCP: served by the plugin, but no wicked-estate-mcp is installed yet — `npx wicked-installer install wicked-estate`"
+      : "wicked-estate MCP: config entry kept; no wicked-estate-mcp binary resolves to repair it with");
     return notes;
   }
-  if (!configEntry) {
+  if (pluginServed) {
     const launcher = pluginLauncherResolves();
     if (launcher && samePath(launcher, chosen.path)) {
       notes.push(`wicked-estate MCP: served by the plugin; its launcher starts ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`);
@@ -1254,6 +1298,16 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
     }
   }
   notes.push(marketplace);
+  /** Undo this run's marketplace change (the marker still holds the previous record). */
+  const rollBackMarketplace = (): string => {
+    const rm = codex(["plugin", "marketplace", "remove", src.marketplace], options);
+    if (rm.error || rm.status !== 0) return `; removing the marketplace it just added failed too`;
+    if (existing && existingSource) {
+      const back = codex(["plugin", "marketplace", "add", existingSource, "--json"], options);
+      return back.status === 0 ? `; marketplace ${src.marketplace} restored to ${homeTilde(existingSource)}` : `; restoring marketplace ${homeTilde(existingSource)} failed`;
+    }
+    return `; the marketplace it added was removed again`;
+  };
 
   // 2. The plugin.
   const list = codexJson<PluginList>(["plugin", "list", "--json"], options);
@@ -1270,7 +1324,9 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
     return record;
   }
   const added = codex(["plugin", "add", pluginId, "--json"], options);
-  if (added.error || added.status !== 0) throw new Error(`codex plugin add ${pluginId} failed: ${added.error ?? added.out.trim().slice(0, 300)}`);
+  if (added.error || added.status !== 0) {
+    throw new Error(`codex plugin add ${pluginId} failed: ${added.error ?? added.out.trim().slice(0, 300)}${changedSource ? rollBackMarketplace() : ""}`);
+  }
   let version = src.version;
   try {
     const text = added.stdout ?? added.out;
@@ -1280,7 +1336,7 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   }
   const after = codexJson<PluginList>(["plugin", "list", "--json"], options);
   const landed = (after?.installed ?? []).find((p) => p.pluginId === pluginId && p.installed !== false);
-  if (!landed) throw new Error(`codex plugin add ${pluginId} exited 0 but codex plugin list does not show it installed`);
+  if (!landed) throw new Error(`codex plugin add ${pluginId} exited 0 but codex plugin list does not show it installed${changedSource ? rollBackMarketplace() : ""}`);
   version = landed.version ?? version;
   record.version = version;
   notes.push(installed ? `updated plugin ${pluginId} ${installed.version} -> ${version}` : `installed plugin ${pluginId} ${version}`);
@@ -1453,7 +1509,15 @@ function installAsPlugin(product: Product, src: PluginSource, prior: MarkerProdu
   const skills = countSkillFiles(join(src.root, "skills"));
   // Every loose skill the installer copied for this product is now duplicated by the plugin.
   const leftover = pruneLooseSkills(product.id, prior, new Set(), options, notes);
-  if (product.id === "wicked-garden") notes.push(...repairEstateForPlugin(options));
+  if (product.id === "wicked-garden") {
+    // The plugin is registered by now; an estate repair problem is reported, not a failed install
+    // (failing here would drop the marker's record of the marketplace just added).
+    try {
+      notes.push(...repairEstateForPlugin(options));
+    } catch (err) {
+      notes.push(`wicked-estate MCP repair failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   const pending = runtimePending(product);
   const delivery: Delivery = options.dryRun ? "planned" : "registered";
   return {

@@ -117,11 +117,14 @@ On a Codex with `codex plugin` (codex-cli 0.163+), the Codex script registers ga
    the highest `wicked-estate --version` among those locations and `~/.cargo/bin`, unless
    `WICKED_ESTATE_MCP_BIN` is set, in which case that one wins. A `wicked-estate` entry in your
    Codex config takes precedence over the plugin's. So:
-   - an entry pointing elsewhere is repaired with `codex mcp add`, keeping its args and env;
-   - an entry that also sets `cwd`, `env_vars`, `enabled = false`, a tool list or a timeout is left
-     as it is, and the summary gives the one-line edit (`codex mcp add` would drop those settings);
-   - with no entry, the installer writes one only when the launcher would not start the current
-     binary (for example, the binary sits only in `~/.cargo/bin` off PATH).
+   - an entry pointing elsewhere gets only its `command = …` line replaced in
+     `$CODEX_HOME/config.toml`, so every other setting stays (`codex mcp add` would rewrite the
+     whole entry). The file is backed up and written atomically; if `codex mcp get` does not read
+     back the new command with everything else unchanged, the backup is restored;
+   - an entry written in any other form (an inline table, dotted keys) is not touched, and the
+     summary says what to change;
+   - with no entry, the installer adds one (`codex mcp add`) only when the launcher would not start
+     the current binary, for example when the binary sits only in `~/.cargo/bin` off PATH.
 
    An older `~/.cargo/bin` copy that shadows the current binary on PATH is reported.
 
