@@ -631,6 +631,28 @@ function pluginLauncherResolves(transport?: CodexMcpTransport): string | undefin
   return undefined;
 }
 
+/**
+ * The note for a server run by garden's launcher, resolved against what Codex will really pass
+ * it: the EFFECTIVE transport from `codex mcp get` (a config entry's own env / env_vars, or the
+ * plugin's declaration), never an assumption about which tier it came from. The launcher entry
+ * itself is never replaced; the note says what to change when it would not start `chosen`.
+ */
+function launcherNote(prefix: string, transport: CodexMcpTransport | undefined, chosen: EstateCandidate): string {
+  const launcher = pluginLauncherResolves(transport);
+  const label = `${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`;
+  if (launcher && samePath(launcher, chosen.path)) return `${prefix}: runs garden's estate launcher, left as it is; it starts ${label}`;
+  const env = transport?.env ?? {};
+  const forwarded = transport ? stringArgs(transport.env_vars) : ["WICKED_ESTATE_MCP_BIN"];
+  const pinned = "WICKED_ESTATE_MCP_BIN" in env ? "WICKED_ESTATE_MCP_BIN" : "PATH" in env ? "PATH" : undefined;
+  const dropped = !pinned && !!process.env.WICKED_ESTATE_MCP_BIN && !forwarded.includes("WICKED_ESTATE_MCP_BIN");
+  const fix = pinned
+    ? `its own env pins ${pinned}${pinned === "WICKED_ESTATE_MCP_BIN" ? `=${homeTilde(String(env[pinned]))}` : ""}: point that at ${chosen.path} under [mcp_servers.wicked-estate.env]`
+    : dropped
+    ? `WICKED_ESTATE_MCP_BIN is exported, but this entry's env_vars do not forward it, so Codex drops it: add "WICKED_ESTATE_MCP_BIN" to its env_vars, or set it under [mcp_servers.wicked-estate.env]`
+    : `put ${homeTilde(dirname(chosen.path))} first on PATH, or set WICKED_ESTATE_MCP_BIN=${chosen.path} in the environment Codex starts from${transport && !forwarded.includes("WICKED_ESTATE_MCP_BIN") ? " and forward it through the entry's env_vars" : ""}`;
+  return `${prefix}: runs garden's estate launcher, left as it is — but under the environment Codex gives it, it would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}, not ${label}: ${fix}`;
+}
+
 function resolveEstateMcpBinary(name = "wicked-estate-mcp", overrideEnv: string | null = "WICKED_ESTATE_MCP_BIN"): EstateResolution {
   const seen = new Set<string>();
   const candidates: EstateCandidate[] = [];
@@ -1029,9 +1051,9 @@ function registerCodexMcp(product: Product, options: Options): string[] {
   const current = codexMcpGet(product.id, options);
   if (current.state === "error") throw new Error(current.detail);
   if (estate && current.state === "present" && isLauncherEntry(current.transport)) {
-    // garden's launcher resolves the binary itself (and adds --readonly where it must).
-    const launcher = pluginLauncherResolves(isConfigTier(current.transport) ? current.transport : undefined);
-    notes.push(`Codex MCP server ${product.id}: runs garden's estate launcher (it resolves the binary at start and adds --readonly where it must) — left as it is; it would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}${launcher && samePath(launcher, chosen.path) ? "" : `, not ${homeTilde(chosen.path)} — put ${homeTilde(dirname(chosen.path))} first on PATH or set WICKED_ESTATE_MCP_BIN`}`);
+    // garden's launcher resolves the binary itself (and adds --readonly where it must), so it is
+    // never replaced; it is checked against the effective transport Codex reports.
+    notes.push(launcherNote(`Codex MCP server ${product.id}`, current.transport, chosen));
     return notes;
   }
   notes.push(pointCodexMcpAt(product.id, chosen.path, chosen.version, current, options, estate ? "wicked-estate-mcp" : binaryName));
@@ -1103,20 +1125,8 @@ function repairEstateForPlugin(options: Options): string[] {
     // The plugin's launcher stays in the path: it is what adds --readonly for
     // WICKED_ESTATE_READONLY / run markers and refuses an unpinned governed unit. A config entry
     // that runs the binary directly would bypass that, so none is written; the fix is reported.
-    const entryEnv = homeEntry && current.state === "present" ? current.transport.env : undefined;
-    const launcher = pluginLauncherResolves(homeEntry && current.state === "present" ? current.transport : undefined);
-    if (launcher && samePath(launcher, chosen.path)) {
-      notes.push(`wicked-estate MCP: served by the plugin; its launcher starts ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""}`);
-    } else {
-      const pinnedInEntry = !!entryEnv && ("WICKED_ESTATE_MCP_BIN" in entryEnv || "PATH" in entryEnv);
-      const overrideDropped = homeEntry && current.state === "present" && !!process.env.WICKED_ESTATE_MCP_BIN && !stringArgs(current.transport.env_vars).includes("WICKED_ESTATE_MCP_BIN");
-      notes.push(`wicked-estate MCP: served by garden's launcher, but it would start ${launcher ? homeTilde(launcher) : "nothing (not on PATH or in ~/.local/bin)"}, not ${homeTilde(chosen.path)}${chosen.version ? ` (${chosen.version})` : ""} — ` +
-        (pinnedInEntry
-          ? `its [mcp_servers.wicked-estate.env] sets WICKED_ESTATE_MCP_BIN/PATH: point that at ${chosen.path}`
-          : overrideDropped
-          ? `Codex does not forward WICKED_ESTATE_MCP_BIN to this entry: add it to its env_vars, or set it under [mcp_servers.wicked-estate.env]`
-          : `put ${homeTilde(dirname(chosen.path))} first on PATH, or set WICKED_ESTATE_MCP_BIN=${chosen.path} in the environment Codex starts from`));
-    }
+    // Resolved against the effective transport (its real env / env_vars), whichever tier it is.
+    notes.push(launcherNote("wicked-estate MCP", current.state === "present" ? current.transport : undefined, chosen));
     return notes;
   }
   notes.push(pointCodexMcpAt("wicked-estate", chosen.path, chosen.version, current, options, "wicked-estate-mcp"));

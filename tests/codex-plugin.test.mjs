@@ -35,7 +35,7 @@ function garden(dir, version = "1.0.0", skills = ["alpha", "alpha/beta", "gamma"
   write(join(dir, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version }));
   write(join(dir, ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "wicked-garden", plugins: [{ name: "wicked-garden", source: "./", version }] }));
   write(join(dir, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version, skills: "./skills", mcpServers: "./.codex-plugin/mcp.json", hooks: { hooks: {} } }));
-  write(join(dir, ".codex-plugin", "mcp.json"), JSON.stringify({ mcpServers: { "wicked-estate": { command: "wicked-garden", args: ["run", "scripts/estate_mcp.mjs"] } } }));
+  write(join(dir, ".codex-plugin", "mcp.json"), JSON.stringify({ mcpServers: { "wicked-estate": { command: "wicked-garden", args: ["run", "scripts/estate_mcp.mjs"], env_vars: ["WICKED_ESTATE_MCP_BIN", "WICKED_ESTATE_DB", "WICKED_HOME"] } } }));
   rmSync(join(dir, "skills"), { recursive: true, force: true });
   for (const s of skills) skill(join(dir, "skills", s), `wicked-garden-${s.replace("/", "-")}`);
 }
@@ -582,7 +582,7 @@ test("estate + garden in one run: no direct-binary entry shadows the plugin's la
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.doesNotMatch(configToml(sb), /mcp_servers/);
-    assert.match(res.stdout, /runs garden's estate launcher .* left as it is/);
+    assert.match(res.stdout, /runs garden's estate launcher, left as it is/);
   } finally {
     cleanup(sb);
   }
@@ -700,7 +700,7 @@ test("estate: a launcher entry whose own env pins an older binary is reported ag
     fakeEstate(join(sb.tmp, "old"), "0.29.0");
     seedConfig(sb, `[mcp_servers.wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\n\n[mcp_servers.wicked-estate.env]\nWICKED_ESTATE_MCP_BIN = ${JSON.stringify(join(sb.tmp, "old", "wicked-estate-mcp"))}\n`);
     const r = run(sb);
-    assert.ok(r.garden.notes.some((n) => /its \[mcp_servers\.wicked-estate\.env\] sets WICKED_ESTATE_MCP_BIN\/PATH/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(r.garden.notes.some((n) => /its own env pins WICKED_ESTATE_MCP_BIN=.*: point that at .* under \[mcp_servers\.wicked-estate\.env\]/.test(n)), r.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
   }
@@ -818,6 +818,47 @@ test("--dry-run of estate + garden plans no direct-binary estate entry when gard
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(res.stdout, /would be served by the garden plugin's launcher planned in this run/);
     assert.doesNotMatch(res.stdout, /would register Codex MCP server wicked-estate/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+function estateOnly(sb, extraEnv = {}) {
+  return spawnSync(process.execPath, [script, "wicked-estate", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
+    encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log, ...extraEnv }, timeout: 60000,
+  });
+}
+
+test("estate-only: a launcher config entry without env_vars does not get an exported WICKED_ESTATE_MCP_BIN — reported, entry kept", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const outside = join(sb.tmp, "outside");
+    fakeEstate(outside, "0.30.0"); // not on PATH, not in ~/.local/bin
+    const before = '[mcp_servers.wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\n';
+    seedConfig(sb, before);
+    const res = estateOnly(sb, { WICKED_ESTATE_MCP_BIN: join(outside, "wicked-estate-mcp") });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.ok(configToml(sb).startsWith(before), "the launcher entry is never replaced");
+    assert.match(res.stdout, /would start nothing \(not on PATH or in ~\/\.local\/bin\)/);
+    assert.match(res.stdout, /env_vars do not forward it, so Codex drops it: add \\"WICKED_ESTATE_MCP_BIN\\" to its env_vars/);
+    assert.ok(!calls(sb).some((c) => c.argv[0] === "mcp" && (c.argv[1] === "add" || c.argv[1] === "remove")));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate-only: a launcher config entry whose own env pins an older binary is reported against that pin, entry kept", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    const old = join(sb.tmp, "old");
+    fakeEstate(old, "0.29.0");
+    const before = `[mcp_servers.wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\n\n[mcp_servers.wicked-estate.env]\nWICKED_ESTATE_MCP_BIN = ${JSON.stringify(join(old, "wicked-estate-mcp"))}\n`;
+    seedConfig(sb, before);
+    const res = estateOnly(sb);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.ok(configToml(sb).startsWith(before), "the launcher entry is never replaced");
+    assert.match(res.stdout, /it would start [^,]*old\/wicked-estate-mcp, not ~\/\.local\/bin\/wicked-estate-mcp \(0\.30\.0\): its own env pins WICKED_ESTATE_MCP_BIN=/);
   } finally {
     cleanup(sb);
   }
@@ -1095,7 +1136,7 @@ test("estate: a plugin-served server whose launcher finds the current binary is 
     fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
     const r = run(sb);
     assert.doesNotMatch(configToml(sb), /mcp_servers/);
-    assert.ok(r.garden.notes.some((n) => /served by the plugin; its launcher starts ~\/\.local\/bin\/wicked-estate-mcp \(0\.30\.0\)/.test(n)), r.garden.notes.join("\n"));
+    assert.ok(r.garden.notes.some((n) => /runs garden's estate launcher, left as it is; it starts ~\/\.local\/bin\/wicked-estate-mcp \(0\.30\.0\)/.test(n)), r.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
   }
@@ -1153,7 +1194,7 @@ test("estate product leaves a plugin-served (launcher) server alone — no direc
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.doesNotMatch(configToml(sb), /mcp_servers/);
-    assert.match(res.stdout, /runs garden's estate launcher .* left as it is; it would start ~\/\.local\/bin\/wicked-estate-mcp/);
+    assert.match(res.stdout, /runs garden's estate launcher, left as it is; it starts ~\/\.local\/bin\/wicked-estate-mcp/);
     assert.ok(marker(sb).products.some((p) => p.id === "wicked-garden" && p.codexPlugin), "the garden record survives a run for another product");
   } finally {
     cleanup(sb);
