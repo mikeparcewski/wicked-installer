@@ -1393,8 +1393,8 @@ function resolvePluginSource(product: Product, options: Options, notes: string[]
 
 /**
  * The version a marketplace root offers for `pluginName`: its manifest entry's local source
- * (`"./…"` or `{source: "local", path}`), then that root's `.codex-plugin/plugin.json` (or the
- * Claude one Codex also reads). Undefined when it cannot be read.
+ * (`"./…"` or `{source: "local", path}`), then the first manifest Codex would read there.
+ * Undefined when it cannot be read.
  */
 function marketplacePluginVersion(root: string | undefined, pluginName: string): string | undefined {
   if (!root) return undefined;
@@ -1407,11 +1407,16 @@ function marketplacePluginVersion(root: string | undefined, pluginName: string):
     const path = typeof src === "string" ? src : src && typeof src === "object" && (src as Record<string, unknown>).source === "local" ? (src as Record<string, unknown>).path : undefined;
     if (typeof path !== "string" || !(path === "." || path.startsWith("./"))) return undefined;
     const pluginRoot = resolve(root, path);
-    for (const m of [join(".codex-plugin", "plugin.json"), join(".claude-plugin", "plugin.json")]) {
-      const v = readJson(join(pluginRoot, m))?.version;
-      if (typeof v === "string" && v.trim()) return v.trim();
-    }
-    return undefined;
+    // Codex's manifest order: a root plugin.json carrying the Agent Plugins $schema, then
+    // .codex-plugin/, .claude-plugin/, .cursor-plugin/ (codex-rs/utils/plugins plugin_namespace.rs).
+    const agent = readJson(join(pluginRoot, "plugin.json"));
+    const candidates = [
+      ...(agent && typeof agent.$schema === "string" && agent.$schema.startsWith("https://agent-plugins.org/schemas/") ? [agent] : []),
+      ...[".codex-plugin", ".claude-plugin", ".cursor-plugin"].map((d) => readJson(join(pluginRoot, d, "plugin.json"))),
+    ];
+    const manifest = candidates.find((m) => m !== undefined);
+    const v = manifest?.version;
+    return typeof v === "string" && v.trim() ? v.trim() : undefined;
   }
   return undefined;
 }

@@ -448,6 +448,28 @@ test("a user-managed marketplace that moved ahead updates the plugin without bei
   }
 });
 
+test("a user-managed marketplace whose plugin ships only .cursor-plugin/plugin.json still updates", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const other = join(sb.tmp, "user-garden");
+    garden(other, "1.0.0");
+    mkdirSync(sb.codexHome, { recursive: true });
+    write(join(sb.codexHome, "stub-state.json"), JSON.stringify({ marketplaces: { "wicked-garden": { source: other } }, plugins: {}, mcp: {} }));
+    run(sb);
+    // The marketplace's plugin now carries its version only in a Cursor manifest (Codex reads it too).
+    rmSync(join(other, ".codex-plugin", "plugin.json"));
+    rmSync(join(other, ".claude-plugin", "plugin.json"));
+    write(join(other, ".cursor-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version: "2.0.0" }));
+    // (The stub can only install from .codex-plugin, so the add itself fails here; what is under
+    // test is that the newer version was read and an update attempted.)
+    const before = calls(sb).length;
+    run(sb);
+    assert.ok(calls(sb).slice(before).some((c) => c.argv[0] === "plugin" && c.argv[1] === "add"), "the Cursor manifest's newer version triggered an update");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("a non-local (git) marketplace is never repointed, even with --force", { skip }, () => {
   const sb = sandbox();
   try {
