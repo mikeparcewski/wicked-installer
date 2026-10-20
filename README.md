@@ -123,7 +123,8 @@ On a Codex with `codex plugin` (codex-cli 0.163+), the Codex script registers ga
      back the new command with everything else unchanged, the backup is restored;
    - an entry written in any other form (dotted keys, a key under `[mcp_servers]`, an inline
      table, a repeated table) is not touched and is never treated as missing; the summary says
-     what to change. The file's permissions are kept;
+     what to change. The file's permissions are kept, and a symlinked `config.toml` is edited
+     at its target;
    - with no entry, the installer adds one (`codex mcp add`) only when the launcher would not start
      the current binary, for example when the binary sits only in `~/.cargo/bin` off PATH.
 

@@ -430,6 +430,24 @@ test("repointing the installer's own marketplace re-copies the plugin even at th
   }
 });
 
+test("a user-managed marketplace that moved ahead updates the plugin without being repointed", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const other = join(sb.tmp, "user-garden");
+    garden(other, "1.0.0");
+    mkdirSync(sb.codexHome, { recursive: true });
+    write(join(sb.codexHome, "stub-state.json"), JSON.stringify({ marketplaces: { "wicked-garden": { source: other } }, plugins: {}, mcp: {} }));
+    run(sb);
+    assert.equal(state(sb).plugins["wicked-garden@wicked-garden"].version, "1.0.0");
+    garden(other, "2.0.0");
+    const r = run(sb);
+    assert.equal(state(sb).plugins["wicked-garden@wicked-garden"].version, "2.0.0", r.garden.notes.join("\n"));
+    assert.equal(state(sb).marketplaces["wicked-garden"].source, other, "not repointed");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("a non-local (git) marketplace is never repointed, even with --force", { skip }, () => {
   const sb = sandbox();
   try {
@@ -535,7 +553,7 @@ test("estate: an entry in a form other than one [mcp_servers.<name>] table is no
   }
 });
 
-test("estate: a quoted-key table header is edited like a bare one; CRLF and the file mode are kept", { skip }, () => {
+test("estate: a quoted-key table header is edited like a bare one; a CRLF command line is tolerated and keeps its ending; the file mode is kept", { skip }, () => {
   const sb = sandbox();
   try {
     fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
@@ -555,6 +573,8 @@ for (const [label, toml] of [
   ["dotted keys at the root", 'mcp_servers."wicked-estate".command = "wicked-garden"\nmcp_servers."wicked-estate".args = ["run", "scripts/estate_mcp.mjs"]\nmcp_servers."wicked-estate".enabled = false\n'],
   ["a key under [mcp_servers]", '[mcp_servers]\n"wicked-estate" = { command = "wicked-garden", args = ["run", "scripts/estate_mcp.mjs"], enabled = false }\n'],
   ["a repeated table", '[mcp_servers.wicked-estate]\ncommand = "a"\n[mcp_servers."wicked-estate"]\ncommand = "b"\n'],
+  ["an escaped server key", '[mcp_servers."wicked\\u002destate"]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\nenabled = false\n'],
+  ["an escaped table key", '["mcp\\u005fservers".wicked-estate]\ncommand = "wicked-garden"\nargs = ["run", "scripts/estate_mcp.mjs"]\nrequired = true\n'],
 ]) {
   test(`estate: an entry written as ${label} is never treated as absent (no \`codex mcp add\` over it)`, { skip }, () => {
     const sb = sandbox();
@@ -570,6 +590,23 @@ for (const [label, toml] of [
     }
   });
 }
+
+test("estate: a symlinked config.toml is repaired at its target and stays a symlink", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    const target = join(sb.tmp, "dotfiles", "codex-config.toml");
+    write(target, '[mcp_servers.wicked-estate]\ncommand = "/opt/old/wicked-estate-mcp"\n');
+    mkdirSync(sb.codexHome, { recursive: true });
+    symlinkSync(target, join(sb.codexHome, "config.toml"));
+    const r = run(sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(lstatSync(join(sb.codexHome, "config.toml")).isSymbolicLink(), "still a link");
+    assert.match(readFileSync(target, "utf8"), new RegExp(`command = ${JSON.stringify(join(sb.home, ".local", "bin", "wicked-estate-mcp")).replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
+  } finally {
+    cleanup(sb);
+  }
+});
 
 test("estate: a plugin-served server whose launcher finds the current binary is left to the plugin", { skip }, () => {
   const sb = sandbox();

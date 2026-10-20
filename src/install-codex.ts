@@ -727,6 +727,10 @@ function findConfigServerTable(text: string, name: string): ConfigTable {
   for (let i = 0; i < lines.length; i += 1) {
     const l = clean(lines[i]);
     if (/^\s*(#|$)/.test(l)) continue;
+    // A quoted key may spell any name with escapes (`"wicked\u002destate"`): with an escape in a
+    // header or a key, absence can no longer be established by text, so nothing is changed.
+    const keyPart = anyHeader.test(l) ? l : l.split("=")[0];
+    if (keyPart.includes("\\")) return { ambiguous: "config.toml spells a key with escapes" };
     if (anyHeader.test(l)) {
       inServersTable = serversHeader.test(l);
       if (mainHeader.test(l)) starts.push(i);
@@ -767,15 +771,22 @@ function visibleSettings(s: CodexMcpServer): string {
  */
 function pointCodexMcpAt(name: string, binary: string, version: string | undefined, current: { state: "absent" } | { state: "present"; server: CodexMcpServer; transport: CodexMcpTransport }, options: Options): string {
   const label = `${homeTilde(binary)}${version ? ` (${version})` : ""}`;
-  const configFile = join(options.codexHome, "config.toml");
+  const configPath = join(options.codexHome, "config.toml");
+  // A config.toml that is a symlink (dotfile managers) is edited at its target, so the link stays.
+  let configFile = configPath;
+  try {
+    configFile = realpathSync(configPath);
+  } catch {
+    /* absent: nothing to resolve */
+  }
   const text = existsSync(configFile) ? readFileSync(configFile, "utf8") : "";
   const table = findConfigServerTable(text, name);
   if (typeof table === "object" && "ambiguous" in table) {
-    return `Codex MCP server ${name}: not changed (${table.ambiguous}) — point its command at ${binary} in ${homeTilde(configFile)}`;
+    return `Codex MCP server ${name}: not changed (${table.ambiguous}) — point its command at ${binary} in ${homeTilde(configPath)}`;
   }
   if (table === "none") {
     if (current.state === "present" && isConfigTier(current.transport)) {
-      return `Codex MCP server ${name}: -> ${homeTilde(String(current.transport.command ?? "?"))} comes from a config layer other than ${homeTilde(configFile)}; left as it is`;
+      return `Codex MCP server ${name}: -> ${homeTilde(String(current.transport.command ?? "?"))} comes from a config layer other than ${homeTilde(configPath)}; left as it is`;
     }
     if (options.dryRun) return `would register Codex MCP server ${name} -> ${label}`;
     // Nothing configured for this name: a fresh entry has no settings to lose.
@@ -1279,6 +1290,31 @@ function resolvePluginSource(product: Product, options: Options, notes: string[]
   return found;
 }
 
+/**
+ * The version a marketplace root offers for `pluginName`: its manifest entry's local source
+ * (`"./…"` or `{source: "local", path}`), then that root's `.codex-plugin/plugin.json` (or the
+ * Claude one Codex also reads). Undefined when it cannot be read.
+ */
+function marketplacePluginVersion(root: string | undefined, pluginName: string): string | undefined {
+  if (!root) return undefined;
+  for (const rel of MARKETPLACE_MANIFESTS) {
+    const mkt = readJson(join(root, rel));
+    if (!mkt) continue;
+    const entry = (Array.isArray(mkt.plugins) ? mkt.plugins as Array<Record<string, unknown>> : []).find((p) => p && p.name === pluginName);
+    if (!entry) return undefined;
+    const src = entry.source;
+    const path = typeof src === "string" ? src : src && typeof src === "object" && (src as Record<string, unknown>).source === "local" ? (src as Record<string, unknown>).path : undefined;
+    if (typeof path !== "string" || !(path === "." || path.startsWith("./"))) return undefined;
+    const pluginRoot = resolve(root, path);
+    for (const m of [join(".codex-plugin", "plugin.json"), join(".claude-plugin", "plugin.json")]) {
+      const v = readJson(join(pluginRoot, m))?.version;
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 interface MarketplaceList { marketplaces?: Array<{ name?: string; root?: string; marketplaceSource?: { sourceType?: string; source?: string } }> }
 interface PluginList { installed?: Array<{ pluginId?: string; version?: string; enabled?: boolean; installed?: boolean }> }
 
@@ -1348,14 +1384,17 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   const list = codexJson<PluginList>(["plugin", "list", "--json"], options);
   const installed = (list?.installed ?? []).find((p) => p.pluginId === pluginId && p.installed !== false);
   const viaForeign = record.source !== src.root;
+  // The version wanted is the one the marketplace actually in use offers (a foreign one may be
+  // behind or ahead of src). Unknown (a source the installer cannot read) → leave it installed.
+  const wanted = viaForeign ? marketplacePluginVersion(existing?.root ?? record.source, src.pluginName) : src.version;
   // A marketplace that now points at a different root must re-copy the plugin even at the same version.
-  if (installed && (installed.version === src.version || viaForeign) && !changedSource && !options.force) {
-    notes.push(`plugin ${pluginId} ${installed.version} already installed${installed.enabled === false ? " (disabled — `codex plugin` settings; left as you set it)" : ""}`);
+  if (installed && (wanted === undefined || installed.version === wanted) && !changedSource && !options.force) {
+    notes.push(`plugin ${pluginId} ${installed.version} already installed${wanted === undefined ? " (its marketplace's version could not be read)" : ""}${installed.enabled === false ? " (disabled — `codex plugin` settings; left as you set it)" : ""}`);
     record.version = installed.version ?? src.version;
     return record;
   }
   if (options.dryRun) {
-    notes.push(`would ${installed ? `update plugin ${pluginId} ${installed.version} ->` : `install plugin ${pluginId}`} ${src.version}`);
+    notes.push(`would ${installed ? `update plugin ${pluginId} ${installed.version} ->` : `install plugin ${pluginId}`} ${wanted ?? "(marketplace version)"}`);
     return record;
   }
   const added = codex(["plugin", "add", pluginId, "--json"], options);
