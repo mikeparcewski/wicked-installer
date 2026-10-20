@@ -470,6 +470,39 @@ test("a user-managed marketplace whose plugin ships only .cursor-plugin/plugin.j
   }
 });
 
+test("a plugin the user disabled is not updated (codex plugin add would re-enable it)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    assert.equal(run(sb).status, 0);
+    const st = state(sb);
+    st.plugins["wicked-garden@wicked-garden"].enabled = false;
+    writeFileSync(join(sb.codexHome, "stub-state.json"), JSON.stringify(st));
+    garden(join(sb.src, "wicked-garden"), "1.1.0");
+    const before = calls(sb).length;
+    const r = run(sb);
+    assert.ok(!calls(sb).slice(before).some((c) => c.argv[0] === "plugin" && c.argv[1] === "add"));
+    assert.equal(state(sb).plugins["wicked-garden@wicked-garden"].enabled, false);
+    assert.ok(r.garden.notes.some((n) => /is disabled — left as you set it; 1\.1\.0 is available/.test(n)), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("a --source-root checkout without .codex-plugin is copied from, never swapped for a global npm install", { skip }, () => {
+  const sb = sandbox({ withManifest: false });
+  try {
+    const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--json"], {
+      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const npmLog = existsSync(join(sb.tmp, "npm.log")) ? readFileSync(join(sb.tmp, "npm.log"), "utf8") : "";
+    assert.doesNotMatch(npmLog, /install -g/);
+    assert.ok(existsSync(join(sb.codexHome, "skills", "wicked-garden-alpha")), "copied from the local source");
+  } finally {
+    cleanup(sb);
+  }
+});
+
 test("a non-local (git) marketplace is never repointed, even with --force", { skip }, () => {
   const sb = sandbox();
   try {
@@ -687,6 +720,33 @@ test("estate: a repair is kept when Codex prints the env map in another key orde
     const r = run(sb, [], { CODEX_STUB_SHUFFLE_ENV: "1" });
     assert.ok(r.garden.notes.some((n) => /only its command line changed/.test(n)), r.garden.notes.join("\n"));
     assert.match(configToml(sb), /command = "[^"]+\.local\/bin\/wicked-estate-mcp"/);
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: an entry that runs a wrapper (npx …) is not repointed at the bare binary", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    const before = '[mcp_servers.wicked-estate]\ncommand = "npx"\nargs = ["-y", "wicked-garden", "run", "scripts/estate_mcp.mjs"]\n';
+    seedConfig(sb, before);
+    const r = run(sb);
+    assert.ok(configToml(sb).startsWith(before), configToml(sb));
+    assert.ok(r.garden.notes.some((n) => /not changed \(its command npx is not the wicked-estate-mcp binary\)/.test(n)), r.garden.notes.join("\n"));
+  } finally {
+    cleanup(sb);
+  }
+});
+
+test("estate: a read-back that fails after another writer changed config.toml leaves the file and names the backup", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeEstate(join(sb.home, ".local", "bin"), "0.30.0");
+    seedConfig(sb, '[mcp_servers.wicked-estate]\ncommand = "/opt/old/wicked-estate-mcp"\n');
+    const r = run(sb, [], { CODEX_STUB_TOUCH_ON_GET: "2" });
+    assert.match(configToml(sb), /# another writer/, "the other writer's change survives");
+    assert.ok(r.garden.notes.some((n) => /not verified, and config\.toml has changed since — left as it is; the pre-repair copy is/.test(n)), r.garden.notes.join("\n"));
   } finally {
     cleanup(sb);
   }

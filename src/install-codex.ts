@@ -927,6 +927,12 @@ function pointCodexMcpAt(name: string, binary: string, version: string | undefin
   }
   if (current.state === "present" && current.transport.command === binary) return `Codex MCP server ${name}: config entry already -> ${label}`;
   const was = current.state === "present" ? homeTilde(String(current.transport.command ?? "?")) : "?";
+  // Only an entry that runs the estate binary itself is repointed: a wrapper (npx, node, a
+  // shell script) takes arguments meant for itself, which the bare binary would not accept.
+  const runsBinary = current.state === "present" && /(^|[\\/])wicked-estate-mcp(\.exe)?$/i.test(String(current.transport.command ?? ""));
+  if (!runsBinary) {
+    return `Codex MCP server ${name}: not changed (its command ${was} is not the wicked-estate-mcp binary) — point it at ${binary} yourself if it should run that`;
+  }
   if (options.dryRun) return `would repair Codex MCP server ${name}: ${was} -> ${label} (only its command line changes)`;
   const raw = table.lines[table.commandLine];
   const cr = raw.endsWith("\r") ? "\r" : "";
@@ -935,20 +941,31 @@ function pointCodexMcpAt(name: string, binary: string, version: string | undefin
   const lines = [...table.lines];
   lines[table.commandLine] = `${span.prefix}${JSON.stringify(binary)}${span.suffix}${cr}`;
   // The new file keeps the old one's permission bits (config.toml may hold secrets: 0600 stays 0600).
+  const written = lines.join("\n");
   const mode = statSync(configFile).mode & 0o777;
   const backup = `${configFile}.wicked-bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const tmp = `${configFile}.wicked-tmp-${process.pid}`;
+  writeFileSync(tmp, written, { mode });
+  chmodSync(tmp, mode);
+  // Optimistic concurrency: another writer (a running Codex) may have changed the file since it
+  // was read. Then nothing is written — re-running repairs against the new content.
+  if (readFileSync(configFile, "utf8") !== text) {
+    rmSync(tmp, { force: true });
+    return `Codex MCP server ${name}: not changed — config.toml changed while it was being repaired; re-run to repair it`;
+  }
   cpSync(configFile, backup);
   chmodSync(backup, mode);
-  const tmp = `${configFile}.wicked-tmp-${process.pid}`;
-  writeFileSync(tmp, lines.join("\n"), { mode });
-  chmodSync(tmp, mode);
   renameSync(tmp, configFile);
   const after = codexMcpGet(name, options);
   const ok = after.state === "present" && after.transport.command === binary
     && (current.state !== "present" || visibleSettings(after.server) === visibleSettings(current.server));
   if (!ok) {
-    renameSync(backup, configFile);
-    return `Codex MCP server ${name}: repair to ${label} not kept — Codex did not read it back unchanged, the previous config.toml was restored`;
+    // Put the old file back only if the file is still exactly what this repair wrote.
+    if (readFileSync(configFile, "utf8") === written) {
+      renameSync(backup, configFile);
+      return `Codex MCP server ${name}: repair to ${label} not kept — Codex did not read it back unchanged, the previous config.toml was restored`;
+    }
+    return `Codex MCP server ${name}: repair to ${label} not verified, and config.toml has changed since — left as it is; the pre-repair copy is ${homeTilde(backup)}`;
   }
   rmSync(backup, { force: true });
   return `repaired Codex MCP server ${name}: ${was} -> ${label} (only its command line changed)`;
@@ -1005,10 +1022,11 @@ function isConfigTier(t: CodexMcpTransport): boolean {
 
 /**
  * After the garden plugin is registered. The plugin declares `wicked-estate` itself, and its
- * launcher resolves the binary at start (override → PATH → ~/.local/bin). A config entry
- * outranks it, so: an entry that points elsewhere than the current binary is repaired, and when
- * the launcher would NOT start the current binary (it is only in ~/.cargo/bin off PATH, or an
- * older copy comes first) an entry is written so Codex runs the right one.
+ * launcher resolves the binary at start (override → PATH → ~/.local/bin) and applies the
+ * read-only / governed-unit rules, so it always stays in the path: a launcher-served entry is
+ * never repointed, and when the launcher would not start the current binary the PATH /
+ * WICKED_ESTATE_MCP_BIN fix is reported. Only a config entry that runs the binary directly is
+ * repaired (its command line).
  */
 function repairEstateForPlugin(options: Options): string[] {
   const notes: string[] = [];
@@ -1408,7 +1426,9 @@ function resolvePluginSource(product: Product, options: Options, notes: string[]
   if (local) {
     const found = pluginSourceAt(local, "local");
     if (typeof found !== "string") return found;
+    // The requested local source wins: it is copied as before, nothing is installed globally.
     notes.push(`local source not usable as a Codex plugin: ${found}`);
+    return undefined;
   }
   const pkg = product.install.package;
   // Only a product the registry marks as a Codex plugin is ever installed globally for it.
@@ -1510,6 +1530,7 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
       (local ? `--force repoints it at ${homeTilde(src.root)}` : `to use ${homeTilde(src.root)}, run \`codex plugin marketplace remove ${src.marketplace}\` first`);
   } else {
     if (options.dryRun) {
+      changedSource = true; // what the real run would do, so the plugin step plans its re-copy
       marketplace = `would ${existing ? "repoint" : "add"} marketplace ${src.marketplace} -> ${homeTilde(src.root)}`;
     } else {
       if (existing) {
@@ -1547,6 +1568,12 @@ function installCodexPlugin(src: PluginSource, prior: CodexPluginRecord | undefi
   // The version wanted is the one the marketplace actually in use offers (a foreign one may be
   // behind or ahead of src). Unknown (a source the installer cannot read) → leave it installed.
   const wanted = viaForeign ? marketplacePluginVersion(existing?.root ?? record.source, src.pluginName) : src.version;
+  // `codex plugin add` re-enables a plugin: one the user disabled is never updated behind their back.
+  if (installed && installed.enabled === false && !options.force) {
+    notes.push(`plugin ${pluginId} ${installed.version} is disabled — left as you set it${wanted && wanted !== installed.version ? `; ${wanted} is available (re-enable it, then re-run, or run \`codex plugin add ${pluginId}\`)` : ""}`);
+    record.version = installed.version ?? src.version;
+    return record;
+  }
   // A marketplace that now points at a different root must re-copy the plugin even at the same version.
   if (installed && (wanted === undefined || installed.version === wanted) && !changedSource && !options.force) {
     notes.push(`plugin ${pluginId} ${installed.version} already installed${wanted === undefined ? " (its marketplace's version could not be read)" : ""}${installed.enabled === false ? " (disabled — `codex plugin` settings; left as you set it)" : ""}`);

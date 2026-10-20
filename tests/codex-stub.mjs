@@ -137,6 +137,18 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   out({ pluginId: a2, name: plugin, marketplaceName: mkt, version: manifest.version, installedPath: join(base, manifest.version) });
 } else if (a0 === "mcp" && a1 === "get") {
   if (process.env.CODEX_STUB_FAIL === "mcp-get") fail("stub: mcp get failed");
+  // CODEX_STUB_TOUCH_ON_GET=<n>: on the n-th `mcp get`, another writer appends to config.toml and
+  // the stub answers with a command nobody wrote (a read-back that cannot verify).
+  if (process.env.CODEX_STUB_TOUCH_ON_GET) {
+    const counter = join(home, "stub-get-count");
+    const n = (existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0) + 1;
+    writeFileSync(counter, String(n));
+    if (n === Number(process.env.CODEX_STUB_TOUCH_ON_GET)) {
+      writeFileSync(configFile, configText() + "\n# another writer\n");
+      out({ name: a2, enabled: true, transport: { type: "stdio", command: "/somewhere/else", args: [], env: null, env_vars: [], cwd: null } });
+      process.exit(0);
+    }
+  }
   const s = configServers()[a2] ?? pluginServers()[a2];
   if (!s) fail(`Error: No MCP server named '${a2}' found.`);
   out({

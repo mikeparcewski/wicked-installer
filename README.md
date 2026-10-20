@@ -131,7 +131,8 @@ On a Codex with `codex plugin` (codex-cli 0.163+), the Codex script registers ga
      never replaced by a direct-binary entry. When the launcher would not start the current binary
      (for example, it sits only in `~/.cargo/bin` off PATH), the summary says how to fix PATH or
      set `WICKED_ESTATE_MCP_BIN`. A config entry that already runs the binary directly is
-     repaired, and the summary notes that it overrides the plugin's launcher.
+     repaired, and the summary notes that it overrides the plugin's launcher. Any other command
+     (a wrapper such as `npx …`) is left alone.
 
    An older `~/.cargo/bin` copy that shadows the current binary on PATH is reported.
 
