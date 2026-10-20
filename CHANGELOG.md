@@ -5,6 +5,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-19
+
 ### Added
 
 - **`install-codex` registers wicked-garden as a Codex plugin (codex-cli 0.163+).** When `codex
