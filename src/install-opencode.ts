@@ -1149,7 +1149,8 @@ function opencodeMcpHome(a: McpArgs): string {
 }
 
 // The file `opencode mcp add` reads and rewrites: an existing opencode.jsonc, else opencode.json,
-// else the .jsonc it creates (verified against opencode 1.18.x).
+// else the .jsonc it creates (verified against opencode 1.18.x; 2.x with `--global` creates .json,
+// which this re-resolves to after the add).
 function opencodeMcpFile(home: string): string {
   const jsonc = join(home, "opencode.jsonc");
   const json = join(home, "opencode.json");
@@ -1157,10 +1158,31 @@ function opencodeMcpFile(home: string): string {
 }
 
 /**
- * State is read from the config file `opencode mcp add` writes — read-only. `opencode mcp list` is
- * not used: it launches every configured server to report its status.
+ * (installer#43) opencode 2.x: `opencode mcp add` writes the PROJECT config (opencode.json in the
+ * working directory, a git repository or not) unless it is given `--global`, and it writes the entry
+ * under `mcp.servers.<name>` (the flat `mcp.<name>` of 1.x is deprecated in its schema, still read).
+ * Without `--global` the global file this verifies never changes, and the add "exits 0 but does not
+ * hold the requested entry". Whether the CLI takes `--global` is read from its own help (read-only),
+ * once per process; a CLI that cannot say is treated as 1.x.
  */
-function opencodeMcpRead(file: string, a: McpArgs): { state: "absent" | "matches" | "drifted" } | { state: "error"; detail: string } {
+let opencodeGlobalFlag: boolean | undefined;
+function opencodeTakesGlobal(env: NodeJS.ProcessEnv): boolean {
+  if (opencodeGlobalFlag === undefined) {
+    const help = mcpSpawn("opencode", ["mcp", "add", "--help"], env);
+    opencodeGlobalFlag = help.error === undefined && /(^|\s)--global\b/m.test(help.out);
+  }
+  return opencodeGlobalFlag;
+}
+
+/**
+ * State is read from the config file `opencode mcp add` writes — read-only. `opencode mcp list` is
+ * not used: it launches every configured server to report its status. An entry is looked up where
+ * opencode 2.x writes it (`mcp.servers.<key>`), then where 1.x wrote it (`mcp.<key>`).
+ */
+function opencodeMcpRead(
+  file: string,
+  a: McpArgs,
+): { state: "absent" } | { state: "matches" | "drifted"; under: string } | { state: "error"; detail: string } {
   if (!existsSync(file)) return { state: "absent" };
   let cfg: unknown;
   try {
@@ -1169,14 +1191,17 @@ function opencodeMcpRead(file: string, a: McpArgs): { state: "absent" | "matches
     return { state: "error", detail: `cannot parse ${file} (${err instanceof Error ? err.message : String(err)}); fix or remove it and re-run` };
   }
   const mcp = cfg && typeof cfg === "object" ? (cfg as Record<string, unknown>).mcp : undefined;
-  const cur = mcp && typeof mcp === "object" ? (mcp as Record<string, unknown>)[a.key] : undefined;
+  const servers = mcp && typeof mcp === "object" ? (mcp as Record<string, unknown>).servers : undefined;
+  const v2 = servers && typeof servers === "object" ? (servers as Record<string, unknown>)[a.key] : undefined;
+  const cur = v2 !== undefined ? v2 : mcp && typeof mcp === "object" ? (mcp as Record<string, unknown>)[a.key] : undefined;
   if (cur === undefined) return { state: "absent" };
   const c = (cur ?? {}) as Record<string, unknown>;
   const same = c.type === "local"
     && JSON.stringify(c.command) === JSON.stringify([a.command, ...a.args])
     && (c.environment === undefined || (typeof c.environment === "object" && c.environment !== null && Object.keys(c.environment).length === 0))
-    && c.enabled !== false;
-  return { state: same ? "matches" : "drifted" };
+    && c.enabled !== false
+    && c.disabled !== true;
+  return { state: same ? "matches" : "drifted", under: v2 !== undefined ? '"mcp" → "servers"' : '"mcp"' };
 }
 
 // `opencode mcp add` parses its argv with yargs, which turns a numeric-looking token into a number:
@@ -1192,28 +1217,33 @@ function opencodeMcpEntry(a: McpArgs): McpEntry {
   const byHand = JSON.stringify({ [a.key]: { type: "local", command: [a.command, ...a.args] } });
   if (a.sub === "remove") {
     if (st.state === "absent") return entry("skipped", `absent: no "mcp" entry named ${a.key}`);
-    return entry("manual", `opencode has no 'mcp remove'; delete the "${a.key}" entry under "mcp" in ${file}`);
+    return entry("manual", `opencode has no 'mcp remove'; delete the "${a.key}" entry under ${st.under} in ${file}`);
   }
   if (st.state === "matches") return entry("converged", "already registered with this command and args");
   if (basename(home) !== "opencode") {
     return entry("manual", `config root ${home} is non-standard (its basename must be "opencode" to direct 'opencode mcp add'); add under "mcp" in ${file}: ${byHand}`);
   }
-  if ([a.command ?? "", ...a.args].some((v) => OPENCODE_NUMERIC.test(v))) {
+  const env = { ...process.env, XDG_CONFIG_HOME: dirname(home) };
+  const present = commandExists("opencode");
+  // 2.x takes `--global` (and writes numbers as strings); 1.x has neither.
+  const global = present && opencodeTakesGlobal(env);
+  if (!global && [a.command ?? "", ...a.args].some((v) => OPENCODE_NUMERIC.test(v))) {
     return entry("manual", `'opencode mcp add' would write a numeric-looking argument as a number (an invalid config); add under "mcp" in ${file}: ${byHand}`);
   }
-  const addArgs = ["mcp", "add", a.key, "--", a.command ?? "", ...a.args];
+  const addArgs = ["mcp", "add", ...(global ? ["--global"] : []), a.key, "--", a.command ?? "", ...a.args];
   const rendered = `opencode ${addArgs.join(" ")}`;
   const result: McpResult = st.state === "absent" ? "written" : "updated";
   if (a.dryRun) return entry("planned", `would be ${result}: ${rendered}`);
-  if (!commandExists("opencode")) return entry("failed", `opencode CLI not found on PATH; add under "mcp" in ${file}: ${byHand}`);
+  if (!present) return entry("failed", `opencode CLI not found on PATH; add under "mcp" in ${file}: ${byHand}`);
   mkdirSync(home, { recursive: true });
-  const env = { ...process.env, XDG_CONFIG_HOME: dirname(home) };
   const add = mcpSpawn("opencode", addArgs, env);
   if (add.error || add.status !== 0) return entry("failed", `${rendered} failed: ${add.error ?? add.out.trim().slice(0, 300)}`);
-  // `mcp add` is read-modify-write and overwrites a same-name entry; confirm what it wrote.
-  const after = opencodeMcpRead(opencodeMcpFile(home), a);
-  if (after.state !== "matches") return entry("failed", `${rendered} exited 0 but ${opencodeMcpFile(home)} does not hold the requested entry`);
-  return entry(result, rendered);
+  // `mcp add` is read-modify-write and overwrites a same-name entry; confirm what it wrote, in the file
+  // it wrote (a home with no config yet gains opencode.json from 2.x, opencode.jsonc from 1.x).
+  const written = opencodeMcpFile(home);
+  const after = opencodeMcpRead(written, a);
+  if (after.state !== "matches") return { ...entry("failed", `${rendered} exited 0 but ${written} does not hold the requested entry`), target: written };
+  return { ...entry(result, rendered), target: written };
 }
 
 function runMcp(argv: string[]): number {

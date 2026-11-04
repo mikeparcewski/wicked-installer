@@ -51,12 +51,37 @@ const fs = require("fs"), path = require("path");
 const a = process.argv.slice(2);
 fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ cli: "opencode", argv: a, xdg: process.env.XDG_CONFIG_HOME }) + "\\n");
 if (a[0] !== "mcp" || a[1] !== "add") process.exit(64);
+// like opencode 1.x: no --global flag in its help
+if (a.includes("--help")) { process.stdout.write("opencode mcp add <name>\\n\\nadd an MCP server\\n"); process.exit(0); }
 const file = path.join(process.env.XDG_CONFIG_HOME, "opencode", "opencode.jsonc");
 const cfg = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { $schema: "https://opencode.ai/config.json" };
 const i = a.indexOf("--");
 cfg.mcp = { ...(cfg.mcp || {}), [a[2]]: { type: "local", command: a.slice(i + 1) } };
 fs.mkdirSync(path.dirname(file), { recursive: true });
 fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+`;
+
+// (installer#43) Like opencode 2.x: \`mcp add\` writes the PROJECT config (opencode.json in the working
+// directory) unless given --global, which writes $XDG_CONFIG_HOME/opencode/opencode.jsonc if it exists,
+// else opencode.json; the entry goes under mcp.servers.<name>, and numbers stay strings.
+const OPENCODE2_STUB = `#!/usr/bin/env node
+const fs = require("fs"), path = require("path");
+const a = process.argv.slice(2);
+fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ cli: "opencode", argv: a, xdg: process.env.XDG_CONFIG_HOME, cwd: process.cwd() }) + "\\n");
+if (a[0] !== "mcp" || a[1] !== "add") process.exit(64);
+if (a.includes("--help")) { process.stdout.write("FLAGS\\n  --env key=value\\n  --global              Write to the global config instead of the project config\\n"); process.exit(0); }
+const global = a.includes("--global");
+const rest = a.slice(2).filter((x) => x !== "--global");
+const dir = global ? path.join(process.env.XDG_CONFIG_HOME, "opencode") : process.cwd();
+const jsonc = path.join(dir, "opencode.jsonc");
+const file = fs.existsSync(jsonc) ? jsonc : path.join(dir, "opencode.json");
+const cfg = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+const i = rest.indexOf("--");
+cfg.mcp = cfg.mcp || {};
+cfg.mcp.servers = { ...(cfg.mcp.servers || {}), [rest[0]]: { type: "local", command: rest.slice(i + 1) } };
+fs.mkdirSync(dir, { recursive: true });
+fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+process.stdout.write("MCP server \\"" + rest[0] + "\\" added to " + file + "\\n");
 `;
 
 function sandbox() {
@@ -74,17 +99,23 @@ function sandbox() {
   }
   const log = join(tmp, "stub.log");
   writeFileSync(log, "");
+  // The dispatcher's (and so every CLI's) working directory: a project-config write lands here, never in the repo.
+  const work = join(tmp, "work");
+  mkdirSync(work);
   const env = { ...process.env, HOME: home, USERPROFILE: home, PATH: [bin, "/usr/bin", "/bin"].join(POSIX ? ":" : ";"), STUB_LOG: log };
   for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_CONFIG", "GEMINI_HOME", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME"]) delete env[k];
   const claudeHome = join(tmp, "claude-home");
   return {
     tmp,
     home,
+    work,
     claudeHome,
+    /** Swap the opencode stub for the 2.x one (installer#43). */
+    opencode2: () => { if (POSIX) { writeFileSync(join(bin, "opencode"), OPENCODE2_STUB); chmodSync(join(bin, "opencode"), 0o755); } },
     stateFile: join(claudeHome, ".claude.json"),
     markerFile: join(claudeHome, "wicked-installer", "claude-install.json"),
     run: (...args) => {
-      const res = spawnSync(process.execPath, [INDEX, "mcp", ...args], { env, encoding: "utf8" });
+      const res = spawnSync(process.execPath, [INDEX, "mcp", ...args], { env, encoding: "utf8", cwd: work });
       let json;
       try { json = JSON.parse(res.stdout); } catch { json = undefined; }
       return { status: res.status, stdout: res.stdout, stderr: res.stderr, json };
@@ -94,6 +125,8 @@ function sandbox() {
   };
 }
 
+/** The opencode calls that add (not the read-only `mcp add --help` probe). */
+const adds = (sb) => sb.calls().filter((c) => c.cli === "opencode" && !c.argv.includes("--help"));
 const upsertClaude = (sb, ...extra) => sb.run("upsert", KEY, "--command", "node", "--arg", SERVER, "--cli", "claude", "--claude-home", sb.claudeHome, "--json", ...extra);
 const one = (r) => { assert.equal(r.json?.clis?.length, 1, r.stdout + r.stderr); return r.json.clis[0]; };
 
@@ -252,7 +285,10 @@ test("--dry-run prints planned entries and writes nothing", { skip: !POSIX && "s
     assert.equal(existsSync(sb.claudeHome), false);
     assert.equal(existsSync(codexHome), false);
     assert.equal(existsSync(join(sb.tmp, "cfg")), false);
-    assert.ok(sb.calls().every((c) => c.argv[1] === "get"), "only read-only probes ran");
+    assert.ok(
+      sb.calls().every((c) => c.argv[1] === "get" || (c.cli === "opencode" && c.argv.includes("--help"))),
+      "only read-only probes ran",
+    );
   } finally { sb.cleanup(); }
 });
 
@@ -295,12 +331,12 @@ test("opencode: mcp add via the CLI, converge read from its config, remove is ma
     assert.equal(r1.status, 0, r1.stdout + r1.stderr);
     assertEnvelope(r1.json);
     assert.equal(one(r1).result, "written");
-    const call = sb.calls().find((c) => c.cli === "opencode");
-    assert.deepEqual(call.argv, ["mcp", "add", KEY, "--", "node", SERVER]);
+    const call = adds(sb)[0];
+    assert.deepEqual(call.argv, ["mcp", "add", KEY, "--", "node", SERVER], "1.x: no --global");
     assert.equal(call.xdg, join(sb.tmp, "cfg"));
     const r2 = sb.run("upsert", KEY, "--command", "node", "--arg", SERVER, "--cli", "opencode", "--opencode-home", ocHome, "--json");
     assert.equal(one(r2).result, "converged");
-    assert.equal(sb.calls().filter((c) => c.cli === "opencode").length, 1);
+    assert.equal(adds(sb).length, 1);
     const rm = sb.run("remove", KEY, "--cli", "opencode", "--opencode-home", ocHome, "--json");
     assert.equal(rm.status, 0);
     assert.equal(one(rm).result, "manual");
@@ -308,7 +344,41 @@ test("opencode: mcp add via the CLI, converge read from its config, remove is ma
     const num = sb.run("upsert", "acme-two", "--command", "node", "--arg", SERVER, "--arg", "3000", "--cli", "opencode", "--opencode-home", ocHome, "--json");
     assert.equal(one(num).result, "manual");
     assert.match(one(num).detail, /numeric-looking/);
-    assert.equal(sb.calls().filter((c) => c.cli === "opencode").length, 1, "never spawned for a numeric arg");
+    assert.equal(adds(sb).length, 1, "never spawned for a numeric arg");
+  } finally { sb.cleanup(); }
+});
+
+test("opencode 2.x (installer#43): mcp add --global writes the global file under mcp.servers, verified there; numbers are fine", { skip: !POSIX && "stub CLIs are POSIX scripts" }, () => {
+  const sb = sandbox();
+  try {
+    sb.opencode2();
+    const ocHome = join(sb.tmp, "cfg", "opencode");
+    // The J6 rig's case: the worker home already holds an opencode.jsonc.
+    mkdirSync(ocHome, { recursive: true });
+    writeFileSync(join(ocHome, "opencode.jsonc"), JSON.stringify({ $schema: "https://opencode.ai/config.json" }));
+    const r1 = sb.run("upsert", KEY, "--command", "node", "--arg", SERVER, "--cli", "opencode", "--opencode-home", ocHome, "--json");
+    assert.equal(r1.status, 0, r1.stdout + r1.stderr);
+    assertEnvelope(r1.json);
+    assert.equal(one(r1).result, "written", one(r1).detail);
+    assert.deepEqual(adds(sb)[0].argv, ["mcp", "add", "--global", KEY, "--", "node", SERVER]);
+    assert.equal(existsSync(join(sb.work, "opencode.json")), false, "no project config written");
+    const cfg = JSON.parse(readFileSync(join(ocHome, "opencode.jsonc"), "utf8"));
+    assert.deepEqual(cfg.mcp.servers[KEY], { type: "local", command: ["node", SERVER] });
+    const r2 = sb.run("upsert", KEY, "--command", "node", "--arg", SERVER, "--cli", "opencode", "--opencode-home", ocHome, "--json");
+    assert.equal(one(r2).result, "converged", "read back from mcp.servers");
+    assert.equal(adds(sb).length, 1);
+    // 2.x writes a numeric-looking argument as a string, so it is added, not handed back as manual.
+    const rm = sb.run("remove", KEY, "--cli", "opencode", "--opencode-home", ocHome, "--json");
+    assert.equal(one(rm).result, "manual");
+    assert.match(one(rm).detail, /delete the "acme-notes" entry under "mcp" → "servers" in .*opencode\.jsonc/);
+    const num = sb.run("upsert", "acme-two", "--command", "node", "--arg", SERVER, "--arg", "3000", "--cli", "opencode", "--opencode-home", ocHome, "--json");
+    assert.equal(one(num).result, "written", one(num).detail);
+    // A fresh home with no config: 2.x creates opencode.json, and the verify follows it there.
+    const fresh = join(sb.tmp, "cfg2", "opencode");
+    const r3 = sb.run("upsert", KEY, "--command", "node", "--arg", SERVER, "--cli", "opencode", "--opencode-home", fresh, "--json");
+    assert.equal(one(r3).result, "written", one(r3).detail);
+    assert.match(one(r3).target, /opencode\.json$/, "the target is the file written");
+    assert.ok(existsSync(join(fresh, "opencode.json")));
   } finally { sb.cleanup(); }
 });
 
