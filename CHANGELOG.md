@@ -17,7 +17,10 @@ All notable changes to wicked-installer are documented here. The format follows
   as before), reads the entry from `mcp.servers.<name>` and then `mcp.<name>`, treats a 2.x
   `disabled: true` as drift, reports the file the add actually wrote (2.x creates `opencode.json`
   in a home with no config), and keeps the numeric-argument guard for 1.x only (2.x writes a
-  numeric-looking argument as a string). `remove` names where the entry sits.
+  numeric-looking argument as a string). `remove` names every place the entry sits. A help probe that
+  fails is reported, and nothing is written. A key registered in both shapes, or a drifted entry in
+  the shape the installed opencode does not write, is handed back as manual rather than duplicated,
+  and `mcp.servers` is read as 2.x's map unless it is a 1.x entry literally named "servers".
 
 ## [0.8.0] - 2026-10-19
 

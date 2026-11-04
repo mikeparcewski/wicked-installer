@@ -69,7 +69,10 @@ const fs = require("fs"), path = require("path");
 const a = process.argv.slice(2);
 fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ cli: "opencode", argv: a, xdg: process.env.XDG_CONFIG_HOME, cwd: process.cwd() }) + "\\n");
 if (a[0] !== "mcp" || a[1] !== "add") process.exit(64);
-if (a.includes("--help")) { process.stdout.write("FLAGS\\n  --env key=value\\n  --global              Write to the global config instead of the project config\\n"); process.exit(0); }
+if (a.includes("--help")) {
+  if (process.env.OC_HELP_FAIL) { process.stderr.write("help failed\\n"); process.exit(3); }
+  process.stdout.write("FLAGS\\n  --env key=value\\n  --global              Write to the global config instead of the project config\\n"); process.exit(0);
+}
 const global = a.includes("--global");
 const rest = a.slice(2).filter((x) => x !== "--global");
 const dir = global ? path.join(process.env.XDG_CONFIG_HOME, "opencode") : process.cwd();
@@ -109,6 +112,7 @@ function sandbox() {
     tmp,
     home,
     work,
+    env,
     claudeHome,
     /** Swap the opencode stub for the 2.x one (installer#43). */
     opencode2: () => { if (POSIX) { writeFileSync(join(bin, "opencode"), OPENCODE2_STUB); chmodSync(join(bin, "opencode"), 0o755); } },
@@ -379,6 +383,64 @@ test("opencode 2.x (installer#43): mcp add --global writes the global file under
     assert.equal(one(r3).result, "written", one(r3).detail);
     assert.match(one(r3).target, /opencode\.json$/, "the target is the file written");
     assert.ok(existsSync(join(fresh, "opencode.json")));
+  } finally { sb.cleanup(); }
+});
+
+// (installer#43, xreview) The edges of the two shapes and of the probe, on opencode 2.x.
+test("opencode 2.x edges: a failed probe writes nothing, both shapes are manual, a flat entry is never duplicated, \"servers\" is the map", { skip: !POSIX && "stub CLIs are POSIX scripts" }, () => {
+  const sb = sandbox();
+  try {
+    sb.opencode2();
+    const ocHome = join(sb.tmp, "cfg", "opencode");
+    const cfgFile = join(ocHome, "opencode.jsonc");
+    const put = (cfg) => { mkdirSync(ocHome, { recursive: true }); writeFileSync(cfgFile, JSON.stringify(cfg)); };
+    const upsert = (key = KEY) => one(sb.run("upsert", key, "--command", "node", "--arg", SERVER, "--cli", "opencode", "--opencode-home", ocHome, "--json"));
+    const remove = (key = KEY) => one(sb.run("remove", key, "--cli", "opencode", "--opencode-home", ocHome, "--json"));
+    const local = (cmd) => ({ type: "local", command: cmd });
+
+    // A help probe that fails is UNKNOWN: nothing is added, no project config appears.
+    sb.env.OC_HELP_FAIL = "1";
+    const unknown = upsert();
+    assert.equal(unknown.result, "failed");
+    assert.match(unknown.detail, /could not tell which opencode this is .*exited 3.*nothing was written/);
+    assert.equal(adds(sb).length, 0);
+    assert.equal(existsSync(join(sb.work, "opencode.json")), false);
+    delete sb.env.OC_HELP_FAIL;
+
+    // Registered in both shapes: manual, and remove names both places.
+    put({ mcp: { [KEY]: local(["node", "/old.js"]), servers: { [KEY]: local(["node", SERVER]) } } });
+    const twice = upsert();
+    assert.equal(twice.result, "manual");
+    assert.match(twice.detail, /registered twice .*under "mcp" → "servers" and "mcp"/);
+    assert.match(remove().detail, /delete the "acme-notes" entry under "mcp" → "servers" and "mcp" in /);
+    assert.equal(adds(sb).length, 0);
+
+    // A flat (1.x) entry: a match converges on 2.x (it still reads it); a drifted one is not duplicated.
+    put({ mcp: { [KEY]: local(["node", SERVER]) } });
+    assert.equal(upsert().result, "converged");
+    put({ mcp: { [KEY]: local(["node", "/old.js"]) } });
+    const flat = upsert();
+    assert.equal(flat.result, "manual");
+    assert.match(flat.detail, /is under "mcp" in .*this opencode writes "mcp" → "servers": update that entry by hand/);
+    assert.equal(adds(sb).length, 0, "no second copy under mcp.servers");
+    // A disabled 2.x entry is drift, and is repaired through the CLI.
+    put({ mcp: { servers: { [KEY]: { ...local(["node", SERVER]), disabled: true } } } });
+    assert.equal(upsert().result, "updated");
+    assert.equal(adds(sb).length, 1);
+
+    // "servers" is 2.x's map, not an entry named servers: removing that key finds nothing.
+    put({ mcp: { servers: { other: local(["node", "/o.js"]) } } });
+    assert.equal(remove("servers").result, "skipped");
+    // ...unless it is a 1.x entry literally named "servers" (it carries a type).
+    put({ mcp: { servers: local(["node", "/s.js"]) } });
+    assert.match(remove("servers").detail, /delete the "servers" entry under "mcp" in /);
+
+    // A dry run on a fresh home names the file 2.x will create.
+    const fresh = join(sb.tmp, "cfg3", "opencode");
+    const dry = one(sb.run("upsert", KEY, "--command", "node", "--arg", SERVER, "--cli", "opencode", "--opencode-home", fresh, "--dry-run", "--json"));
+    assert.equal(dry.result, "planned");
+    assert.match(dry.target, /opencode\.json$/);
+    assert.match(dry.detail, /opencode mcp add --global acme-notes -- node/);
   } finally { sb.cleanup(); }
 });
 
