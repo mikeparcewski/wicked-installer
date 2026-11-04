@@ -178,13 +178,13 @@
       "recommended": [],
       "install": {
         "type": "manual",
-        "instructions": "Wicked Studio ships bundled inside Wicked Crew — install wicked-crew and run `wicked-crew serve` to get the Studio console. For custom deployments, the standalone repo is mikeparcewski/wicked-studio."
+        "instructions": "Wicked Studio ships bundled inside Wicked Crew — install wicked-crew and run `wicked-crew serve` to get Wicked Studio. For custom deployments, the standalone repo is mikeparcewski/wicked-studio."
       }
     },
     {
       "id": "wicked-crew",
       "displayName": "Wicked Crew",
-      "description": "The harness for the coding agents you already use: it runs them in sandboxes through gated jobs. By default a different agent reviews the work; when none can, the job stops unless you launch it as reduced assurance, which is labelled. Gates report the checks that actually ran. Runs Apps (live apps and dashboards over your databases, each change reviewed by a different agent), and agents read live data only through one read-only gate. Ships with Wicked Studio.",
+      "description": "The harness for the coding agents you already use: it runs them in sandboxes through gated jobs. By default a different agent reviews the work; when none can, the job stops unless you launch it as reduced assurance, which is labelled. Gates report the checks that actually ran. Runs Apps (live apps and dashboards over your databases; a change asked for in a chat is built, checked and reviewed by a different agent), and agents read live data only through one read-only gate. Ships with Wicked Studio.",
       "type": "npm-cli",
       "standalone": true,
       "opinionated": false,
@@ -198,7 +198,7 @@
       "capabilities": [
         {
           "id": "daemon",
-          "label": "governed-run daemon + bundled Studio (wicked-crew serve)",
+          "label": "daemon for governed jobs + bundled Studio (wicked-crew serve)",
           "needs": [{ "kind": "backend", "bin": "wicked-crew", "npx": "wicked-crew" }]
         }
       ]
@@ -225,7 +225,7 @@
     {
       "id": "quick-start",
       "displayName": "Quick Start",
-      "description": "Crew + Bus — the fastest way to run a governed multi-agent session. Install crew, start the daemon, open the Studio console, and launch a run in under five minutes. After install, start the daemon with `wicked-crew serve` — it opens the Studio console.",
+      "description": "Crew + Bus — the fastest way to run a governed multi-agent session. Install crew, start the daemon, open Wicked Studio, and launch a job in under five minutes. After install, start the daemon with `wicked-crew serve` — it opens Wicked Studio.",
       "products": ["wicked-bus", "wicked-crew"]
     },
     {
@@ -243,13 +243,13 @@
     {
       "id": "creative",
       "displayName": "Creative Suite",
-      "description": "Wicked Interactive + Crew — the document/render engine driven through Crew, with live visibility into AI workflow sessions via the Studio console that ships inside Crew.",
+      "description": "Wicked Interactive + Crew — the document/render engine driven through Crew, with live visibility into AI workflow sessions via Wicked Studio, which ships inside Crew.",
       "products": ["wicked-interactive", "wicked-crew"]
     },
     {
       "id": "full",
       "displayName": "Full Stack",
-      "description": "Everything active — bus, estate, garden, interactive, and crew (which includes the Studio console). The complete wicked-* experience.",
+      "description": "Everything active — bus, estate, garden, interactive, and crew (which includes Wicked Studio). The complete wicked-* experience.",
       "products": ["wicked-bus", "wicked-estate", "wicked-garden", "wicked-interactive", "wicked-crew"]
     }
   ]
