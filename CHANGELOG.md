@@ -13,7 +13,7 @@ All notable changes to wicked-installer are documented here. The format follows
   (agentic development environment), with Apps over your databases, Ask a question of your data and the Knowledge map
   (was "browser console"). wicked-crew: by default a different agent reviews the work, and a job no other agent can
   review stops unless it is launched as reduced assurance (was "Evaluator is never the creator"); Apps; agents read
-  live data only through one read-only gate.
+  your databases only through one read-only gate.
 - **Public copy says job, not run, and names Wicked Studio** (the quick-start bundle, the daemon capability label,
   the creative and full bundles and the README's bundle table): "launch a job", "first job", "daemon for governed
   jobs", and "Wicked Studio" where it said "the Studio console". The README's wicked-core row names the floor crew

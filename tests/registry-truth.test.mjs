@@ -107,7 +107,7 @@ test("release-1104 descriptions: estate's real tool and language counts, studio 
   assert.doesNotMatch(studio, /browser console/);
   const crew = byId["wicked-crew"].description;
   assert.match(crew, /By default a different agent reviews the work; when none can, the job stops unless you launch it as reduced assurance/);
-  assert.match(crew, /one read-only gate/);
+  assert.match(crew, /agents read your databases only through one read-only gate/, "the gate governs databases; API and MCP tools reach agents as MCP tools");
   assert.doesNotMatch(crew, /Evaluator is never the creator|never asserted/, "a reduced-assurance job can be reviewed by its creator's seat, labelled");
   assert.match(crew, /a change asked for in a chat is built, checked and reviewed by a different agent/, "only chat changes are reviewed; direct edits and undo are the person's own");
   // the README's product table says the same, row by row
@@ -115,7 +115,7 @@ test("release-1104 descriptions: estate's real tool and language counts, studio 
   const row = (id) => readme.split("\n").find((l) => l.startsWith(`| [${id}](`)) ?? "";
   assert.match(row("wicked-estate"), /114 languages[^|]*33 MCP tools[^|]*never their rows/);
   assert.match(row("wicked-studio"), /^\| \[wicked-studio\][^|]*\| active \| The ADE \(agentic development environment\)[^|]*Apps over your databases[^|]*Ask a question of your data[^|]*Knowledge map/);
-  assert.match(row("wicked-crew"), /by default a different agent reviews the work[^|]*one read-only gate/);
+  assert.match(row("wicked-crew"), /by default a different agent reviews the work[^|]*your databases only through one read-only gate/);
   assert.match(row("wicked-core"), /core-ts >= 0\.15\.24/);
   assert.doesNotMatch(readme, /29 tools|103 languages|Browser console for wicked-crew|evidence-re-derived "done"|core-ts >= 0\.7\.26/);
 });
