@@ -316,13 +316,13 @@ Required dependencies resolve automatically: wicked-garden requires **wicked-vau
 
 | Product | Status | What it does |
 |---|---|---|
-| [wicked-estate](https://github.com/mikeparcewski/wicked-estate) | stable | MCP server: code graph + memory + knowledge in one binary. 29 tools across 3 domains. 103 languages. |
+| [wicked-estate](https://github.com/mikeparcewski/wicked-estate) | stable | What your agents know: a code graph over 114 languages, memory and knowledge, in a local CLI and MCP server (33 MCP tools across 3 domains). Holds your data sources' structure, never their rows. |
 | [wicked-bus](https://www.npmjs.com/package/wicked-bus) | stable | Durable event fabric for agents — restart-durable at-least-once delivery with dead-lettering and replay. Zero infra (embedded SQLite), single-host. |
 | [wicked-garden](https://github.com/mikeparcewski/wicked-garden) | active | Curated toolkit for what coding agents can't do alone. Claude Code plugin. Includes the 40-specialist QE domain (acceptance testing, evidence-gated, no self-grading). |
 | [wicked-interactive](https://github.com/mikeparcewski/wicked-interactive) | stable | Foundation-plane document & render engine (HTML/PDF/PPTX + version lineage) that wicked-crew spawns and proxies — surfaced through studio, not visited directly. |
-| [wicked-studio](https://github.com/mikeparcewski/wicked-studio) | active | Browser console for wicked-crew — launch/steer governed runs, answer HITL gates, live event streams. Ships bundled inside wicked-crew. |
+| [wicked-studio](https://github.com/mikeparcewski/wicked-studio) | active | The ADE (agentic development environment) for running a team of coding agents: jobs started from a chat, the decisions that need you, Apps over your databases built in a chat, Ask a question of your data, and the Knowledge map. Ships bundled inside wicked-crew. |
 | [wicked-core](https://github.com/mikeparcewski/wicked-core) | active | The execution engine + governance hook binary behind wicked-crew. Ships inside the `wicked-core-ts` platform package wicked-crew pins (core-ts >= 0.7.26); nothing to install separately. |
-| [wicked-crew](https://www.npmjs.com/package/wicked-crew) | active | Governed multi-agent execution — drives coding-agent CLIs through durable workflows with deny-dominates dual gates and evidence-re-derived "done". Includes the Studio console. |
+| [wicked-crew](https://www.npmjs.com/package/wicked-crew) | active | The harness for the coding agents you already use: sandboxed agents, and by default a different agent reviews the work. Gates report the checks that actually ran. Runs Apps, and agents read live data only through one read-only gate. Includes Wicked Studio. |
 
 > **Dependency, not a product:** `wicked-vault` (npm) is in the registry only so dependency resolution can install it — it is wicked-garden's required evidence backend, not a standalone pick.
 
