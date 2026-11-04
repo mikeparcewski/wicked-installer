@@ -20,7 +20,8 @@ All notable changes to wicked-installer are documented here. The format follows
   numeric-looking argument as a string). `remove` names every place the entry sits. A help probe that
   fails is reported, and nothing is written. A key registered in both shapes, or a drifted entry in
   the shape the installed opencode does not write, is handed back as manual rather than duplicated,
-  and `mcp.servers` is read as 2.x's map unless it is a 1.x entry literally named "servers".
+  and `mcp.servers` is read as 2.x's map unless it is a 1.x entry literally named "servers" (a 2.x add
+  next to such an entry is handed back too: opencode would write into it).
 
 ## [0.8.0] - 2026-10-19
 

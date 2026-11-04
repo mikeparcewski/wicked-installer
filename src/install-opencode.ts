@@ -1193,8 +1193,8 @@ const asObject = (v: unknown): Record<string, unknown> | undefined =>
 function opencodeMcpRead(
   file: string,
   a: McpArgs,
-): { state: "ok"; found: Array<{ shape: OpencodeShape; same: boolean }> } | { state: "error"; detail: string } {
-  if (!existsSync(file)) return { state: "ok", found: [] };
+): { state: "ok"; found: Array<{ shape: OpencodeShape; same: boolean }>; legacyServers: boolean } | { state: "error"; detail: string } {
+  if (!existsSync(file)) return { state: "ok", found: [], legacyServers: false };
   let cfg: unknown;
   try {
     cfg = JSON.parse(stripJsonc(readFileSync(file, "utf8")));
@@ -1216,7 +1216,7 @@ function opencodeMcpRead(
   const found: Array<{ shape: OpencodeShape; same: boolean }> = [];
   if (serversIsMap && servers[a.key] !== undefined) found.push({ shape: "servers", same: same(servers[a.key]) });
   if (mcp?.[a.key] !== undefined && !(a.key === "servers" && serversIsMap)) found.push({ shape: "flat", same: same(mcp[a.key]) });
-  return { state: "ok", found };
+  return { state: "ok", found, legacyServers: servers !== undefined && !serversIsMap };
 }
 
 // `opencode mcp add` parses its argv with yargs, which turns a numeric-looking token into a number:
@@ -1225,7 +1225,8 @@ const OPENCODE_NUMERIC = /^\s*[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?\s*$|^\s*0x[0-9a
 
 function opencodeMcpEntry(a: McpArgs): McpEntry {
   const home = opencodeMcpHome(a);
-  const file = opencodeMcpFile(home);
+  // Re-resolved once the flavor is known: a home with no config yet gets 2.x's opencode.json.
+  let file = opencodeMcpFile(home);
   const entry = (result: McpResult, detail: string, target: string = file): McpEntry => ({ cli: "opencode", result, target, detail });
   const st = opencodeMcpRead(file, a);
   if (st.state === "error") return entry("failed", st.detail);
@@ -1245,7 +1246,13 @@ function opencodeMcpEntry(a: McpArgs): McpEntry {
     return entry("failed", `could not tell which opencode this is ('opencode mcp add --help' ${flavor.unknown}), so nothing was written; ${byHand("flat")}`);
   }
   const v2 = flavor === "v2";
+  file = opencodeMcpFile(home, v2);
   const writes: OpencodeShape = v2 ? "servers" : "flat";
+  // A 1.x entry literally named "servers" occupies the key 2.x writes its map under: an add would
+  // write into that entry (opencode 2.0.25 does), leaving neither shape. Handed back before any write.
+  if (v2 && st.legacyServers) {
+    return entry("manual", `"mcp" → "servers" in ${file} is a 1.x server entry named "servers", where opencode 2.x keeps its server map; rename that entry, then re-run`);
+  }
   const cur = st.found[0];
   // A match counts where this opencode reads it: 2.x reads both shapes, 1.x only its own.
   if (cur?.same && (v2 || flavor === undefined || cur.shape === "flat")) return entry("converged", "already registered with this command and args");

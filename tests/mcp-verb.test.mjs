@@ -71,6 +71,7 @@ fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ cli: "opencode", argv: 
 if (a[0] !== "mcp" || a[1] !== "add") process.exit(64);
 if (a.includes("--help")) {
   if (process.env.OC_HELP_FAIL) { process.stderr.write("help failed\\n"); process.exit(3); }
+  if (process.env.OC_HELP_STDERR) { process.stderr.write("FLAGS\\n  --global  Write to the global config\\n"); process.exit(0); }
   process.stdout.write("FLAGS\\n  --env key=value\\n  --global              Write to the global config instead of the project config\\n"); process.exit(0);
 }
 const global = a.includes("--global");
@@ -434,6 +435,20 @@ test("opencode 2.x edges: a failed probe writes nothing, both shapes are manual,
     // ...unless it is a 1.x entry literally named "servers" (it carries a type).
     put({ mcp: { servers: local(["node", "/s.js"]) } });
     assert.match(remove("servers").detail, /delete the "servers" entry under "mcp" in /);
+    // A 2.x add of ANY key would write into that entry: handed back, the file byte-for-byte unchanged.
+    const before = readFileSync(cfgFile, "utf8");
+    const occupied = upsert("other-key");
+    assert.equal(occupied.result, "manual");
+    assert.match(occupied.detail, /a 1\.x server entry named "servers"/);
+    assert.equal(readFileSync(cfgFile, "utf8"), before);
+    assert.equal(adds(sb).length, 1, "no add spawned");
+
+    // Help printed to stderr (exit 0) still reads as 2.x: mcpSpawn hands both streams to the probe.
+    put({});
+    sb.env.OC_HELP_STDERR = "1";
+    assert.equal(upsert().result, "written");
+    assert.deepEqual(adds(sb).at(-1).argv.slice(0, 3), ["mcp", "add", "--global"]);
+    delete sb.env.OC_HELP_STDERR;
 
     // A dry run on a fresh home names the file 2.x will create.
     const fresh = join(sb.tmp, "cfg3", "opencode");
