@@ -5,6 +5,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-05
+
 ### Changed
 
 - **Product descriptions match the release-1104 set** (`registry.json`, shown by `npx wicked-installer`, and the
