@@ -17,7 +17,7 @@ All notable changes to wicked-installer are documented here. The format follows
 - **Public copy says job, not run, and names Wicked Studio** (the quick-start bundle, the daemon capability label,
   the creative and full bundles and the README's bundle table): "launch a job", "first job", "daemon for governed
   jobs", and "Wicked Studio" where it said "the Studio console". The README's wicked-core row names the floor crew
-  0.17.0 pins (core-ts >= 0.15.24; it said >= 0.7.26).
+  0.17.0 pins (core-ts >= 0.15.25; it said >= 0.7.26).
 
 ### Fixed
 

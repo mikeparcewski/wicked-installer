@@ -116,7 +116,7 @@ test("release-1104 descriptions: estate's real tool and language counts, studio 
   assert.match(row("wicked-estate"), /114 languages[^|]*33 MCP tools[^|]*never their rows/);
   assert.match(row("wicked-studio"), /^\| \[wicked-studio\][^|]*\| active \| The ADE \(agentic development environment\)[^|]*Apps over your databases[^|]*Ask a question of your data[^|]*Knowledge map/);
   assert.match(row("wicked-crew"), /by default a different agent reviews the work[^|]*your databases only through one read-only gate/);
-  assert.match(row("wicked-core"), /core-ts >= 0\.15\.24/);
+  assert.match(row("wicked-core"), /core-ts >= 0\.15\.25/);
   assert.doesNotMatch(readme, /29 tools|103 languages|Browser console for wicked-crew|evidence-re-derived "done"|core-ts >= 0\.7\.26/);
 });
 
