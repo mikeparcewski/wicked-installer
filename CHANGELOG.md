@@ -5,6 +5,20 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Product descriptions match the release-1104 set** (`registry.json`, shown by `npx wicked-installer`, and the
+  README's product table). wicked-estate: 33 MCP tools (was 29) and 114 languages (was 103), in a local CLI and MCP
+  server (not "one binary"), holding your data sources' structure but never their rows. wicked-studio: the ADE
+  (agentic development environment), with Apps over your databases, Ask a question of your data and the Knowledge map
+  (was "browser console"). wicked-crew: by default a different agent reviews the work, and a job no other agent can
+  review stops unless it is launched as reduced assurance (was "Evaluator is never the creator"); Apps; agents read
+  your databases only through one read-only gate.
+- **Public copy says job, not run, and names Wicked Studio** (the quick-start bundle, the daemon capability label,
+  the creative and full bundles and the README's bundle table): "launch a job", "first job", "daemon for governed
+  jobs", and "Wicked Studio" where it said "the Studio console". The README's wicked-core row names the floor crew
+  0.17.0 pins (core-ts >= 0.15.25; it said >= 0.7.26).
+
 ### Fixed
 
 - **`mcp upsert` registers the server with opencode 2.x (installer#43).** opencode 2.x's `mcp add`

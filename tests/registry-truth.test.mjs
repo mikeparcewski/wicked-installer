@@ -93,3 +93,34 @@ test("wicked-crew requires wicked-garden — expressed ONCE, not also in recomme
   assert.ok(!qs.products.includes("wicked-garden"), "quick-start pulls garden via crew.requires, never a second listing");
   assert.match(qs.description, /wicked-crew serve/, "the quick-start description names the post-install next step");
 });
+
+test("release-1104 descriptions: estate's real tool and language counts, studio is the ADE with Apps, crew's review is a default", () => {
+  const estate = byId["wicked-estate"].description;
+  assert.match(estate, /33 MCP tools/, "estate's MCP server lists 33 tools (wicked-estate README, MCP section)");
+  assert.match(estate, /114 languages/, "the language count is wicked-estate's languages.toml");
+  assert.doesNotMatch(estate, /\b(29|30) tools|one binary/, "estate ships two executables, the CLI and the MCP server");
+  assert.match(estate, /never their rows/);
+  const studio = byId["wicked-studio"].description;
+  assert.match(studio, /^The ADE \(agentic development environment\)/);
+  assert.match(studio, /apps and dashboards over your databases/);
+  assert.match(studio, /Knowledge map/);
+  assert.doesNotMatch(studio, /browser console/);
+  const crew = byId["wicked-crew"].description;
+  assert.match(crew, /By default a different agent reviews the work; when none can, the job stops unless you launch it as reduced assurance/);
+  assert.match(crew, /agents read your databases only through one read-only gate/, "the gate governs databases; API and MCP tools reach agents as MCP tools");
+  assert.doesNotMatch(crew, /Evaluator is never the creator|never asserted/, "a reduced-assurance job can be reviewed by its creator's seat, labelled");
+  assert.match(crew, /a change asked for in a chat is built, checked and reviewed by a different agent/, "only chat changes are reviewed; direct edits and undo are the person's own");
+  // the README's product table says the same, row by row
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  const row = (id) => readme.split("\n").find((l) => l.startsWith(`| [${id}](`)) ?? "";
+  assert.match(row("wicked-estate"), /114 languages[^|]*33 MCP tools[^|]*never their rows/);
+  assert.match(row("wicked-studio"), /^\| \[wicked-studio\][^|]*\| active \| The ADE \(agentic development environment\)[^|]*Apps over your databases[^|]*Ask a question of your data[^|]*Knowledge map/);
+  assert.match(row("wicked-crew"), /by default a different agent reviews the work[^|]*your databases only through one read-only gate/);
+  assert.match(row("wicked-core"), /core-ts >= 0\.15\.25/);
+  assert.doesNotMatch(readme, /29 tools|103 languages|Browser console for wicked-crew|evidence-re-derived "done"|core-ts >= 0\.7\.26/);
+});
+
+test("public copy says job, not run, and Wicked Studio, not a console", () => {
+  const text = JSON.stringify(registry) + readFileSync(join(root, "README.md"), "utf8");
+  assert.doesNotMatch(text, /launch a run|first run in|governed-run daemon|Studio console/);
+});
