@@ -677,20 +677,61 @@ function packConfigDirs(): string[] {
   return resolveClaudeConfigDirs().dirs;
 }
 
-/** The pack's canonical copy already installed (if any), read as a legacy ownership baseline. */
-/** Written into the canonical copy by every recording install: its presence means "not a pre-record install". */
-const RECORDED_STAMP = ".wicked-installer-recorded";
+/**
+ * Install provenance, kept OUTSIDE the publisher-controlled canonical tree (a pack can ship any
+ * file, links included): ~/.something-wicked/wicked-garden/packs/recorded/<name>.json. Its
+ * presence means the canonical copy was written by a recording install. `legacy` carries the
+ * inventory of a pre-record install (≤ 0.8.1, always into ~/.claude/skills) that has not been
+ * migrated yet — so a recording install into another config dir does not erase the evidence
+ * needed to adopt or remove those old copies later.
+ */
+interface Provenance {
+  version: string;
+  configDirs: string[];
+  legacy?: { skills: string[]; files: Record<string, string> };
+}
 
+function provenanceFile(name: string): string {
+  return join(installedHome(), "..", "recorded", `${name}.json`);
+}
+
+function readProvenance(name: string): Provenance | undefined {
+  try {
+    const v = JSON.parse(readFileSync(provenanceFile(name), "utf8")) as Provenance;
+    if (!v || typeof v !== "object") return undefined;
+    if (v.legacy !== undefined && (!Array.isArray(v.legacy.skills) || !v.legacy.skills.every(safeSkill) || fileMapProblem(v.legacy.files, "legacy.files"))) {
+      return { ...v, legacy: undefined };
+    }
+    return v;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeProvenance(name: string, value: Provenance): void {
+  const file = provenanceFile(name);
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  renameSync(tmp, file);
+}
+
+/**
+ * The ownership baseline of a pre-record install of this pack, or undefined: the inventory a
+ * recording install preserved, else the canonical copy itself when no recording install ever
+ * wrote it (and it is not plugin-shaped — a plugin's skills were never copied).
+ */
 function legacyBaseline(name: string): { incoming: Incoming; version: string; plugin: boolean } | undefined {
+  const prov = readProvenance(name);
+  if (prov) {
+    return prov.legacy ? { incoming: { skills: prov.legacy.skills, files: prov.legacy.files, sources: {}, skipped: [] }, version: "(pre-record)", plugin: false } : undefined;
+  }
   const dir = join(installedHome(), name);
   if (!existsSync(join(dir, MANIFEST))) return undefined;
-  // Only a canonical copy left by a pre-record installer (≤ 0.8.1) that copied loose skills is
-  // legacy ownership evidence: not one a recording install wrote (it left records where it
-  // copied), and not a plugin-shaped pack (its skills were never copied).
-  if (existsSync(join(dir, RECORDED_STAMP)) || existsSync(join(dir, ".claude-plugin", "plugin.json"))) return undefined;
+  if (existsSync(join(dir, ".claude-plugin", "plugin.json"))) return undefined;
   try {
     const manifest = readManifest(dir);
-    return { incoming: readIncoming(dir, manifest), version: manifest.version, plugin: existsSync(join(dir, ".claude-plugin", "plugin.json")) };
+    return { incoming: readIncoming(dir, manifest), version: manifest.version, plugin: false };
   } catch {
     return undefined;
   }
@@ -722,6 +763,7 @@ export async function packAdd(source: string, flags: AddFlags): Promise<number> 
 
     const isPlugin = existsSync(join(resolved.dir, ".claude-plugin", "plugin.json"));
     const dest = join(installedHome(), manifest.name);
+    const legacyBefore = legacyBaseline(manifest.name);
     const configDirs = packConfigDirs();
 
     // 2. preflight — every destination classified before anything is written.
@@ -729,7 +771,7 @@ export async function packAdd(source: string, flags: AddFlags): Promise<number> 
     let incoming: Incoming | undefined;
     if (!isPlugin) {
       incoming = readIncoming(resolved.dir, manifest);
-      const legacy = legacyBaseline(manifest.name);
+      const legacy = legacyBefore;
       plans = configDirs.map((dir) => classifyDir(dir, manifest.name, incoming!, legacy?.incoming));
       const held = plans.filter((p) => p.recordError || conflictsOf(p).length > 0);
       const from = plans.find((p) => p.record)?.record?.version ?? legacy?.version;
@@ -772,7 +814,13 @@ export async function packAdd(source: string, flags: AddFlags): Promise<number> 
     rmSync(dest, { recursive: true, force: true });
     mkdirSync(installedHome(), { recursive: true });
     cpSync(resolved.dir, dest, { recursive: true });
-    writeFileSync(join(dest, RECORDED_STAMP), `${JSON.stringify({ version: manifest.version, configDirs: isPlugin ? [] : configDirs })}\n`);
+    // Provenance: the legacy inventory survives until a run that covers ~/.claude migrates it.
+    const coversLegacy = !isPlugin && configDirs.some(isLegacyDestination);
+    writeProvenance(manifest.name, {
+      version: manifest.version,
+      configDirs: isPlugin ? [] : configDirs,
+      ...(legacyBefore && !coversLegacy ? { legacy: { skills: legacyBefore.incoming.skills, files: legacyBefore.incoming.files } } : {}),
+    });
     console.log(`  installed to ${dest}`);
 
     // 5. registration — garden runtime catalog + crew routing + floors
@@ -878,10 +926,24 @@ export async function packRemove(name: string): Promise<number> {
     if (record) rmSync(recordFile, { force: true });
   }
 
+  // Copies a pre-record install left in ~/.claude, when this run does not cover ~/.claude:
+  // nothing there is touched, and the cleanup is not presented as complete.
+  if (legacy && !configDirs.some(isLegacyDestination)) {
+    const legacyRoot = join(homedir(), ".claude", "skills");
+    for (const skill of legacy.incoming.skills) {
+      if (lkind(join(legacyRoot, skill)) !== "absent") kept.push(`${join(legacyRoot, skill)} (left by an earlier install into ~/.claude, which this run does not cover — re-run \`pack remove ${name}\` without CLAUDE_CONFIG_DIR to remove it)`);
+    }
+  }
+
   if (existsSync(dest)) {
     rmSync(dest, { recursive: true, force: true });
     console.log(`  removed ${dest}`);
   }
+  // Keep the provenance (with its legacy inventory) while legacy copies remain, so a later
+  // remove from ~/.claude can still prove which files were the pack's.
+  const legacyLeft = legacy !== undefined && !configDirs.some(isLegacyDestination) && kept.some((k) => k.includes("earlier install into ~/.claude"));
+  if (!legacyLeft) rmSync(provenanceFile(name), { force: true });
+  else writeProvenance(name, { version: "(removed)", configDirs: [], legacy: { skills: legacy!.incoming.skills, files: legacy!.incoming.files } });
   const unregistered = gardenPack(["unregister", name]);
   const keptPaths = [...new Set(kept)];
   if (keptPaths.length > 0) {

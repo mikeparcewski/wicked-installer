@@ -293,8 +293,9 @@ counts as installed only when every active dir is registered.
 wicked-garden is installed **per host**. For Codex, OpenCode, Pi and Antigravity, `status`
 reads the host's install marker (`<home>/wicked-installer/<cli>-install.json`) and checks the
 files it names: Codex's cached plugin payload (`plugins/cache/<marketplace>/<plugin>/<version>/`
-with a manifest at the recorded version and its skills; a plugin `enabled = false` in Codex's
-`config.toml` falls back to the loose skills the installer kept), or every copied skill
+with a manifest at the recorded version and every skill it counted, and the plugin configured in
+Codex's `config.toml`; a plugin that is disabled there or no longer configured falls back to the
+loose skills the installer kept), or every copied skill
 directory the marker names (OpenCode also needs them registered in `skills.paths`). A marker
 whose files are gone is **broken**, never installed. The Pi, OpenCode and Antigravity scripts now
 keep earlier products' marker entries and record each copied skill directory's name.
@@ -349,7 +350,11 @@ adopted only in `~/.claude` (the one place that installer wrote), only for
 skill dirs byte-identical to the pack's installed copy and claimed by no
 other pack; anything else is held. Identical bytes alone are not ownership:
 a skill you copied in by hand is never adopted or removed. A link on an
-owned file's path is never followed.
+owned file's path is never followed. Install provenance is kept outside the
+pack's own files, in `~/.something-wicked/wicked-garden/packs/recorded/<name>.json`; it
+keeps the inventory of a pre-record `~/.claude` install until a run that covers
+`~/.claude` migrates it, and `pack remove` from another config dir reports
+those old copies instead of calling the cleanup complete.
 Validation and registration are wicked-garden's own tooling — this command
 never re-implements them.
 

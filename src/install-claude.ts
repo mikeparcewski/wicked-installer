@@ -2832,11 +2832,14 @@ function purgeProductBinary(product: Product, options: Options, actions: Action[
       actions.push({ kind: "remove", target: product.install.package, result: options.dryRun ? "planned" : "ok", detail: "npm rm -g" });
     } else if (product.install.type === "cargo") {
       // A release install (~/.local/bin): only files still byte-identical to what was installed.
+      let ok = true;
+      let removedAny = false;
       if (product.install.release) {
         const purged = purgeReleaseBinaries(product.install.release, { dryRun: options.dryRun === true });
         notes.push(...purged.notes);
         for (const p of purged.kept) actions.push({ kind: "remove", target: p, result: "skipped", detail: "changed since install — kept" });
-        if (purged.kept.length > 0) return false;
+        if (purged.kept.length > 0) ok = false;
+        if (purged.notes.some((n) => /^(removed|would remove) /.test(n))) removedAny = true;
       }
       // A cargo build (~/.cargo/bin): only when cargo is here to remove it.
       const single = product.install.crate ?? product.install.package;
@@ -2852,7 +2855,11 @@ function purgeProductBinary(product: Product, options: Options, actions: Action[
       for (const crate of cargoCopies) {
         run("cargo", ["uninstall", crate], options);
         actions.push({ kind: "remove", target: crate, result: options.dryRun ? "planned" : "ok", detail: "cargo uninstall" });
+        removedAny = true;
       }
+      if (!removedAny) notes.push(`--purge-binaries found no ${product.id} binary to remove (looked for the release install in ~/.local/bin and for cargo builds in ${cargoBin})`);
+      else notes.push("--purge-binaries removed the machine-scoped binary; other CLIs referencing it will lose it too");
+      return ok;
     }
     notes.push("--purge-binaries removed the machine-scoped binary; other CLIs referencing it will lose it too");
     return true;
@@ -3153,11 +3160,9 @@ async function main(): Promise<void> {
   const registry = loadRegistry(options.registryPath);
   // Every positional must be a product id (or, for uninstall, a recorded `mcp-server:<key>`) —
   // also with --all, which would otherwise ignore an unknown word and act on every product.
-  // (An uninstall of a named id the registry no longer lists stays allowed: its marker record is
-  // what is removed. Only combined with --all, or on install, is an unknown word refused.)
-  const unknownIds = options.verb === "install" || options.all
-    ? options.productIds.filter((id) => !registry.products.some((p) => p.id === id) && !(options.verb === "uninstall" && id.startsWith("mcp-server:")))
-    : [];
+  // An unknown id is refused on every verb: on uninstall it would otherwise reach the legacy
+  // heuristic removal by name. (Retired products stay in the registry, so they still resolve.)
+  const unknownIds = options.productIds.filter((id) => !registry.products.some((p) => p.id === id) && !(options.verb === "uninstall" && id.startsWith("mcp-server:")));
   if (unknownIds.length > 0) {
     console.error(`install-claude.js: unknown product or unsupported command: ${unknownIds.join(", ")} — nothing was installed, removed or changed.`);
     process.exit(1);

@@ -411,3 +411,40 @@ test("#48: a canonical copy from a recording install is not legacy evidence — 
     rmSync(sb.root, { recursive: true, force: true });
   }
 });
+
+test("#48: a re-add into another config dir keeps the evidence of a pre-record ~/.claude install; remove reports those copies, and a later remove from ~/.claude deletes them", () => {
+  const sb = sandbox();
+  try {
+    const v1 = makePack(sb.root, "0.1.0", V1);
+    // What 0.8.1 left in ~/.claude: canonical copy + loose skills, no record.
+    cpSync(v1, sb.canonical, { recursive: true });
+    for (const sk of ["acme-mini", "acme-mini-widget-maker"]) cpSync(join(v1, "skills", sk), join(sb.skills, sk), { recursive: true });
+    const alt = join(sb.root, "alt");
+    assert.equal(runPack(["add", v1], { home: sb.home, stubLog: sb.log, configDir: alt }).status, 0);
+    const fromAlt = runPack(["remove", "acme-mini"], { home: sb.home, stubLog: sb.log, configDir: alt });
+    assert.equal(fromAlt.status, 1, fromAlt.out);
+    assert.match(fromAlt.out, /left by an earlier install into ~\/\.claude, which this run does not cover/);
+    assert.ok(existsSync(join(sb.skills, "acme-mini", "SKILL.md")), "nothing in ~/.claude touched from the alt run");
+    const fromDefault = runPack(["remove", "acme-mini"], { home: sb.home, stubLog: sb.log });
+    assert.equal(fromDefault.status, 0, fromDefault.out);
+    assert.ok(!existsSync(join(sb.skills, "acme-mini")), "the old unchanged copies are removed once ~/.claude is covered");
+  } finally {
+    rmSync(sb.root, { recursive: true, force: true });
+  }
+});
+
+test("#48: installer provenance lives outside the pack's own files (a pack cannot aim it through a link)", { skip: process.platform === "win32" }, () => {
+  const sb = sandbox();
+  try {
+    const v1 = makePack(sb.root, "0.1.0", V1);
+    const victim = join(sb.root, "victim.txt");
+    writeFileSync(victim, "precious\n");
+    symlinkSync(victim, join(v1, ".wicked-installer-recorded"));
+    const r = runPack(["add", v1], { home: sb.home, stubLog: sb.log });
+    assert.equal(r.status, 0, r.out);
+    assert.equal(readFileSync(victim, "utf8"), "precious\n");
+    assert.ok(existsSync(join(sb.home, ".something-wicked", "wicked-garden", "packs", "recorded", "acme-mini.json")));
+  } finally {
+    rmSync(sb.root, { recursive: true, force: true });
+  }
+});

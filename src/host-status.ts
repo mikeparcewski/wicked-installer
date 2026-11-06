@@ -107,31 +107,33 @@ function prefixedSkills(dir: string, prefix: string): number {
 }
 
 /**
- * Codex's own record of whether the plugin is enabled — `[plugins."<id>"] enabled = …` in
- * config.toml — read, never written. Undefined when it says nothing (Codex then treats the
- * installed plugin as enabled) or cannot be read.
+ * Codex's own registration of the plugin: `codex plugin add` writes `[plugins."<id>"]` (with
+ * `enabled = true`) into config.toml, and Codex loads only plugins configured there. Read, never
+ * written. `registered: false` when the table is absent or config.toml cannot be read.
  */
-function codexPluginEnabled(home: string, pluginId: string): boolean | undefined {
+function codexPluginConfig(home: string, pluginId: string): { registered: boolean; enabled?: boolean } {
   let raw: string;
   try {
     raw = readFileSync(join(home, "config.toml"), "utf8");
   } catch {
-    return undefined;
+    return { registered: false };
   }
   let inTable = false;
+  let registered = false;
   let found: boolean | undefined;
   for (const line of raw.split(/\r?\n/)) {
     const header = /^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$/.exec(line);
     if (header) {
       const key = header[1].replace(/\s+/g, "");
       inTable = key === `plugins."${pluginId}"` || key === `plugins.'${pluginId}'`;
+      if (inTable) registered = true;
       continue;
     }
     if (!inTable) continue;
     const m = /^\s*enabled\s*=\s*(true|false)\s*(#.*)?$/.exec(line);
     if (m) found = m[1] === "true";
   }
-  return found;
+  return { registered, enabled: found };
 }
 
 /** SKILL.md files under `dir`, recursively (links not followed) — how install-codex counts the plugin's skills. */
@@ -190,6 +192,18 @@ function stripJsonc(text: string): string {
       continue;
     }
     if (ch === '"') { inString = true; out += ch; continue; }
+    if (ch === ",") {
+      // A trailing comma (OpenCode's JSONC accepts it): drop it when only whitespace or comments
+      // stand between it and the closing bracket.
+      let j = i + 1;
+      for (;;) {
+        while (j < text.length && /\s/.test(text[j])) j += 1;
+        if (text[j] === "/" && text[j + 1] === "/") { while (j < text.length && text[j] !== "\n") j += 1; continue; }
+        if (text[j] === "/" && text[j + 1] === "*") { const end = text.indexOf("*/", j + 2); j = end < 0 ? text.length : end + 2; continue; }
+        break;
+      }
+      if (text[j] === "}" || text[j] === "]") continue;
+    }
     if (ch === "/" && next === "/") { inLine = true; i += 1; continue; }
     if (ch === "/" && next === "*") { inBlock = true; i += 1; continue; }
     out += ch;
@@ -252,16 +266,16 @@ export function hostProductStatus(
   const plugin = entry.codexPlugin;
   let disabledNote = "";
   if (plugin && typeof plugin.marketplace === "string" && typeof plugin.version === "string" && typeof plugin.pluginId === "string") {
-    const enabled = codexPluginEnabled(home, plugin.pluginId) ?? (plugin.enabled === false ? false : true);
-    if (enabled) {
+    const cfg = codexPluginConfig(home, plugin.pluginId);
+    if (cfg.registered && cfg.enabled !== false) {
       const recordedSkills = typeof entry.assets?.skills === "number" ? entry.assets.skills : 0;
       const problem = codexPayloadProblem(join(home, "plugins", "cache", plugin.marketplace, plugin.pluginId.split("@")[0], plugin.version), plugin.version, recordedSkills);
       return problem
         ? { ...base, state: "broken", hooks, detail: `the marker records Codex plugin ${plugin.pluginId} ${plugin.version}, but ${problem}` }
         : { ...base, state: "installed", hooks, detail: `Codex plugin ${plugin.pluginId} ${plugin.version}` };
     }
-    // Disabled: the loose skills the installer kept (if any) are what works.
-    disabledNote = `Codex plugin ${plugin.pluginId} is disabled in Codex`;
+    // Disabled, or no longer configured in config.toml: the loose skills the installer kept (if any) are what works.
+    disabledNote = cfg.registered ? `Codex plugin ${plugin.pluginId} is disabled in Codex` : `Codex plugin ${plugin.pluginId} is not configured in ${join(home, "config.toml")}`;
     if (!names || names.length === 0) return { ...base, state: "not-installed", hooks, detail: disabledNote };
   }
 

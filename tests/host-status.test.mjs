@@ -60,6 +60,8 @@ test("status: garden as a Codex plugin is installed when Codex's cached payload 
       codexPlugin: { pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: "/x", version: "12.64.0", addedByInstaller: true, enabled: true },
     });
     const cache = join(home, ".codex", "plugins", "cache", "wicked-garden", "wicked-garden", "12.64.0");
+    const toml = join(home, ".codex", "config.toml");
+    writeFileSync(toml, '[plugins."wicked-garden@wicked-garden"]\nenabled = true\n');
     // An empty cache dir is not a payload.
     mkdirSync(cache, { recursive: true });
     const empty = run([CLI, "status", "--offline"], home);
@@ -74,6 +76,12 @@ test("status: garden as a Codex plugin is installed when Codex's cached payload 
     assert.equal(partial.status, 1, partial.out);
     assert.match(partial.out, /holds 1 of the 2 skills installed/);
     skill(join(cache, "skills"), "prove");
+    // A complete payload but no `[plugins."<id>"]` registration in config.toml: Codex does not load it.
+    rmSync(toml);
+    const unregistered = run([CLI, "status", "--offline"], home);
+    assert.equal(unregistered.status, 1, unregistered.out);
+    assert.match(unregistered.out, /Codex\s+not installed\s+Codex plugin wicked-garden@wicked-garden is not configured in/);
+    writeFileSync(toml, '[plugins."wicked-garden@wicked-garden"]\nenabled = true\n');
     const ok = run([CLI, "status", "--offline"], home);
     assert.equal(ok.status, 0, ok.out);
     assert.match(ok.out, /Codex\s+✓ installed\s+Codex plugin wicked-garden@wicked-garden 12\.64\.0/);
@@ -83,7 +91,7 @@ test("status: garden as a Codex plugin is installed when Codex's cached payload 
     const off = run([CLI, "status", "--offline"], home);
     assert.equal(off.status, 1, off.out);
     assert.match(off.out, /Codex\s+not installed\s+Codex plugin wicked-garden@wicked-garden is disabled in Codex/);
-    rmSync(join(home, ".codex", "config.toml"));
+    writeFileSync(toml, '[plugins."wicked-garden@wicked-garden"]\nenabled = true\n');
 
     rmSync(cache, { recursive: true, force: true });
     const broken = run([CLI, "status", "--offline"], home);
@@ -103,6 +111,7 @@ test("status: a disabled Codex plugin with the installer's loose skills kept is 
       codexPlugin: { pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: "/x", version: "12.64.0", addedByInstaller: true, enabled: false },
     });
     skill(join(home, ".codex", "skills"), "wicked-garden-mem");
+    writeFileSync(join(home, ".codex", "config.toml"), '[plugins."wicked-garden@wicked-garden"]\nenabled = false\n');
     const r = run([CLI, "status", "--offline"], home);
     assert.equal(r.status, 0, r.out);
     assert.match(r.out, /Codex\s+✓ installed\s+Codex plugin wicked-garden@wicked-garden is disabled in Codex; 1 skill dir\(s\)/);
@@ -143,7 +152,8 @@ test("status: OpenCode skills not registered in skills.paths are broken (OpenCod
     const elsewhere = run([CLI, "status", "--offline"], home);
     assert.equal(elsewhere.status, 1, elsewhere.out);
     assert.match(elsewhere.out, /is not registered in skills\.paths/);
-    writeFileSync(join(oc, "opencode.jsonc"), JSON.stringify({ skills: { paths: [join(oc, "skills")] } }));
+    // JSONC as OpenCode accepts it: comments and trailing commas.
+    writeFileSync(join(oc, "opencode.jsonc"), `{\n  // mine\n  "skills": { "paths": [${JSON.stringify(join(oc, "skills"))},], },\n}\n`);
     const ok = run([CLI, "status", "--offline"], home);
     assert.equal(ok.status, 0, ok.out);
     assert.match(ok.out, /OpenCode\s+✓ installed/);
@@ -190,6 +200,15 @@ test("markers keep other products' entries and record copied skill names (pi)", 
 });
 
 test("a non-install word with --all never installs: unknown positionals are refused on every host script", () => {
+  // install-claude refuses an unknown id on uninstall too (it would reach the legacy name heuristic).
+  const h = fresh();
+  try {
+    const u = run([join(ROOT, "dist", "install-claude.js"), "uninstall", "old-pack", "--claude-home", join(h, "cfg")], h);
+    assert.equal(u.status, 1, u.out);
+    assert.match(u.stderr, /unknown product or unsupported command: old-pack/);
+  } finally {
+    rmSync(h, { recursive: true, force: true });
+  }
   for (const cli of ["codex", "opencode", "pi", "antigravity", "claude"]) {
     const home = fresh();
     try {
