@@ -496,12 +496,18 @@ function classifyDir(configDir: string, name: string, incoming: Incoming, legacy
 
   let owned: Map<string, Set<string>>;
   let ownedSkills: Set<string>;
+  // A skill name another pack's record claims here is never this pack's, whether or not its
+  // directory currently exists (two owners would let one pack's removal delete the other's).
+  const others = claimedByOthers(configDir, name);
+  for (const skill of incoming.skills) {
+    if (others.has(skill)) plan.items.push({ path: `${skill}/`, state: "foreign", note: "installed by another pack" });
+  }
   if (record) {
     owned = ownedDigests(record);
     ownedSkills = ownedSkillsOf(record);
     // A skill this version adds whose destination already exists belongs to someone else.
     for (const skill of incoming.skills) {
-      if (!ownedSkills.has(skill) && lkind(join(skillsRoot, skill)) !== "absent") {
+      if (!ownedSkills.has(skill) && !others.has(skill) && lkind(join(skillsRoot, skill)) !== "absent") {
         plan.items.push({ path: `${skill}/`, state: "foreign", note: "exists and was not installed by this pack" });
       }
     }
@@ -514,13 +520,12 @@ function classifyDir(configDir: string, name: string, incoming: Incoming, legacy
     // byte-identical to that canonical copy. Identical bytes alone (a user's own copy) are not
     // ownership.
     const legacyHere = legacy !== undefined && isLegacyDestination(configDir) ? legacy : undefined;
-    const others = claimedByOthers(configDir, name);
     const candidates = new Set([...incoming.skills, ...(legacyHere?.skills ?? [])]);
     for (const skill of [...candidates].sort()) {
       const kind = lkind(join(skillsRoot, skill));
-      if (kind === "absent") continue;
+      if (kind === "absent" || others.has(skill)) continue;
       const disk = kind === "dir" ? treeDigests(skillsRoot, skill) : undefined;
-      const matches = disk !== undefined && legacyHere !== undefined && !others.has(skill) &&
+      const matches = disk !== undefined && legacyHere !== undefined &&
         legacyHere.skills.includes(skill) && sameFiles(disk, filesOfSkill(legacyHere.files, skill));
       if (matches) {
         ownedSkills.add(skill);
@@ -571,7 +576,7 @@ function classifyDir(configDir: string, name: string, incoming: Incoming, legacy
   for (const key of Object.keys(incoming.files).sort()) {
     if (seen.has(key)) continue;
     const skill = key.split("/")[0];
-    if (!ownedSkills.has(skill) && lkind(join(skillsRoot, skill)) !== "absent") continue; // foreign, reported above
+    if (others.has(skill) || (!ownedSkills.has(skill) && lkind(join(skillsRoot, skill)) !== "absent")) continue; // foreign, reported above
     plan.items.push({ path: key, state: "new" });
   }
   return plan;
@@ -673,9 +678,16 @@ function packConfigDirs(): string[] {
 }
 
 /** The pack's canonical copy already installed (if any), read as a legacy ownership baseline. */
+/** Written into the canonical copy by every recording install: its presence means "not a pre-record install". */
+const RECORDED_STAMP = ".wicked-installer-recorded";
+
 function legacyBaseline(name: string): { incoming: Incoming; version: string; plugin: boolean } | undefined {
   const dir = join(installedHome(), name);
   if (!existsSync(join(dir, MANIFEST))) return undefined;
+  // Only a canonical copy left by a pre-record installer (≤ 0.8.1) that copied loose skills is
+  // legacy ownership evidence: not one a recording install wrote (it left records where it
+  // copied), and not a plugin-shaped pack (its skills were never copied).
+  if (existsSync(join(dir, RECORDED_STAMP)) || existsSync(join(dir, ".claude-plugin", "plugin.json"))) return undefined;
   try {
     const manifest = readManifest(dir);
     return { incoming: readIncoming(dir, manifest), version: manifest.version, plugin: existsSync(join(dir, ".claude-plugin", "plugin.json")) };
@@ -760,6 +772,7 @@ export async function packAdd(source: string, flags: AddFlags): Promise<number> 
     rmSync(dest, { recursive: true, force: true });
     mkdirSync(installedHome(), { recursive: true });
     cpSync(resolved.dir, dest, { recursive: true });
+    writeFileSync(join(dest, RECORDED_STAMP), `${JSON.stringify({ version: manifest.version, configDirs: isPlugin ? [] : configDirs })}\n`);
     console.log(`  installed to ${dest}`);
 
     // 5. registration — garden runtime catalog + crew routing + floors

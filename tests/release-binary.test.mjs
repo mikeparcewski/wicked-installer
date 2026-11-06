@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -297,13 +297,19 @@ test("release: a failed replacement restores the previous binaries (never a half
   const srv = await serve(w);
   try {
     const local = join(w.home, ".local", "bin");
-    mkdirSync(join(local, "fake-estate-mcp"), { recursive: true }); // the second destination cannot be replaced
-    writeFileSync(join(local, "fake-estate"), "#!/bin/sh\necho old\n");
-    chmodSync(join(local, "fake-estate"), 0o755);
-    const r = await runAsync(piArgs(w), w, srv.base);
+    mkdirSync(local, { recursive: true });
+    for (const b of ["fake-estate", "fake-estate-mcp"]) {
+      writeFileSync(join(local, b), `#!/bin/sh\necho old ${b}\n`);
+      chmodSync(join(local, b), 0o755);
+    }
+    // The SECOND swap fails, after the first binary has already been replaced.
+    const r = await runAsync(piArgs(w), w, srv.base, { WICKED_RELEASE_TEST_FAIL_SWAP: "2" });
     assert.equal(r.status, 1, r.out);
-    assert.match(r.out, /could not write to .*; the previous binaries were restored/);
-    assert.equal(readFileSync(join(local, "fake-estate"), "utf8"), "#!/bin/sh\necho old\n", "the first binary was not left updated");
+    assert.match(r.out, /could not write to .*injected swap failure.*; the previous binaries were restored/);
+    for (const b of ["fake-estate", "fake-estate-mcp"]) {
+      assert.equal(readFileSync(join(local, b), "utf8"), `#!/bin/sh\necho old ${b}\n`, `${b} restored`);
+    }
+    assert.deepEqual(readdirSync(local).sort(), ["fake-estate", "fake-estate-mcp"], "no staged or backup files left");
   } finally {
     await srv.close();
     rmSync(w.root, { recursive: true, force: true });
@@ -344,6 +350,52 @@ test("release: --purge-binaries removes the release binaries it installed and ke
     assert.deepEqual(out.kept, [join(local, "fake-estate")]);
     assert.ok(existsSync(join(local, "fake-estate")), "a changed binary is kept");
     assert.ok(!existsSync(join(local, "fake-estate-mcp")), "the installed, unchanged one is removed");
+  } finally {
+    await srv.close();
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});
+
+test("release: a file this installer did not put in ~/.local/bin is kept (renamed and reported), and a non-runnable install is repaired", { skip: skip || !TRIPLE }, async () => {
+  const w = world();
+  const srv = await serve(w);
+  try {
+    const local = join(w.home, ".local", "bin");
+    mkdirSync(local, { recursive: true });
+    writeFileSync(join(local, "fake-estate"), "#!/bin/sh\necho my own wrapper\n");
+    chmodSync(join(local, "fake-estate"), 0o755);
+    const r = await runAsync(piArgs(w), w, srv.base);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /kept the file that was there before \(not installed by this installer\) as .*fake-estate\.replaced-/);
+    const kept = readdirSync(local).find((n) => n.startsWith("fake-estate.replaced-"));
+    assert.equal(readFileSync(join(local, kept), "utf8"), "#!/bin/sh\necho my own wrapper\n");
+
+    // Same bytes, but no longer executable: not "already installed".
+    chmodSync(join(local, "fake-estate-mcp"), 0o644);
+    const again = await runAsync(piArgs(w), w, srv.base);
+    assert.equal(again.status, 0, again.out);
+    assert.doesNotMatch(again.out, /already installed/);
+    assert.equal(spawnSync(join(local, "fake-estate-mcp"), [], { encoding: "utf8" }).status, 0, "runnable again");
+  } finally {
+    await srv.close();
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});
+
+test("release: `install-claude.js uninstall <id> --purge-binaries` removes the release binaries, and fails (exit 1) when it must keep a changed one", { skip: skip || !TRIPLE }, async () => {
+  const w = world();
+  const srv = await serve(w);
+  try {
+    const cfg = join(w.home, "cfg");
+    const claude = (args, extra) => runAsync([join(ROOT, "dist", "install-claude.js"), ...args, "--registry", w.reg, "--claude-home", cfg], w, srv.base, extra);
+    assert.equal((await claude(["fake-estate"])).status, 0);
+    const local = join(w.home, ".local", "bin");
+    writeFileSync(join(local, "fake-estate"), "#!/bin/sh\necho changed\n");
+    const kept = await claude(["uninstall", "fake-estate", "--purge-binaries"]);
+    assert.equal(kept.status, 1, kept.out);
+    assert.match(kept.out, /binary purge is incomplete/);
+    assert.ok(existsSync(join(local, "fake-estate")), "the changed binary is kept");
+    assert.ok(!existsSync(join(local, "fake-estate-mcp")), "the unchanged one is removed");
   } finally {
     await srv.close();
     rmSync(w.root, { recursive: true, force: true });

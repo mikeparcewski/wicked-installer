@@ -101,8 +101,9 @@ export function releaseBinDir(home: string = homedir()): string {
   return join(home, ".local", "bin");
 }
 
-export function cargoBinDir(home: string = homedir()): string {
-  return join(home, ".cargo", "bin");
+/** Where `cargo install` puts binaries: $CARGO_HOME/bin, else ~/.cargo/bin. */
+export function cargoBinDir(home: string = homedir(), env: NodeJS.ProcessEnv = process.env): string {
+  return env.CARGO_HOME ? join(env.CARGO_HOME, "bin") : join(home, ".cargo", "bin");
 }
 
 function isRunnableFile(p: string, platform: NodeJS.Platform): boolean {
@@ -144,7 +145,7 @@ export function findInstalledBinary(
   }
   const local = join(releaseBinDir(home), file);
   if (isRunnableFile(local, platform)) return { path: local, source: "~/.local/bin" };
-  const cargo = join(cargoBinDir(home), file);
+  const cargo = join(cargoBinDir(home, env), file);
   if (isRunnableFile(cargo, platform)) return { path: cargo, source: "~/.cargo/bin" };
   return undefined;
 }
@@ -314,7 +315,7 @@ interface WorkerRequest {
 }
 
 export type ReleaseOutcome =
-  | { status: "installed"; tag: string; asset: string; sha256: string; binDir: string; paths: string[] }
+  | { status: "installed"; tag: string; asset: string; sha256: string; binDir: string; paths: string[]; preserved?: string[] }
   | { status: "current"; tag: string; binDir: string; paths: string[] }
   | { status: "no-asset"; tag: string; detail: string }
   | { status: "failed"; message: string };
@@ -382,7 +383,8 @@ export async function runWorker(req: WorkerRequest): Promise<ReleaseOutcome> {
   // still hashes exactly as installed — a version string alone proves nothing about the bytes.
   const dests = req.binaries.map((b) => join(req.binDir, exeName(b)));
   const stamp = readStamp(req.prefix, req.home);
-  if (stamp && stamp.tag === tag && stamp.binDir === req.binDir && req.binaries.every((b, i) => typeof stamp.files[b] === "string" && sha256Of(dests[i]) === stamp.files[b])) {
+  if (stamp && stamp.repo === req.repo && stamp.asset === asset.name && stamp.tag === tag && stamp.binDir === req.binDir &&
+      req.binaries.every((b, i) => typeof stamp.files[b] === "string" && isRunnableFile(dests[i], process.platform) && sha256Of(dests[i]) === stamp.files[b])) {
     return { status: "current", tag, binDir: req.binDir, paths: dests };
   }
 
@@ -447,7 +449,9 @@ export async function runWorker(req: WorkerRequest): Promise<ReleaseOutcome> {
         if (process.platform !== "win32") chmodSync(tmpDest, 0o755);
         staged.push({ tmp: tmpDest, dest });
       }
+      const failAt = Number(process.env.WICKED_RELEASE_TEST_FAIL_SWAP ?? "0"); // test seam: fail the Nth swap
       for (const item of staged) {
+        if (failAt > 0 && swapped.length + 1 === failAt) throw new Error("injected swap failure (test)");
         if (existsSync(item.dest)) {
           item.backup = `${item.dest}.wicked-old-${process.pid}`;
           renameSync(item.dest, item.backup);
@@ -468,13 +472,27 @@ export async function runWorker(req: WorkerRequest): Promise<ReleaseOutcome> {
       return { status: "failed", message: `could not write to ${req.binDir} (${err instanceof Error ? err.message : String(err)}); the previous binaries were restored` };
     }
     // Old copies go only after every new binary is in place (Windows may still hold one open).
-    for (const item of swapped) if (item.backup) rmSync(item.backup, { force: true });
+    // One this installer did not put there (no stamp vouches for its bytes) is KEPT, renamed,
+    // and reported: a user's own wrapper or build is never silently destroyed.
+    const preserved: string[] = [];
+    for (const item of swapped) {
+      if (!item.backup) continue;
+      const name = req.binaries[found.findIndex(([, d]) => d === item.dest)];
+      const ours = stamp !== undefined && typeof stamp.files[name] === "string" && sha256Of(item.backup) === stamp.files[name];
+      if (ours) {
+        rmSync(item.backup, { force: true });
+      } else {
+        const keep = `${item.dest}.replaced-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+        renameSync(item.backup, keep);
+        preserved.push(keep);
+      }
+    }
     const files: Record<string, string> = {};
     req.binaries.forEach((b, i) => { files[b] = sha256Of(found[i][1]) ?? ""; });
     const stampFile = stampPath(req.prefix, req.home);
     mkdirSync(join(stampFile, ".."), { recursive: true });
     writeFileSync(stampFile, `${JSON.stringify({ repo: req.repo, tag, asset: asset.name, archiveSha256: actual, binDir: req.binDir, files, installedAt: new Date().toISOString() } satisfies ReleaseStamp, null, 2)}\n`);
-    return { status: "installed", tag, asset: asset.name, sha256: actual, binDir: req.binDir, paths: found.map(([, d]) => d) };
+    return { status: "installed", tag, asset: asset.name, sha256: actual, binDir: req.binDir, paths: found.map(([, d]) => d), preserved };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -584,7 +602,11 @@ export function acquireFromRelease(
       return {
         action: "done",
         detail: "github-release (sha256 verified)",
-        notes: [`installed ${spec.binaries.join(" + ")} ${outcome.tag} (${outcome.asset}, sha256 ${outcome.sha256.slice(0, 12)}… verified against the release's ${spec.checksums ?? "SHA256SUMS"}) to ${binDir}`, ...pathNote()],
+        notes: [
+          `installed ${spec.binaries.join(" + ")} ${outcome.tag} (${outcome.asset}, sha256 ${outcome.sha256.slice(0, 12)}… verified against the release's ${spec.checksums ?? "SHA256SUMS"}) to ${binDir}`,
+          ...(outcome.preserved ?? []).map((p) => `kept the file that was there before (not installed by this installer) as ${p}`),
+          ...pathNote(),
+        ],
       };
     case "current":
       return { action: "done", detail: "github-release (already current)", notes: [`${spec.binaries.join(" + ")} ${outcome.tag} already installed in ${binDir}`, ...pathNote()] };

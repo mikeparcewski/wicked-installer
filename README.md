@@ -104,8 +104,9 @@ against the release's `SHA256SUMS`, with `wicked-estate` and `wicked-estate-mcp`
 both binaries still hash as installed. A checksum mismatch, a missing checksum file or a failed
 download installs nothing and says why, and a failed replacement restores the previous pair.
 The Claude Code and OpenCode MCP entries run that verified install, even when an older copy is
-on PATH; `install-claude.js uninstall --purge-binaries` removes only binaries that still hash
-as installed. `cargo install` is used only when the release has no archive for your
+on PATH; `node <installer>/dist/install-claude.js uninstall wicked-estate --purge-binaries` removes
+only binaries that still hash as installed (a file that was in `~/.local/bin` before the first
+release install, and was not put there by this installer, is kept as `<name>.replaced-<time>`). `cargo install` is used only when the release has no archive for your
 platform; without a Rust toolchain that case fails with the fix (install Rust from
 https://rustup.rs, then `cargo install wicked-estate wicked-estate-mcp`). When `~/.local/bin`
 is not on PATH, the Claude Code and OpenCode MCP entries use the absolute path, and the install

@@ -374,3 +374,40 @@ test("#48: a malformed record holds the update and keeps everything (nothing it 
     rmSync(sb.root, { recursive: true, force: true });
   }
 });
+
+test("#48: a skill another pack's record claims is never taken over, even when its directory is gone", () => {
+  const sb = sandbox();
+  try {
+    const a = makePack(sb.root, "0.1.0", V1);
+    assert.equal(runPack(["add", a], { home: sb.home, stubLog: sb.log }).status, 0);
+    rmSync(join(sb.skills, "acme-mini-widget-maker"), { recursive: true }); // A's dir deleted by hand
+    // Pack B ships the same skill name.
+    const bDir = join(sb.root, "pack-b");
+    mkdirSync(join(bDir, "skills", "acme-mini-widget-maker"), { recursive: true });
+    writeFileSync(join(bDir, "wicked-pack.json"), JSON.stringify({ spec: 1, name: "other-pack", vendor: "other", version: "1.0.0", skills_dir: "skills", domains: [{ name: "x" }] }));
+    writeFileSync(join(bDir, "skills", "acme-mini-widget-maker", "SKILL.md"), V1["acme-mini-widget-maker/SKILL.md"]);
+    const r = runPack(["add", bDir], { home: sb.home, stubLog: sb.log });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /foreign\s+acme-mini-widget-maker\/\s+\(installed by another pack\)/);
+  } finally {
+    rmSync(sb.root, { recursive: true, force: true });
+  }
+});
+
+test("#48: a canonical copy from a recording install is not legacy evidence — a hand copy in ~/.claude is not adopted", () => {
+  const sb = sandbox();
+  try {
+    const v1 = makePack(sb.root, "0.1.0", V1);
+    const v2 = makePack(sb.root, "0.2.0", V2);
+    // A recording install into another config dir leaves a canonical copy …
+    assert.equal(runPack(["add", v1], { home: sb.home, stubLog: sb.log, configDir: join(sb.root, "alt") }).status, 0);
+    // … and the user hand-copies one of its skills into ~/.claude.
+    cpSync(join(v1, "skills", "acme-mini"), join(sb.skills, "acme-mini"), { recursive: true });
+    const r = runPack(["add", v2], { home: sb.home, stubLog: sb.log });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /foreign\s+acme-mini\//);
+    assert.equal(readFileSync(join(sb.skills, "acme-mini", "SKILL.md"), "utf8"), V1["acme-mini/SKILL.md"]);
+  } finally {
+    rmSync(sb.root, { recursive: true, force: true });
+  }
+});

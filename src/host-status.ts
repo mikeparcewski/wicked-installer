@@ -134,30 +134,84 @@ function codexPluginEnabled(home: string, pluginId: string): boolean | undefined
   return found;
 }
 
-/** The plugin's cached payload holds a manifest at the recorded version and at least one skill. */
-function codexPayloadProblem(cache: string, version: string): string | undefined {
+/** SKILL.md files under `dir`, recursively (links not followed) — how install-codex counts the plugin's skills. */
+function countSkillFiles(dir: string): number {
+  let n = 0;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    if (name.startsWith(".")) continue;
+    const p = join(dir, name);
+    if (isDir(p)) n += countSkillFiles(p);
+    else if (name === "SKILL.md") n += 1;
+  }
+  return n;
+}
+
+/** The plugin's cached payload holds a manifest at the recorded version and every skill the marker counted. */
+function codexPayloadProblem(cache: string, version: string, recordedSkills: number): string | undefined {
   if (!isDir(cache)) return `its payload ${cache} is missing`;
   const manifest = [join(cache, ".codex-plugin", "plugin.json"), join(cache, ".claude-plugin", "plugin.json"), join(cache, "plugin.json")]
     .map(readJson)
     .find((m) => m !== undefined);
   if (!manifest) return `its payload ${cache} has no plugin manifest`;
   if (manifest.version !== version) return `its payload ${cache} is version ${String(manifest.version ?? "(none)")}, not ${version}`;
-  if (prefixedSkills(join(cache, "skills"), "") === 0) return `its payload ${cache} holds no skills`;
+  const skills = countSkillFiles(join(cache, "skills"));
+  if (skills === 0) return `its payload ${cache} holds no skills`;
+  if (skills < recordedSkills) return `its payload ${cache} holds ${skills} of the ${recordedSkills} skills installed`;
   return undefined;
 }
 
-/** OpenCode loads copied skills only from a `skills.paths` entry in its config (install-opencode registers it). */
+/** JSONC to JSON: drop line and block comments outside strings (the same rule install-opencode uses). */
+function stripJsonc(text: string): string {
+  let out = "";
+  let inString = false;
+  let inLine = false;
+  let inBlock = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    const next = text[i + 1] ?? "";
+    if (inLine) {
+      if (ch === "\n") { inLine = false; out += ch; }
+      continue;
+    }
+    if (inBlock) {
+      if (ch === "*" && next === "/") { inBlock = false; i += 1; }
+      continue;
+    }
+    if (inString) {
+      out += ch;
+      if (ch === "\\") { out += next; i += 1; }
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; out += ch; continue; }
+    if (ch === "/" && next === "/") { inLine = true; i += 1; continue; }
+    if (ch === "/" && next === "*") { inBlock = true; i += 1; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * OpenCode loads copied skills only from a `skills.paths` entry in its config (install-opencode
+ * registers it there). Parsed, not grepped: the path must be an entry of `skills.paths`.
+ */
 function opencodeSkillsPathProblem(home: string, skillsDir: string, userHome: string): string | undefined {
-  const forms = [skillsDir, JSON.stringify(skillsDir).slice(1, -1)];
-  if (skillsDir.startsWith(userHome)) forms.push(`~${skillsDir.slice(userHome.length)}`.split("\\").join("/"));
+  const target = resolve(skillsDir);
   for (const name of ["opencode.jsonc", "opencode.json"]) {
-    let raw: string;
+    let cfg: unknown;
     try {
-      raw = readFileSync(join(home, name), "utf8");
+      cfg = JSON.parse(stripJsonc(readFileSync(join(home, name), "utf8")));
     } catch {
       continue;
     }
-    if (forms.some((f) => raw.includes(f))) return undefined;
+    const paths = (cfg as { skills?: { paths?: unknown } } | null)?.skills?.paths;
+    if (Array.isArray(paths) && paths.some((p) => typeof p === "string" && resolve(expand(p, userHome)) === target)) return undefined;
   }
   return `${skillsDir} is not registered in skills.paths of ${join(home, "opencode.jsonc")} (or opencode.json), so OpenCode does not load the copied skills`;
 }
@@ -200,7 +254,8 @@ export function hostProductStatus(
   if (plugin && typeof plugin.marketplace === "string" && typeof plugin.version === "string" && typeof plugin.pluginId === "string") {
     const enabled = codexPluginEnabled(home, plugin.pluginId) ?? (plugin.enabled === false ? false : true);
     if (enabled) {
-      const problem = codexPayloadProblem(join(home, "plugins", "cache", plugin.marketplace, plugin.pluginId.split("@")[0], plugin.version), plugin.version);
+      const recordedSkills = typeof entry.assets?.skills === "number" ? entry.assets.skills : 0;
+      const problem = codexPayloadProblem(join(home, "plugins", "cache", plugin.marketplace, plugin.pluginId.split("@")[0], plugin.version), plugin.version, recordedSkills);
       return problem
         ? { ...base, state: "broken", hooks, detail: `the marker records Codex plugin ${plugin.pluginId} ${plugin.version}, but ${problem}` }
         : { ...base, state: "installed", hooks, detail: `Codex plugin ${plugin.pluginId} ${plugin.version}` };

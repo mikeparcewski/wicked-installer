@@ -2713,6 +2713,7 @@ function runUninstall(options: Options, registry: Registry): number {
     let heuristic = false;
     let anyRemoved = false;
     let failures = 0;
+    let purgeFailed = false;
 
     for (const target of resolution.targets) {
       const m = markers.get(target.dir);
@@ -2751,18 +2752,20 @@ function runUninstall(options: Options, registry: Registry): number {
     if (options.purgeBinaries) {
       const product = byId.get(id);
       // A purge that fails (or keeps a changed binary) is a failure of this uninstall, not a note.
-      if (product && !purgeProductBinary(product, options, actions, notes)) failures += 1;
+      if (product && !purgeProductBinary(product, options, actions, notes)) purgeFailed = true;
     }
-    if (failures > 0) anyFailed = true;
+    if (failures > 0 || purgeFailed) anyFailed = true;
 
     const display = byId.get(id)?.displayName ?? id;
     const report: InstallReport = {
       productId: id,
       displayName: display,
-      success: failures === 0,
+      success: failures === 0 && !purgeFailed,
       skipped: false,
       message: failures > 0
         ? `${display}: failed: ${failures} removal(s) refused — see actions; nothing refused was removed, the marker record is kept`
+        : purgeFailed
+        ? `${display}: ${options.dryRun ? "would remove" : "removed"} what this script installed, but the binary purge is incomplete — see notes; re-run \`uninstall ${id} --purge-binaries\` once fixed`
         : `${display}: ${anyRemoved ? (options.dryRun ? "would remove" : "removed") : "not installed"}`,
       assets: { skills: 0, agents: 0, commands: 0, mcp: 0, hooks: 0 },
       actions,
@@ -2840,9 +2843,10 @@ function purgeProductBinary(product: Product, options: Options, actions: Action[
       const crates = Array.isArray(product.install.crates) && product.install.crates.length > 0
         ? product.install.crates
         : single ? [single] : [];
-      const cargoCopies = crates.filter((c) => existsSync(join(homedir(), ".cargo", "bin", process.platform === "win32" ? `${c}.exe` : c)));
+      const cargoBin = process.env.CARGO_HOME ? join(process.env.CARGO_HOME, "bin") : join(homedir(), ".cargo", "bin");
+      const cargoCopies = crates.filter((c) => existsSync(join(cargoBin, process.platform === "win32" ? `${c}.exe` : c)));
       if (cargoCopies.length > 0 && !commandExists("cargo")) {
-        notes.push(`binary purge incomplete: ${cargoCopies.join(", ")} in ~/.cargo/bin were built by cargo, which is not installed — remove them by hand`);
+        notes.push(`binary purge incomplete: ${cargoCopies.join(", ")} in ${cargoBin} were built by cargo, which is not installed — remove them by hand`);
         return false;
       }
       for (const crate of cargoCopies) {
@@ -3149,7 +3153,11 @@ async function main(): Promise<void> {
   const registry = loadRegistry(options.registryPath);
   // Every positional must be a product id (or, for uninstall, a recorded `mcp-server:<key>`) —
   // also with --all, which would otherwise ignore an unknown word and act on every product.
-  const unknownIds = options.productIds.filter((id) => !registry.products.some((p) => p.id === id) && !(options.verb === "uninstall" && id.startsWith("mcp-server:")));
+  // (An uninstall of a named id the registry no longer lists stays allowed: its marker record is
+  // what is removed. Only combined with --all, or on install, is an unknown word refused.)
+  const unknownIds = options.verb === "install" || options.all
+    ? options.productIds.filter((id) => !registry.products.some((p) => p.id === id) && !(options.verb === "uninstall" && id.startsWith("mcp-server:")))
+    : [];
   if (unknownIds.length > 0) {
     console.error(`install-claude.js: unknown product or unsupported command: ${unknownIds.join(", ")} — nothing was installed, removed or changed.`);
     process.exit(1);

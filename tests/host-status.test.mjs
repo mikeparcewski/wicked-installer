@@ -56,7 +56,7 @@ test("status: garden as a Codex plugin is installed when Codex's cached payload 
   const home = fresh();
   try {
     writeMarker(home, ".codex", "codex", {
-      id: "wicked-garden", success: true, skipped: false, assets: { skills: 140 },
+      id: "wicked-garden", success: true, skipped: false, assets: { skills: 2 },
       codexPlugin: { pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: "/x", version: "12.64.0", addedByInstaller: true, enabled: true },
     });
     const cache = join(home, ".codex", "plugins", "cache", "wicked-garden", "wicked-garden", "12.64.0");
@@ -69,6 +69,11 @@ test("status: garden as a Codex plugin is installed when Codex's cached payload 
     mkdirSync(join(cache, ".codex-plugin"), { recursive: true });
     writeFileSync(join(cache, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version: "12.64.0" }));
     skill(join(cache, "skills"), "mem");
+    // One of the two installed skills is gone from Codex's copy: broken, not installed.
+    const partial = run([CLI, "status", "--offline"], home);
+    assert.equal(partial.status, 1, partial.out);
+    assert.match(partial.out, /holds 1 of the 2 skills installed/);
+    skill(join(cache, "skills"), "prove");
     const ok = run([CLI, "status", "--offline"], home);
     assert.equal(ok.status, 0, ok.out);
     assert.match(ok.out, /Codex\s+✓ installed\s+Codex plugin wicked-garden@wicked-garden 12\.64\.0/);
@@ -133,6 +138,11 @@ test("status: OpenCode skills not registered in skills.paths are broken (OpenCod
     const missing = run([CLI, "status", "--offline"], home);
     assert.equal(missing.status, 1, missing.out);
     assert.match(missing.out, /OpenCode\s+✗ broken\s+.*is not registered in skills\.paths/);
+    // The path appearing elsewhere in the file (a comment, another key) is not a registration.
+    writeFileSync(join(oc, "opencode.jsonc"), `// skills used to live in ${join(oc, "skills")}\n${JSON.stringify({ other: join(oc, "skills") })}`);
+    const elsewhere = run([CLI, "status", "--offline"], home);
+    assert.equal(elsewhere.status, 1, elsewhere.out);
+    assert.match(elsewhere.out, /is not registered in skills\.paths/);
     writeFileSync(join(oc, "opencode.jsonc"), JSON.stringify({ skills: { paths: [join(oc, "skills")] } }));
     const ok = run([CLI, "status", "--offline"], home);
     assert.equal(ok.status, 0, ok.out);
