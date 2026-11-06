@@ -81,9 +81,10 @@ each delivered product's `capabilities` (registry.json) and reports every capabi
   mem/search (optional), `wicked-crew` for the daemon. An estate binary the installer put in
   `~/.local/bin` (or `~/.cargo/bin`) off PATH still counts: the MCP entries use its absolute
   path, and the line says how to put the dir on PATH.
-- **hooks** — `n/a` on Codex, OpenCode, Pi and Antigravity: those hosts have no hook events
-  (INTERFACE.md §8.4), so no garden hook is installed there and nothing blocks on its own;
-  the evidence gate runs only when a skill calls it.
+- **hooks** — `n/a` on Codex and Antigravity, which have no hook events (INTERFACE.md §8.4),
+  and on Pi and OpenCode unless the product shipped its own adapter (`hooks/pi-extension.ts`,
+  `hooks/opencode-plugin.ts`) and the script installed it: no hook is installed there and
+  nothing blocks on its own; the evidence gate runs only when a skill calls it.
 
 An `npx` fallback is never `ready`: it fetches the package at first use, so it fails offline.
 A missing launcher whose registry answers reads `pending — only the npx fallback is available`;
@@ -98,8 +99,13 @@ on PATH but not run makes the capability `unchecked`, never `ready`), and
 wicked-estate (the knowledge and full bundles) installs from its GitHub release: the prebuilt
 archive for your platform (macOS arm64/x64, Linux x64/arm64 glibc, Windows x64), checked
 against the release's `SHA256SUMS`, with `wicked-estate` and `wicked-estate-mcp` placed in
-`~/.local/bin`. A checksum mismatch, a missing checksum file or a failed download installs
-nothing and says why. `cargo install` is used only when the release has no archive for your
+`~/.local/bin`, recorded (with each binary's sha256) in
+`~/.local/share/wicked-installer/releases/<name>.json`. A re-run downloads nothing only while
+both binaries still hash as installed. A checksum mismatch, a missing checksum file or a failed
+download installs nothing and says why, and a failed replacement restores the previous pair.
+The Claude Code and OpenCode MCP entries run that verified install, even when an older copy is
+on PATH; `install-claude.js uninstall --purge-binaries` removes only binaries that still hash
+as installed. `cargo install` is used only when the release has no archive for your
 platform; without a Rust toolchain that case fails with the fix (install Rust from
 https://rustup.rs, then `cargo install wicked-estate wicked-estate-mcp`). When `~/.local/bin`
 is not on PATH, the Claude Code and OpenCode MCP entries use the absolute path, and the install
@@ -285,8 +291,12 @@ counts as installed only when every active dir is registered.
 
 wicked-garden is installed **per host**. For Codex, OpenCode, Pi and Antigravity, `status`
 reads the host's install marker (`<home>/wicked-installer/<cli>-install.json`) and checks the
-files it names: Codex's cached plugin payload (`plugins/cache/<marketplace>/<plugin>/<version>/`)
-or the copied skill directories. A marker whose files are gone is **broken**, never installed.
+files it names: Codex's cached plugin payload (`plugins/cache/<marketplace>/<plugin>/<version>/`
+with a manifest at the recorded version and its skills; a plugin `enabled = false` in Codex's
+`config.toml` falls back to the loose skills the installer kept), or every copied skill
+directory the marker names (OpenCode also needs them registered in `skills.paths`). A marker
+whose files are gone is **broken**, never installed. The Pi, OpenCode and Antigravity scripts now
+keep earlier products' marker entries and record each copied skill directory's name.
 The product list shows the hosts garden is installed on, and `status` exits 1 when garden is
 installed on no host, or is broken (partially registered, unreadable, files gone) on any. `status` runs no `claude plugin …`
 command. Its CLI detection is read-only: the `claude --version` probe (verified to write
@@ -334,8 +344,11 @@ unchanged. `pack add --dry-run` prints the same classification (unchanged,
 missing, new, obsolete, edited, added, foreign). `pack remove` deletes only
 unchanged files it wrote, keeps and lists the rest, and says the cleanup is
 incomplete (exit 1). A pack installed by 0.8.1 or earlier (no record) is
-adopted when its skill dirs are byte-identical to the installed or incoming
-copy, and held otherwise.
+adopted only in `~/.claude` (the one place that installer wrote), only for
+skill dirs byte-identical to the pack's installed copy and claimed by no
+other pack; anything else is held. Identical bytes alone are not ownership:
+a skill you copied in by hand is never adopted or removed. A link on an
+owned file's path is never followed.
 Validation and registration are wicked-garden's own tooling — this command
 never re-implements them.
 

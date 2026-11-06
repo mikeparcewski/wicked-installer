@@ -2256,6 +2256,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const registry = loadRegistry(options.registryPath);
+  // Every positional must be a product id — also with --all, which would otherwise ignore an
+  // unknown word (a mistyped or unsupported verb such as `list`) and install every product.
+  const unknownIds = options.productIds.filter((id) => !registry.products.some((p) => p.id === id));
+  if (unknownIds.length > 0) {
+    console.error(`install-codex.js: unknown product or unsupported command: ${unknownIds.join(", ")} — nothing was installed or changed.`);
+    process.exit(1);
+  }
   const products = resolveProducts(registry, options.productIds, options.all);
 
   if (!commandExists("codex") && !existsSync(options.codexHome)) {

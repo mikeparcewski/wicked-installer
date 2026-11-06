@@ -24,9 +24,11 @@ import {
   chmodSync,
   constants as fsConstants,
   copyFileSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -147,6 +149,26 @@ export function findInstalledBinary(
   return undefined;
 }
 
+/** Same file on disk (resolved through links)? */
+export function sameFile(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return a === b;
+  }
+}
+
+/**
+ * The command an MCP entry should carry for a bare binary name: the bare name when PATH already
+ * resolves it to the preferred binary (resolveMcpBinary), else that binary's absolute path.
+ */
+export function mcpCommandFor(name: string): string {
+  const preferred = resolveMcpBinary(name);
+  if (!preferred) return name;
+  const onPath = findInstalledBinary(name);
+  return onPath && onPath.source === "PATH" && sameFile(onPath.path, preferred.path) ? name : preferred.path;
+}
+
 /** Is `dir` one of the PATH entries? (Compared by resolved path when both exist.) */
 export function dirOnPath(dir: string, env: NodeJS.ProcessEnv = process.env): boolean {
   const norm = (d: string): string => {
@@ -168,10 +190,119 @@ export function pathFix(dir: string, platform: NodeJS.Platform = process.platfor
 }
 
 // ---------------------------------------------------------------------------
+// The release stamp: what this installer last installed from a release, with the sha256 of each
+// installed binary. It is the ownership + integrity evidence for convergence ("already
+// current" only when every installed file still hashes as installed), for MCP wiring (prefer
+// the verified release binary over an older copy on PATH) and for --purge-binaries (remove only
+// files that are still byte-identical to what was installed).
+// ---------------------------------------------------------------------------
+
+export interface ReleaseStamp {
+  repo: string;
+  tag: string;
+  asset: string;
+  archiveSha256: string;
+  binDir: string;
+  /** binary name → sha256 of the installed file. */
+  files: Record<string, string>;
+  installedAt: string;
+}
+
+export function stampPath(prefix: string, home: string = homedir()): string {
+  return join(home, ".local", "share", "wicked-installer", "releases", `${prefix}.json`);
+}
+
+export function readStamp(prefix: string, home?: string): ReleaseStamp | undefined {
+  try {
+    const v = JSON.parse(readFileSync(stampPath(prefix, home), "utf8")) as ReleaseStamp;
+    if (!v || typeof v !== "object" || typeof v.tag !== "string" || typeof v.binDir !== "string" || !v.files || typeof v.files !== "object") return undefined;
+    return v;
+  } catch {
+    return undefined;
+  }
+}
+
+function sha256Of(p: string): string | undefined {
+  try {
+    return createHash("sha256").update(readFileSync(p)).digest("hex");
+  } catch {
+    return undefined;
+  }
+}
+
+/** The stamped binary `name` at its recorded path, only while it still hashes as installed. */
+function stampedBinary(name: string, home: string, platform: NodeJS.Platform): string | undefined {
+  // The stamp is per release prefix; look through every stamp for this binary name.
+  const dir = join(home, ".local", "share", "wicked-installer", "releases");
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return undefined;
+  }
+  for (const f of files) {
+    const stamp = readStamp(f.slice(0, -5), home);
+    const digest = stamp?.files[name];
+    if (!stamp || typeof digest !== "string") continue;
+    const p = join(stamp.binDir, exeName(name, platform));
+    if (isRunnableFile(p, platform) && sha256Of(p) === digest) return p;
+  }
+  return undefined;
+}
+
+/** Binaries acquired by THIS process (the script that just installed them wires them). */
+const acquiredNow = new Map<string, string>();
+
+/**
+ * The binary an MCP entry should run: one this run just installed, else the installer's verified
+ * release install (stamp + matching hash), else PATH, ~/.local/bin, ~/.cargo/bin. So an older
+ * cargo copy on PATH never shadows the release the installer put in ~/.local/bin.
+ */
+export function resolveMcpBinary(
+  name: string,
+  opts: { env?: NodeJS.ProcessEnv; home?: string; platform?: NodeJS.Platform } = {},
+): FoundBinary | undefined {
+  const now = acquiredNow.get(name);
+  if (now && existsSync(now)) return { path: now, source: "this install" };
+  const stamped = stampedBinary(name, opts.home ?? homedir(), opts.platform ?? process.platform);
+  if (stamped) return { path: stamped, source: "release install" };
+  return findInstalledBinary(name, opts);
+}
+
+/**
+ * `--purge-binaries` for a release-installed product: remove each stamped binary only while it
+ * is byte-identical to what was installed; anything else is kept and named. Returns notes.
+ */
+export function purgeReleaseBinaries(spec: ReleaseSpec, opts: { dryRun: boolean; home?: string }): { notes: string[]; kept: string[] } {
+  const prefix = spec.assetPrefix ?? spec.githubRepo.split("/").pop() ?? spec.githubRepo;
+  const stamp = readStamp(prefix, opts.home);
+  const notes: string[] = [];
+  const kept: string[] = [];
+  if (!stamp) return { notes: [`no release install of ${spec.binaries.join(" + ")} is recorded; nothing removed from ~/.local/bin`], kept };
+  for (const bin of spec.binaries) {
+    const p = join(stamp.binDir, exeName(bin));
+    if (!existsSync(p)) continue;
+    if (sha256Of(p) !== stamp.files[bin]) {
+      kept.push(p);
+      notes.push(`kept ${p}: it is not the file this installer installed (changed since)`);
+      continue;
+    }
+    if (opts.dryRun) notes.push(`would remove ${p}`);
+    else {
+      rmSync(p, { force: true });
+      notes.push(`removed ${p}`);
+    }
+  }
+  if (!opts.dryRun && kept.length === 0) rmSync(stampPath(prefix, opts.home), { force: true });
+  return { notes, kept };
+}
+
+// ---------------------------------------------------------------------------
 // The worker (async; runs in a child process)
 // ---------------------------------------------------------------------------
 
 interface WorkerRequest {
+  home: string;
   repo: string;
   binaries: string[];
   prefix: string;
@@ -224,10 +355,6 @@ function findFile(dir: string, file: string): string | undefined {
   return undefined;
 }
 
-function versionOf(bin: string): string {
-  const res = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
-  return res.status === 0 ? `${res.stdout ?? ""}`.trim() : "";
-}
 
 export async function runWorker(req: WorkerRequest): Promise<ReleaseOutcome> {
   const releaseUrl = req.version
@@ -251,10 +378,11 @@ export async function runWorker(req: WorkerRequest): Promise<ReleaseOutcome> {
     return { status: "no-asset", tag, detail: `release ${tag || "(untagged)"} of ${req.repo} has no ${req.triple} archive` };
   }
 
-  // Already converged? Every binary present, and the primary one reports the release version.
-  const version = tag.replace(/^v/, "");
+  // Already converged? Only when the stamp records THIS release in this dir and every binary
+  // still hashes exactly as installed — a version string alone proves nothing about the bytes.
   const dests = req.binaries.map((b) => join(req.binDir, exeName(b)));
-  if (version && dests.every((d) => isRunnableFile(d, process.platform)) && versionOf(dests[0]).split(/\s+/).includes(version)) {
+  const stamp = readStamp(req.prefix, req.home);
+  if (stamp && stamp.tag === tag && stamp.binDir === req.binDir && req.binaries.every((b, i) => typeof stamp.files[b] === "string" && sha256Of(dests[i]) === stamp.files[b])) {
     return { status: "current", tag, binDir: req.binDir, paths: dests };
   }
 
@@ -306,21 +434,46 @@ export async function runWorker(req: WorkerRequest): Promise<ReleaseOutcome> {
     }
 
     mkdirSync(req.binDir, { recursive: true });
-    // Stage every binary next to its destination first, then rename: a failure while staging
-    // leaves the previous binaries untouched, and each rename replaces its file atomically.
-    const staged: Array<[string, string]> = [];
+    // All or nothing: stage every binary next to its destination, move each existing file aside,
+    // then rename the new ones in. Any failure restores what was there (a half-updated pair —
+    // a new CLI next to an old MCP server — is never left behind).
+    const staged: Array<{ tmp: string; dest: string; backup?: string }> = [];
+    const swapped: Array<{ tmp: string; dest: string; backup?: string }> = [];
     try {
       for (const [src, dest] of found) {
+        if (existsSync(dest) && !lstatSync(dest).isFile()) throw new Error(`${dest} exists and is not a file`);
         const tmpDest = `${dest}.wicked-tmp-${process.pid}`;
         copyFileSync(src, tmpDest);
         if (process.platform !== "win32") chmodSync(tmpDest, 0o755);
-        staged.push([tmpDest, dest]);
+        staged.push({ tmp: tmpDest, dest });
       }
-      for (const [tmpDest, dest] of staged) renameSync(tmpDest, dest);
+      for (const item of staged) {
+        if (existsSync(item.dest)) {
+          item.backup = `${item.dest}.wicked-old-${process.pid}`;
+          renameSync(item.dest, item.backup);
+        }
+        swapped.push(item);
+        renameSync(item.tmp, item.dest);
+      }
     } catch (err) {
-      for (const [tmpDest] of staged) rmSync(tmpDest, { force: true });
-      return { status: "failed", message: `could not write to ${req.binDir} (${err instanceof Error ? err.message : String(err)})` };
+      for (const item of swapped.reverse()) {
+        try {
+          if (item.backup) renameSync(item.backup, item.dest);
+          else rmSync(item.dest, { force: true });
+        } catch {
+          /* best effort: report below */
+        }
+      }
+      for (const item of staged) rmSync(item.tmp, { force: true });
+      return { status: "failed", message: `could not write to ${req.binDir} (${err instanceof Error ? err.message : String(err)}); the previous binaries were restored` };
     }
+    // Old copies go only after every new binary is in place (Windows may still hold one open).
+    for (const item of swapped) if (item.backup) rmSync(item.backup, { force: true });
+    const files: Record<string, string> = {};
+    req.binaries.forEach((b, i) => { files[b] = sha256Of(found[i][1]) ?? ""; });
+    const stampFile = stampPath(req.prefix, req.home);
+    mkdirSync(join(stampFile, ".."), { recursive: true });
+    writeFileSync(stampFile, `${JSON.stringify({ repo: req.repo, tag, asset: asset.name, archiveSha256: actual, binDir: req.binDir, files, installedAt: new Date().toISOString() } satisfies ReleaseStamp, null, 2)}\n`);
     return { status: "installed", tag, asset: asset.name, sha256: actual, binDir: req.binDir, paths: found.map(([, d]) => d) };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -336,10 +489,11 @@ const THIS_FILE = fileURLToPath(import.meta.url);
 /** Download + verify + install, synchronously (a child node process does the async work). */
 export function acquireRelease(
   spec: ReleaseSpec,
-  opts: { triple: string; version?: string; binDir?: string; env?: NodeJS.ProcessEnv },
+  opts: { triple: string; version?: string; binDir?: string; env?: NodeJS.ProcessEnv; home?: string },
 ): ReleaseOutcome {
   const env = opts.env ?? process.env;
   const req: WorkerRequest = {
+    home: opts.home ?? homedir(),
     repo: spec.githubRepo,
     binaries: spec.binaries,
     prefix: spec.assetPrefix ?? spec.githubRepo.split("/").pop() ?? spec.githubRepo,
@@ -418,7 +572,10 @@ export function acquireFromRelease(
   }
 
   ctx.log(`  fetching ${spec.binaries.join(" + ")} from the ${spec.githubRepo} ${where} (${triple})...`);
-  const outcome = acquireRelease(spec, { triple, version: install.version, binDir, env });
+  const outcome = acquireRelease(spec, { triple, version: install.version, binDir, env, home: ctx.home });
+  if (outcome.status === "installed" || outcome.status === "current") {
+    spec.binaries.forEach((b, i) => { if (outcome.paths[i]) acquiredNow.set(b, outcome.paths[i]); });
+  }
   const pathNote = (): string[] => dirOnPath(binDir, env)
     ? []
     : [`${binDir} is not on PATH: the MCP entries use the absolute path, but to run ${spec.binaries[0]} from a shell, ${pathFix(binDir)}`];

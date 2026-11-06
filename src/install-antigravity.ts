@@ -600,6 +600,7 @@ function copySkills(product: Product, root: string, options: Options): number {
     const dest = join(options.geminiHome, "config", "skills", sanitizePathPart(nextName));
     copyTree(skillRoot, dest, options);
     rewriteCopiedSkillName(dest, originalName, nextName, options);
+    recordCopiedSkill(product.id, sanitizePathPart(nextName));
     count += 1;
   }
 
@@ -612,19 +613,57 @@ function copyAntigravityAssets(product: Product, root: string, options: Options)
   };
 }
 
+/** Skill dir names copied per product in this run — recorded in the marker so `status` can check each one. */
+const copiedSkills = new Map<string, string[]>();
+function recordCopiedSkill(productId: string, name: string): void {
+  const list = copiedSkills.get(productId) ?? [];
+  if (!list.includes(name)) list.push(name);
+  copiedSkills.set(productId, list);
+}
+
+interface MarkerEntry { id: string; [key: string]: unknown }
+
+/** Entries an earlier run recorded (an unreadable marker yields none — it is then rewritten from this run). */
+function previousMarkerEntries(markerPath: string): MarkerEntry[] {
+  try {
+    const parsed = JSON.parse(readFileSync(markerPath, "utf8")) as { products?: unknown };
+    return Array.isArray(parsed?.products)
+      ? (parsed.products as unknown[]).filter((p): p is MarkerEntry => !!p && typeof p === "object" && typeof (p as MarkerEntry).id === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function writeInstallMarker(options: Options, reports: InstallReport[]): void {
   const markerDir = join(options.geminiHome, "wicked-installer");
   const markerPath = join(markerDir, "antigravity-install.json");
-  const body = {
-    installedAt: new Date().toISOString(),
-    geminiHome: options.geminiHome,
-    products: reports.map((report) => ({
+  // Entries for products this run did not touch are KEPT: a run for one product must not erase
+  // what an earlier run recorded about another (`status` reads this inventory). A failed run
+  // keeps the product's earlier entry and notes the failure beside it.
+  const previous = previousMarkerEntries(markerPath);
+  const touched = new Set(reports.map((r) => r.productId));
+  const products: MarkerEntry[] = previous.filter((p) => !touched.has(p.id));
+  for (const report of reports) {
+    const prior = previous.find((p) => p.id === report.productId);
+    if (!report.success && prior) {
+      products.push({ ...prior, lastFailure: { at: new Date().toISOString(), message: report.message } });
+      continue;
+    }
+    const skills = copiedSkills.get(report.productId);
+    products.push({
       id: report.productId,
       success: report.success,
       skipped: report.skipped,
       assets: report.assets,
       notes: report.notes,
-    })),
+      ...(skills && skills.length > 0 ? { skills } : {}),
+    });
+  }
+  const body = {
+    installedAt: new Date().toISOString(),
+    geminiHome: options.geminiHome,
+    products,
   };
 
   if (options.dryRun) {
@@ -825,6 +864,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const registry = loadRegistry(options.registryPath);
+  // Every positional must be a product id — also with --all, which would otherwise ignore an
+  // unknown word (a mistyped or unsupported verb such as `list`) and install every product.
+  const unknownIds = options.productIds.filter((id) => !registry.products.some((p) => p.id === id));
+  if (unknownIds.length > 0) {
+    console.error(`install-antigravity.js: unknown product or unsupported command: ${unknownIds.join(", ")} — nothing was installed or changed.`);
+    process.exit(1);
+  }
   const products = resolveProducts(registry, options.productIds, options.all);
 
   if (!commandExists("agy") && !existsSync(options.geminiHome)) {

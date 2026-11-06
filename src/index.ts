@@ -61,6 +61,8 @@ interface ScriptReportEntry {
   message?: string;
   /** What was delivered (EXP-01): registered | copied | acquired | manual. Absent from older scripts. */
   delivery?: string;
+  /** Asset counts (`hooks` > 0 ⇒ the script installed the product's own hook adapter). */
+  assets?: { hooks?: number };
 }
 
 interface ScriptReport {
@@ -280,8 +282,10 @@ export async function dispatchToClis(
   }
 
   const hadFailure = renderSummary(results, productIds);
+  const hookAdapter = (host: string, productId: string): boolean =>
+    results.some((r) => r.cli === host && r.entries.some((e) => e.productId === productId && typeof e.assets?.hooks === "number" && e.assets.hooks > 0));
   const pending = renderReadiness(
-    readinessFor(productIds, results.filter((r) => r.present).map((r) => r.cli), flags),
+    readinessFor(productIds, results.filter((r) => r.present).map((r) => r.cli), flags, hookAdapter),
     flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):",
   );
 
@@ -326,9 +330,9 @@ export function renderReadiness(rows: CapabilityReadiness[], heading: string): n
 }
 
 /** Script slugs → registry `hosts`; `undefined` ⇒ every capability applies. */
-function readinessFor(productIds: string[], hosts: string[] | undefined, flags: DispatchFlags): CapabilityReadiness[] {
+function readinessFor(productIds: string[], hosts: string[] | undefined, flags: DispatchFlags, hookAdapter?: (host: string, productId: string) => boolean): CapabilityReadiness[] {
   const products = productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined);
-  return preflight(products, { hosts, offline: flags.offline === true, probeOnly: flags.dryRun });
+  return preflight(products, { hosts, offline: flags.offline === true, probeOnly: flags.dryRun, hookAdapter });
 }
 
 interface Cell {
@@ -675,12 +679,15 @@ const STATE_LABEL: Record<RegistrationState, string> = {
  * (unreadable > absent > copy-only > partial > registered); the caller exits non-zero unless it
  * is `registered` — i.e. unless every active dir is registered.
  */
-function renderPluginRegistration(flags: DispatchFlags): RegistrationState | undefined {
+function renderPluginRegistration(flags: DispatchFlags): { worst: RegistrationState; anyBroken: boolean } | undefined {
   const garden = getProduct("wicked-garden");
   if (!garden || garden.type !== "claude-plugin") return undefined;
   const spec = claudePluginSpec(garden);
   const { dirs, origin } = resolveClaudeConfigDirs({ homeFlags: flags.claudeHomes });
   let worst: RegistrationState = "registered";
+  // Broken in ANY dir (partial / unreadable) — tracked on its own: an absent dir ranks below a
+  // partial one, so the worst-state label alone would hide the broken dir.
+  let anyBroken = false;
 
   console.log(chalk.bold(`\nClaude Code plugin registration (${spec.pluginId}):`));
   console.log(chalk.dim(`  config dir(s) from ${describeOrigin(origin)}; registration read from disk — no \`claude plugin\` command is run`));
@@ -689,6 +696,7 @@ function renderPluginRegistration(flags: DispatchFlags): RegistrationState | und
     const reg = readRegistration(dir, spec);
     const verdict = registrationVerdict(reg);
     if (STATE_RANK[verdict.state] < STATE_RANK[worst]) worst = verdict.state;
+    if (verdict.state === "partial" || verdict.state === "unreadable") anyBroken = true;
     console.log(`  ${chalk.bold(dir)}${existsSync(dir) ? "" : chalk.dim("  (does not exist)")}`);
     console.log(`    marketplace: ${reg.marketplace ? chalk.green(`${spec.marketplaceName} ← ${reg.marketplace.source}`) : chalk.dim("not registered")}`);
     console.log(`    installed:   ${reg.installed.length > 0 ? chalk.green(reg.installed.map((i) => `${i.version || "(no version)"} (${i.scope})`).join(", ")) : chalk.dim("not installed")}`);
@@ -722,7 +730,7 @@ function renderPluginRegistration(flags: DispatchFlags): RegistrationState | und
   const label = STATE_LABEL[worst];
   const colored = worst === "registered" ? chalk.green(label) : worst === "copy-only" ? chalk.yellow(label) : chalk.red(label);
   console.log(`  overall:     ${colored} across ${dirs.length} config dir(s)${worst === "registered" ? "" : chalk.dim("  (Claude Code is registered only when every active config dir is)")}`);
-  return worst;
+  return { worst, anyBroken };
 }
 
 /**
@@ -810,17 +818,24 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
   // with an identity marker, §11.2) — the same signal the interactive install uses.
   const hosts = discoverCliScripts(__dirname).filter((s) => detectCli(s.cli).detected).map((s) => s.cli);
   renderReadiness(
-    preflight(listProducts(false), { hosts, offline: flags.offline === true, probeOnly: flags.dryRun }),
+    preflight(listProducts(false), {
+      hosts,
+      offline: flags.offline === true,
+      probeOnly: flags.dryRun,
+      // Hook adapters a host's script recorded installing (Pi / OpenCode), read from its marker.
+      hookAdapter: (host, productId) => (hostProductStatus(productId, host)?.hooks ?? 0) > 0,
+    }),
     `Capability readiness (for detected CLIs: ${hosts.length > 0 ? hosts.join(", ") : "none"}):`,
   );
 
-  const aggregate = renderPluginRegistration(flags);
+  const claude = renderPluginRegistration(flags);
   renderOtherHosts(otherHosts);
-  if (aggregate === undefined) return;
+  if (claude === undefined) return;
+  const aggregate = claude.worst;
   // Exit 1 when garden is installed on NO host, or when any host's install is broken (a
   // partial / unreadable Claude registration, or a host marker whose files are gone). A host it
   // was simply never installed on is not a failure.
-  const claudeBroken = aggregate === "partial" || aggregate === "unreadable";
+  const claudeBroken = claude.anyBroken;
   const otherBroken = otherHosts.filter((h) => h.state === "broken" || h.state === "unreadable");
   const installedOn = [...(aggregate === "registered" ? ["Claude Code"] : []), ...gardenElsewhere];
   const verdict = installedOn.length === 0
@@ -841,7 +856,7 @@ function printHelp(): void {
     "  wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)",
     "  wicked-installer mcp upsert|remove <key>  Write/remove one MCP server in your CLIs' MCP configs (`mcp --help`)",
     "  wicked-installer cleanup-legacy  Remove legacy unregistered wicked-garden copies whose ownership is proven",
-    "  wicked-installer status          Show detected CLIs, installed products, and wicked-garden's Claude Code registration",
+    "  wicked-installer status          Show detected CLIs, installed products, readiness, and where wicked-garden is installed (per host)",
     "  wicked-installer --version       Show version",
     "",
     "Flags:",

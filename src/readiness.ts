@@ -33,6 +33,9 @@ export type ReadinessState = "ready" | "pending" | "unchecked" | "n/a";
  */
 export const HOOK_HOSTS: ReadonlySet<string> = new Set(["claude"]);
 
+/** Hosts with no hook events at all. Pi and OpenCode have none the installer wires either, but take a product's own adapter (hooks/pi-extension.ts, hooks/opencode-plugin.ts) when it ships one. */
+const ADAPTER_HOSTS: ReadonlySet<string> = new Set(["pi", "opencode"]);
+
 const HOST_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "Pi", antigravity: "Antigravity" };
 
 function hostName(host: string): string {
@@ -72,6 +75,8 @@ export interface PreflightOptions {
   probeOnly?: boolean;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
+  /** Did the host's script install a hook adapter for the product (its report / marker `assets.hooks` > 0)? */
+  hookAdapter?: (host: string, productId: string) => boolean;
   /** Seam for tests; default spawns synchronously with a timeout. */
   spawn?: (bin: string, args: string[]) => { status: number | null; stdout: string; stderr: string; error?: string };
 }
@@ -250,10 +255,15 @@ export function preflight(products: Product[], opts: PreflightOptions = {}): Cap
     if (product.shipsHooks === true && Array.isArray(opts.hosts)) {
       for (const host of opts.hosts) {
         if (HOOK_HOSTS.has(host)) continue;
+        const adapterHost = ADAPTER_HOSTS.has(host);
+        if (adapterHost && opts.hookAdapter?.(host, product.id) === true) continue; // the product's own adapter is installed
+        const why = adapterHost
+          ? `no ${product.id} hook adapter was installed for ${hostName(host)} (the installer wires no ${hostName(host)} hook events)`
+          : `${hostName(host)} has no hook events, so no ${product.id} hook was installed`;
         out.push({
           productId: product.id,
           capability: `hooks:${host}`,
-          label: `hooks — ${hostName(host)} has no hook events, so no ${product.id} hook was installed and nothing blocks on its own there: the evidence gate runs only when a skill calls it`,
+          label: `hooks — ${why}; nothing blocks on its own there: the evidence gate runs only when a skill calls it`,
           optional: true,
           state: "n/a",
           needs: [],

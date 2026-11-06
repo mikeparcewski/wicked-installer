@@ -257,3 +257,95 @@ test("release: Claude Code's MCP entry uses the absolute ~/.local/bin path when 
     rmSync(w.root, { recursive: true, force: true });
   }
 });
+
+test("unit: target triples and checksum parsing are platform-independent", async () => {
+  const { releaseTriple: triple, parseChecksums } = await import("../dist/release-binary.js");
+  assert.equal(triple("darwin", "arm64"), "aarch64-apple-darwin");
+  assert.equal(triple("darwin", "x64"), "x86_64-apple-darwin");
+  assert.equal(triple("win32", "x64"), "x86_64-pc-windows-msvc");
+  assert.equal(triple("linux", "x64", true), "x86_64-unknown-linux-gnu");
+  assert.equal(triple("linux", "arm64", true), "aarch64-unknown-linux-gnu");
+  assert.equal(triple("linux", "x64", false), undefined, "musl gets cargo, not a glibc binary");
+  assert.equal(triple("win32", "arm64"), undefined);
+  const sums = parseChecksums(`${"a".repeat(64)}  one.tar.gz\n${"B".repeat(64)} *two.zip\r\nnot a line\n`);
+  assert.equal(sums.get("one.tar.gz"), "a".repeat(64));
+  assert.equal(sums.get("two.zip"), "b".repeat(64));
+  assert.equal(sums.size, 2);
+});
+
+test("release: 'already current' needs every binary to hash as installed — a changed MCP binary is re-downloaded", { skip: skip || !TRIPLE }, async () => {
+  const w = world();
+  const srv = await serve(w);
+  try {
+    assert.equal((await runAsync(piArgs(w), w, srv.base)).status, 0);
+    const mcp = join(w.home, ".local", "bin", "fake-estate-mcp");
+    writeFileSync(mcp, "#!/bin/sh\necho fake-estate-mcp 1.0.0\n"); // stale / tampered, same name
+    const before = srv.hits.length;
+    const again = await runAsync(piArgs(w), w, srv.base);
+    assert.equal(again.status, 0, again.out);
+    assert.doesNotMatch(again.out, /already installed/);
+    assert.ok(srv.hits.slice(before).some((h) => h.startsWith("/dl/fake-estate-9.9.9")), "downloaded and verified again");
+    assert.match(spawnSync(mcp, [], { encoding: "utf8" }).stdout, /9\.9\.9/, "repaired");
+  } finally {
+    await srv.close();
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});
+
+test("release: a failed replacement restores the previous binaries (never a half-updated pair)", { skip: skip || !TRIPLE }, async () => {
+  const w = world();
+  const srv = await serve(w);
+  try {
+    const local = join(w.home, ".local", "bin");
+    mkdirSync(join(local, "fake-estate-mcp"), { recursive: true }); // the second destination cannot be replaced
+    writeFileSync(join(local, "fake-estate"), "#!/bin/sh\necho old\n");
+    chmodSync(join(local, "fake-estate"), 0o755);
+    const r = await runAsync(piArgs(w), w, srv.base);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /could not write to .*; the previous binaries were restored/);
+    assert.equal(readFileSync(join(local, "fake-estate"), "utf8"), "#!/bin/sh\necho old\n", "the first binary was not left updated");
+  } finally {
+    await srv.close();
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});
+
+test("release: MCP wiring prefers the verified release install over an older copy on PATH", { skip: skip || !TRIPLE }, async () => {
+  const w = world();
+  const srv = await serve(w);
+  try {
+    assert.equal((await runAsync(piArgs(w), w, srv.base)).status, 0);
+    // An older cargo build that IS on PATH.
+    writeFileSync(join(w.bin, "fake-estate-mcp"), "#!/bin/sh\necho old\n");
+    chmodSync(join(w.bin, "fake-estate-mcp"), 0o755);
+    const reg = { ...REGISTRY, products: [{ ...REGISTRY.products[0], mcp: { "fake-estate": { command: "fake-estate-mcp", args: [] } } }] };
+    writeFileSync(w.reg, JSON.stringify(reg));
+    const cfg = join(w.home, "cfg");
+    const r = runSync([join(ROOT, "dist", "install-claude.js"), "fake-estate", "--registry", w.reg, "--claude-home", cfg, "--skip-binaries"], w);
+    assert.equal(r.status, 0, r.out);
+    const state = JSON.parse(readFileSync(join(cfg, ".claude.json"), "utf8"));
+    assert.equal(state.mcpServers["fake-estate"].command, join(w.home, ".local", "bin", "fake-estate-mcp"));
+  } finally {
+    await srv.close();
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});
+
+test("release: --purge-binaries removes the release binaries it installed and keeps a changed one", { skip: skip || !TRIPLE }, async () => {
+  const w = world();
+  const srv = await serve(w);
+  try {
+    assert.equal((await runAsync(piArgs(w), w, srv.base)).status, 0);
+    const { purgeReleaseBinaries } = await import("../dist/release-binary.js");
+    const spec = REGISTRY.products[0].install.release;
+    const local = join(w.home, ".local", "bin");
+    writeFileSync(join(local, "fake-estate"), "#!/bin/sh\necho mine\n");
+    const out = purgeReleaseBinaries(spec, { dryRun: false, home: w.home });
+    assert.deepEqual(out.kept, [join(local, "fake-estate")]);
+    assert.ok(existsSync(join(local, "fake-estate")), "a changed binary is kept");
+    assert.ok(!existsSync(join(local, "fake-estate-mcp")), "the installed, unchanged one is removed");
+  } finally {
+    await srv.close();
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});

@@ -21,7 +21,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isInstallable, retiredRefusal } from "./types.js";
-import { acquireFromRelease, cargoMissingMessage, findInstalledBinary } from "./release-binary.js";
+import { acquireFromRelease, cargoMissingMessage, mcpCommandFor, purgeReleaseBinaries } from "./release-binary.js";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 
@@ -1529,13 +1529,11 @@ function wireMcp(
 
   for (const name of Object.keys(block)) {
     const desired = expandMcpSpec(block[name]);
-    // A bare command that is not on PATH but sits where acquisition put it (~/.local/bin for a
-    // release install, ~/.cargo/bin for a cargo build) is written as that absolute path, so
-    // Claude Code can start the server without the user editing PATH first.
-    if (!desired.command.includes("/") && !desired.command.includes("\\") && !commandExists(desired.command)) {
-      const found = findInstalledBinary(desired.command);
-      if (found) desired.command = found.path;
-    }
+    // A bare command stays bare only when PATH already resolves it to the binary the installer
+    // prefers (the one just installed, or its verified release install); otherwise the entry
+    // carries that binary's absolute path — so Claude Code starts the release the installer put
+    // in ~/.local/bin, not an older cargo copy on PATH, and needs no PATH edit.
+    if (!desired.command.includes("/") && !desired.command.includes("\\")) desired.command = mcpCommandFor(desired.command);
     const pointer = `/mcpServers/${encodePointerToken(name)}`;
     const actionTarget = `${fileMarker}${pointer}`;
     const existing = serverMap[name];
@@ -2750,12 +2748,12 @@ function runUninstall(options: Options, registry: Registry): number {
       anyRemoved = true;
       dirty.add(target.dir);
     }
-    if (failures > 0) anyFailed = true;
-
     if (options.purgeBinaries) {
       const product = byId.get(id);
-      if (product) purgeProductBinary(product, options, actions, notes);
+      // A purge that fails (or keeps a changed binary) is a failure of this uninstall, not a note.
+      if (product && !purgeProductBinary(product, options, actions, notes)) failures += 1;
     }
+    if (failures > 0) anyFailed = true;
 
     const display = byId.get(id)?.displayName ?? id;
     const report: InstallReport = {
@@ -2823,24 +2821,40 @@ function runUninstall(options: Options, registry: Registry): number {
   return anyFailed ? 1 : 0;
 }
 
-function purgeProductBinary(product: Product, options: Options, actions: Action[], notes: string[]): void {
+/** Returns false when the purge failed or had to keep a binary it could not prove it installed. */
+function purgeProductBinary(product: Product, options: Options, actions: Action[], notes: string[]): boolean {
   try {
     if (product.install.type === "npm-global" && product.install.package) {
       run("npm", ["rm", "-g", product.install.package], options);
       actions.push({ kind: "remove", target: product.install.package, result: options.dryRun ? "planned" : "ok", detail: "npm rm -g" });
     } else if (product.install.type === "cargo") {
+      // A release install (~/.local/bin): only files still byte-identical to what was installed.
+      if (product.install.release) {
+        const purged = purgeReleaseBinaries(product.install.release, { dryRun: options.dryRun === true });
+        notes.push(...purged.notes);
+        for (const p of purged.kept) actions.push({ kind: "remove", target: p, result: "skipped", detail: "changed since install — kept" });
+        if (purged.kept.length > 0) return false;
+      }
+      // A cargo build (~/.cargo/bin): only when cargo is here to remove it.
       const single = product.install.crate ?? product.install.package;
       const crates = Array.isArray(product.install.crates) && product.install.crates.length > 0
         ? product.install.crates
         : single ? [single] : [];
-      for (const crate of crates) {
+      const cargoCopies = crates.filter((c) => existsSync(join(homedir(), ".cargo", "bin", process.platform === "win32" ? `${c}.exe` : c)));
+      if (cargoCopies.length > 0 && !commandExists("cargo")) {
+        notes.push(`binary purge incomplete: ${cargoCopies.join(", ")} in ~/.cargo/bin were built by cargo, which is not installed — remove them by hand`);
+        return false;
+      }
+      for (const crate of cargoCopies) {
         run("cargo", ["uninstall", crate], options);
         actions.push({ kind: "remove", target: crate, result: options.dryRun ? "planned" : "ok", detail: "cargo uninstall" });
       }
     }
     notes.push("--purge-binaries removed the machine-scoped binary; other CLIs referencing it will lose it too");
+    return true;
   } catch (err) {
     notes.push(`binary purge failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
   }
 }
 
@@ -3133,6 +3147,13 @@ async function main(): Promise<void> {
   }
   const options = parseArgs(process.argv.slice(2));
   const registry = loadRegistry(options.registryPath);
+  // Every positional must be a product id (or, for uninstall, a recorded `mcp-server:<key>`) —
+  // also with --all, which would otherwise ignore an unknown word and act on every product.
+  const unknownIds = options.productIds.filter((id) => !registry.products.some((p) => p.id === id) && !(options.verb === "uninstall" && id.startsWith("mcp-server:")));
+  if (unknownIds.length > 0) {
+    console.error(`install-claude.js: unknown product or unsupported command: ${unknownIds.join(", ")} — nothing was installed, removed or changed.`);
+    process.exit(1);
+  }
 
   let code = 0;
   if (options.verb === "install") code = runInstall(options, registry);

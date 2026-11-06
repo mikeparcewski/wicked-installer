@@ -28,6 +28,8 @@ export interface HostProductStatus {
   marker: string;
   state: HostInstallState;
   detail: string;
+  /** Hook adapters the host's script installed for the product (marker `assets.hooks`). */
+  hooks?: number;
 }
 
 interface HostSpec {
@@ -68,7 +70,7 @@ interface MarkerEntry {
   id?: unknown;
   success?: unknown;
   skipped?: unknown;
-  assets?: { skills?: unknown };
+  assets?: { skills?: unknown; hooks?: unknown };
   skills?: unknown;
   codexPlugin?: { pluginId?: unknown; marketplace?: unknown; version?: unknown; enabled?: unknown };
   lastFailure?: { message?: unknown };
@@ -82,16 +84,82 @@ function isDir(p: string): boolean {
   }
 }
 
-/** Skill dirs (holding a SKILL.md) under `dir` named in `names`, or starting with `prefix`. */
-function presentSkills(dir: string, names: string[] | undefined, prefix: string): number {
-  if (names) return names.filter((n) => existsSync(join(dir, n, "SKILL.md"))).length;
+function readJson(p: string): Record<string, unknown> | undefined {
+  try {
+    const v = JSON.parse(readFileSync(p, "utf8")) as unknown;
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const hasSkill = (dir: string, name: string): boolean => existsSync(join(dir, name, "SKILL.md"));
+
+/** Skill dirs (holding a SKILL.md) under `dir` whose name starts with `prefix` — for markers that hold only a count. */
+function prefixedSkills(dir: string, prefix: string): number {
   let entries: string[];
   try {
     entries = readdirSync(dir);
   } catch {
     return 0;
   }
-  return entries.filter((n) => n.startsWith(prefix) && isDir(join(dir, n)) && existsSync(join(dir, n, "SKILL.md"))).length;
+  return entries.filter((n) => n.startsWith(prefix) && isDir(join(dir, n)) && hasSkill(dir, n)).length;
+}
+
+/**
+ * Codex's own record of whether the plugin is enabled — `[plugins."<id>"] enabled = …` in
+ * config.toml — read, never written. Undefined when it says nothing (Codex then treats the
+ * installed plugin as enabled) or cannot be read.
+ */
+function codexPluginEnabled(home: string, pluginId: string): boolean | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(join(home, "config.toml"), "utf8");
+  } catch {
+    return undefined;
+  }
+  let inTable = false;
+  let found: boolean | undefined;
+  for (const line of raw.split(/\r?\n/)) {
+    const header = /^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$/.exec(line);
+    if (header) {
+      const key = header[1].replace(/\s+/g, "");
+      inTable = key === `plugins."${pluginId}"` || key === `plugins.'${pluginId}'`;
+      continue;
+    }
+    if (!inTable) continue;
+    const m = /^\s*enabled\s*=\s*(true|false)\s*(#.*)?$/.exec(line);
+    if (m) found = m[1] === "true";
+  }
+  return found;
+}
+
+/** The plugin's cached payload holds a manifest at the recorded version and at least one skill. */
+function codexPayloadProblem(cache: string, version: string): string | undefined {
+  if (!isDir(cache)) return `its payload ${cache} is missing`;
+  const manifest = [join(cache, ".codex-plugin", "plugin.json"), join(cache, ".claude-plugin", "plugin.json"), join(cache, "plugin.json")]
+    .map(readJson)
+    .find((m) => m !== undefined);
+  if (!manifest) return `its payload ${cache} has no plugin manifest`;
+  if (manifest.version !== version) return `its payload ${cache} is version ${String(manifest.version ?? "(none)")}, not ${version}`;
+  if (prefixedSkills(join(cache, "skills"), "") === 0) return `its payload ${cache} holds no skills`;
+  return undefined;
+}
+
+/** OpenCode loads copied skills only from a `skills.paths` entry in its config (install-opencode registers it). */
+function opencodeSkillsPathProblem(home: string, skillsDir: string, userHome: string): string | undefined {
+  const forms = [skillsDir, JSON.stringify(skillsDir).slice(1, -1)];
+  if (skillsDir.startsWith(userHome)) forms.push(`~${skillsDir.slice(userHome.length)}`.split("\\").join("/"));
+  for (const name of ["opencode.jsonc", "opencode.json"]) {
+    let raw: string;
+    try {
+      raw = readFileSync(join(home, name), "utf8");
+    } catch {
+      continue;
+    }
+    if (forms.some((f) => raw.includes(f))) return undefined;
+  }
+  return `${skillsDir} is not registered in skills.paths of ${join(home, "opencode.jsonc")} (or opencode.json), so OpenCode does not load the copied skills`;
 }
 
 export function hostProductStatus(
@@ -117,27 +185,51 @@ export function hostProductStatus(
   }
   const entry = entries.find((e) => e && typeof e === "object" && e.id === productId);
   if (!entry) return { ...base, state: "not-installed", detail: "not in the install marker" };
+  const hooks = typeof entry.assets?.hooks === "number" ? entry.assets.hooks : 0;
   if (entry.success === false) {
     const why = typeof entry.lastFailure?.message === "string" ? `: ${entry.lastFailure.message}` : "";
-    return { ...base, state: "broken", detail: `the last install recorded a failure${why}` };
+    return { ...base, state: "broken", hooks, detail: `the last install recorded a failure${why}` };
   }
-  if (entry.skipped === true) return { ...base, state: "not-installed", detail: "recorded as a manual step" };
-
-  const plugin = entry.codexPlugin;
-  if (plugin && typeof plugin.marketplace === "string" && typeof plugin.version === "string" && typeof plugin.pluginId === "string") {
-    const name = plugin.pluginId.split("@")[0];
-    const cache = join(home, "plugins", "cache", plugin.marketplace, name, plugin.version);
-    if (plugin.enabled === false) return { ...base, state: "not-installed", detail: `Codex plugin ${plugin.pluginId} ${plugin.version} is installed but disabled in Codex` };
-    return isDir(cache)
-      ? { ...base, state: "installed", detail: `Codex plugin ${plugin.pluginId} ${plugin.version}` }
-      : { ...base, state: "broken", detail: `the marker records Codex plugin ${plugin.pluginId} ${plugin.version}, but its payload ${cache} is missing` };
-  }
+  if (entry.skipped === true) return { ...base, state: "not-installed", hooks, detail: "recorded as a manual step" };
 
   const skillsDir = spec.skillsDir(home);
   const names = Array.isArray(entry.skills) ? entry.skills.filter((n): n is string => typeof n === "string") : undefined;
-  const recorded = names ? names.length : typeof entry.assets?.skills === "number" ? entry.assets.skills : 0;
-  const found = presentSkills(skillsDir, names, productId);
-  if (found > 0) return { ...base, state: "installed", detail: `${found} skill dir(s) in ${skillsDir}` };
-  if (recorded > 0) return { ...base, state: "broken", detail: `the marker records ${recorded} skill(s), but none are in ${skillsDir}` };
-  return { ...base, state: "not-installed", detail: "the marker records no skills" };
+
+  const plugin = entry.codexPlugin;
+  let disabledNote = "";
+  if (plugin && typeof plugin.marketplace === "string" && typeof plugin.version === "string" && typeof plugin.pluginId === "string") {
+    const enabled = codexPluginEnabled(home, plugin.pluginId) ?? (plugin.enabled === false ? false : true);
+    if (enabled) {
+      const problem = codexPayloadProblem(join(home, "plugins", "cache", plugin.marketplace, plugin.pluginId.split("@")[0], plugin.version), plugin.version);
+      return problem
+        ? { ...base, state: "broken", hooks, detail: `the marker records Codex plugin ${plugin.pluginId} ${plugin.version}, but ${problem}` }
+        : { ...base, state: "installed", hooks, detail: `Codex plugin ${plugin.pluginId} ${plugin.version}` };
+    }
+    // Disabled: the loose skills the installer kept (if any) are what works.
+    disabledNote = `Codex plugin ${plugin.pluginId} is disabled in Codex`;
+    if (!names || names.length === 0) return { ...base, state: "not-installed", hooks, detail: disabledNote };
+  }
+
+  const prefix = disabledNote ? `${disabledNote}; ` : "";
+  if (names && names.length > 0) {
+    const missing = names.filter((n) => !hasSkill(skillsDir, n));
+    if (missing.length > 0) {
+      return { ...base, state: "broken", hooks, detail: `${prefix}${missing.length} of ${names.length} recorded skill dir(s) missing from ${skillsDir} (e.g. ${missing.slice(0, 3).join(", ")})` };
+    }
+  } else {
+    // A marker from before names were recorded holds only a count: every copied dir is named
+    // <productId>… (the scripts' naming rule), so all of them must still be there.
+    const recorded = typeof entry.assets?.skills === "number" ? entry.assets.skills : 0;
+    if (recorded === 0) return { ...base, state: "not-installed", hooks, detail: "the marker records no skills" };
+    const found = prefixedSkills(skillsDir, productId);
+    if (found < recorded) {
+      return { ...base, state: "broken", hooks, detail: `the marker records ${recorded} skill(s), but ${found === 0 ? "none" : `only ${found}`} are in ${skillsDir}` };
+    }
+  }
+  if (host === "opencode") {
+    const problem = opencodeSkillsPathProblem(home, skillsDir, userHome);
+    if (problem) return { ...base, state: "broken", hooks, detail: problem };
+  }
+  const count = names && names.length > 0 ? names.length : prefixedSkills(skillsDir, productId);
+  return { ...base, state: "installed", hooks, detail: `${prefix}${count} skill dir(s) in ${skillsDir}` };
 }

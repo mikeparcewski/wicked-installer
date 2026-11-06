@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,10 +60,25 @@ test("status: garden as a Codex plugin is installed when Codex's cached payload 
       codexPlugin: { pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: "/x", version: "12.64.0", addedByInstaller: true, enabled: true },
     });
     const cache = join(home, ".codex", "plugins", "cache", "wicked-garden", "wicked-garden", "12.64.0");
+    // An empty cache dir is not a payload.
     mkdirSync(cache, { recursive: true });
+    const empty = run([CLI, "status", "--offline"], home);
+    assert.equal(empty.status, 1, empty.out);
+    assert.match(empty.out, /Codex\s+✗ broken\s+.*has no plugin manifest/);
+
+    mkdirSync(join(cache, ".codex-plugin"), { recursive: true });
+    writeFileSync(join(cache, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "wicked-garden", version: "12.64.0" }));
+    skill(join(cache, "skills"), "mem");
     const ok = run([CLI, "status", "--offline"], home);
     assert.equal(ok.status, 0, ok.out);
     assert.match(ok.out, /Codex\s+✓ installed\s+Codex plugin wicked-garden@wicked-garden 12\.64\.0/);
+
+    // Disabled in Codex's own config (read now, not the marker's snapshot): not installed.
+    writeFileSync(join(home, ".codex", "config.toml"), '[plugins."wicked-garden@wicked-garden"]\nenabled = false\n');
+    const off = run([CLI, "status", "--offline"], home);
+    assert.equal(off.status, 1, off.out);
+    assert.match(off.out, /Codex\s+not installed\s+Codex plugin wicked-garden@wicked-garden is disabled in Codex/);
+    rmSync(join(home, ".codex", "config.toml"));
 
     rmSync(cache, { recursive: true, force: true });
     const broken = run([CLI, "status", "--offline"], home);
@@ -75,10 +90,115 @@ test("status: garden as a Codex plugin is installed when Codex's cached payload 
   }
 });
 
+test("status: a disabled Codex plugin with the installer's loose skills kept is installed (the loose copies work)", () => {
+  const home = fresh();
+  try {
+    writeMarker(home, ".codex", "codex", {
+      id: "wicked-garden", success: true, skipped: false, assets: { skills: 1 }, skills: ["wicked-garden-mem"],
+      codexPlugin: { pluginId: "wicked-garden@wicked-garden", marketplace: "wicked-garden", source: "/x", version: "12.64.0", addedByInstaller: true, enabled: false },
+    });
+    skill(join(home, ".codex", "skills"), "wicked-garden-mem");
+    const r = run([CLI, "status", "--offline"], home);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /Codex\s+✓ installed\s+Codex plugin wicked-garden@wicked-garden is disabled in Codex; 1 skill dir\(s\)/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("status: one surviving skill of many is broken — every recorded name (or the recorded count) must be there", () => {
+  const home = fresh();
+  try {
+    writeMarker(home, join(".pi", "agent"), "pi", { id: "wicked-garden", success: true, skipped: false, assets: { skills: 2 }, skills: ["wicked-garden-mem", "wicked-garden-prove"] });
+    skill(join(home, ".pi", "agent", "skills"), "wicked-garden-mem");
+    const named = run([CLI, "status", "--offline"], home);
+    assert.equal(named.status, 1, named.out);
+    assert.match(named.out, /Pi\s+✗ broken\s+1 of 2 recorded skill dir\(s\) missing .*wicked-garden-prove/);
+
+    writeMarker(home, join(".pi", "agent"), "pi", { id: "wicked-garden", success: true, skipped: false, assets: { skills: 140 } });
+    const counted = run([CLI, "status", "--offline"], home);
+    assert.equal(counted.status, 1, counted.out);
+    assert.match(counted.out, /Pi\s+✗ broken\s+the marker records 140 skill\(s\), but only 1 are in/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("status: OpenCode skills not registered in skills.paths are broken (OpenCode would not load them)", () => {
+  const home = fresh();
+  try {
+    const oc = join(home, ".config", "opencode");
+    writeMarker(home, join(".config", "opencode"), "opencode", { id: "wicked-garden", success: true, skipped: false, assets: { skills: 1 }, skills: ["wicked-garden-mem"] });
+    skill(join(oc, "skills"), "wicked-garden-mem");
+    const missing = run([CLI, "status", "--offline"], home);
+    assert.equal(missing.status, 1, missing.out);
+    assert.match(missing.out, /OpenCode\s+✗ broken\s+.*is not registered in skills\.paths/);
+    writeFileSync(join(oc, "opencode.jsonc"), JSON.stringify({ skills: { paths: [join(oc, "skills")] } }));
+    const ok = run([CLI, "status", "--offline"], home);
+    assert.equal(ok.status, 0, ok.out);
+    assert.match(ok.out, /OpenCode\s+✓ installed/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("status: a partially registered Claude dir is broken even when another active dir is absent (exit 1)", () => {
+  const home = fresh();
+  try {
+    writeMarker(home, join(".pi", "agent"), "pi", { id: "wicked-garden", success: true, skipped: false, assets: { skills: 1 }, skills: ["wicked-garden-mem"] });
+    skill(join(home, ".pi", "agent", "skills"), "wicked-garden-mem");
+    const partial = join(home, "cfg-partial");
+    mkdirSync(join(partial, "plugins"), { recursive: true });
+    writeFileSync(join(partial, "plugins", "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "wicked-garden@wicked-garden": [{ scope: "user", installPath: join(partial, "plugins", "cache", "x"), version: "9.9.9" }] },
+    }));
+    const r = run([CLI, "status", "--offline"], home, { CLAUDE_CONFIG_DIR: `${join(home, "cfg-absent")}:${partial}` });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /wicked-garden: installed on Pi; broken on Claude Code/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("markers keep other products' entries and record copied skill names (pi)", () => {
+  const home = fresh();
+  try {
+    const src = join(home, "src");
+    for (const id of ["fake-a", "fake-b"]) skill(join(src, id, "skills"), `${id}-thing`);
+    const reg = join(home, "registry.json");
+    const product = (id) => ({ id, displayName: id, description: id, type: "npm-lib", standalone: true, opinionated: false, status: "stable", requires: [], install: { type: "manual", instructions: "x" } });
+    writeFileSync(reg, JSON.stringify({ version: "1", products: [product("fake-a"), product("fake-b")], bundles: [] }));
+    const pi = (id) => run([join(ROOT, "dist", "install-pi.js"), id, "--registry", reg, "--source-root", src, "--pi-home", join(home, ".pi", "agent")], home);
+    assert.equal(pi("fake-a").status, 0);
+    assert.equal(pi("fake-b").status, 0);
+    const marker = JSON.parse(readFileSync(join(home, ".pi", "agent", "wicked-installer", "pi-install.json"), "utf8"));
+    assert.deepEqual(marker.products.map((p) => p.id).sort(), ["fake-a", "fake-b"], "a later run keeps the earlier product's entry");
+    assert.deepEqual(marker.products.find((p) => p.id === "fake-a").skills, ["fake-a-fake-a-thing"], "the copied dir name (product-prefixed) is recorded");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a non-install word with --all never installs: unknown positionals are refused on every host script", () => {
+  for (const cli of ["codex", "opencode", "pi", "antigravity", "claude"]) {
+    const home = fresh();
+    try {
+      const r = run([join(ROOT, "dist", `install-${cli}.js`), "list", "--all", "--dry-run"], home);
+      assert.equal(r.status, 1, `${cli}: ${r.out}`);
+      assert.match(r.stderr, new RegExp(`install-${cli}\\.js: unknown product or unsupported command: list`));
+      assert.doesNotMatch(r.out, /dry-run: (npm|cargo|GET)/, `${cli}: no install plan`);
+      assert.deepEqual(readdirSync(home), [], `${cli}: nothing written`);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
 test("status: a host marker whose skills are gone is broken (exit 1), never installed", () => {
   const home = fresh();
   try {
     writeMarker(home, join(".config", "opencode"), "opencode", { id: "wicked-garden", success: true, skipped: false, assets: { skills: 93 } });
+    writeFileSync(join(home, ".config", "opencode", "opencode.jsonc"), JSON.stringify({ skills: { paths: [join(home, ".config", "opencode", "skills")] } }));
     writeMarker(home, join(".pi", "agent"), "pi", { id: "wicked-garden", success: true, skipped: false, assets: { skills: 1 } });
     skill(join(home, ".pi", "agent", "skills"), "wicked-garden-mem");
     const r = run([CLI, "status", "--offline"], home);
@@ -148,9 +268,14 @@ test("readiness: a host without hook events gets a plain `n/a hooks` row; Claude
   assert.deepEqual(hooks.map((r) => r.capability), ["hooks:codex", "hooks:opencode", "hooks:pi", "hooks:antigravity"]);
   for (const r of hooks) {
     assert.equal(r.state, "n/a");
-    assert.match(r.label, /has no hook events, so no wicked-garden hook was installed and nothing blocks on its own there: the evidence gate runs only when a skill calls it/);
+    assert.match(r.label, /nothing blocks on its own there: the evidence gate runs only when a skill calls it/);
   }
-  assert.match(hooks.find((r) => r.capability === "hooks:pi").label, /^hooks — Pi has no hook events/);
+  assert.match(hooks.find((r) => r.capability === "hooks:codex").label, /^hooks — Codex has no hook events, so no wicked-garden hook was installed/);
+  assert.match(hooks.find((r) => r.capability === "hooks:antigravity").label, /^hooks — Antigravity has no hook events/);
+  assert.match(hooks.find((r) => r.capability === "hooks:pi").label, /^hooks — no wicked-garden hook adapter was installed for Pi/);
+  // A product's own adapter installed on Pi / OpenCode: no n/a claim for that host.
+  const withAdapter = preflight([garden], { hosts: ["pi", "opencode", "codex"], probeOnly: true, env: { PATH: "" }, hookAdapter: (host) => host === "pi" || host === "codex" });
+  assert.deepEqual(withAdapter.filter((r) => r.capability.startsWith("hooks:")).map((r) => r.capability), ["hooks:opencode", "hooks:codex"], "codex has no hook events whatever the report says");
 
   // And the rendered status shows it for a detected hookless host.
   const home = fresh();
@@ -158,7 +283,7 @@ test("readiness: a host without hook events gets a plain `n/a hooks` row; Claude
     writeMarker(home, join(".pi", "agent"), "pi", { id: "wicked-garden", success: true, skipped: false, assets: { skills: 1 } });
     skill(join(home, ".pi", "agent", "skills"), "wicked-garden-mem");
     const r = run([CLI, "status", "--offline"], home);
-    assert.match(r.out, /n\/a\s+wicked-garden — hooks — Pi has no hook events/);
+    assert.match(r.out, /n\/a\s+wicked-garden — hooks — no wicked-garden hook adapter was installed for Pi/);
     assert.ok(!existsSync(join(home, ".claude")));
   } finally {
     rmSync(home, { recursive: true, force: true });

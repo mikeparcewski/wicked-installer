@@ -133,14 +133,17 @@ function plantBareCopy(cfg) {
 // 1. The script itself
 // ---------------------------------------------------------------------------
 
-test("install-claude.js imports nothing from src/ but the dependency-free ./types.js (INTERFACE.md §15 self-contained)", () => {
+test("install-claude.js imports nothing from src/ but the dependency-free ./types.js and ./release-binary.js (INTERFACE.md §15 self-contained)", () => {
   const src = readFileSync(join(ROOT, "src", "install-claude.ts"), "utf8");
   const imports = [...src.matchAll(/^import[^;]*?from\s+"([^"]+)";/gm)].map((m) => m[1]);
   assert.ok(imports.length > 0);
-  for (const spec of imports) assert.match(spec, /^(node:|\.\/types\.js$)/, `install-claude.ts must import only node: builtins and ./types.js, found ${spec}`);
-  // ./types.js is the one sanctioned exception because it imports nothing itself.
+  for (const spec of imports) assert.match(spec, /^(node:|\.\/types\.js$|\.\/release-binary\.js$)/, `install-claude.ts must import only node: builtins, ./types.js and ./release-binary.js, found ${spec}`);
+  // ./types.js is a sanctioned exception because it imports nothing itself.
   const types = readFileSync(join(ROOT, "src", "types.ts"), "utf8");
   assert.doesNotMatch(types, /^import\s/m, "src/types.ts must stay import-free");
+  // ./release-binary.js (the verified prebuilt-binary acquisition every script shares) imports node: builtins only.
+  const release = readFileSync(join(ROOT, "src", "release-binary.ts"), "utf8");
+  for (const m of release.matchAll(/^import[^;]*?from\s+"([^"]+)";/gm)) assert.match(m[1], /^node:/, `src/release-binary.ts must import only node: builtins, found ${m[1]}`);
 });
 
 test("install-claude.js handed wicked-garden: a manual step, nothing staged/copied/wired, no marker entry", () => {

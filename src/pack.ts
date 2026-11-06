@@ -350,13 +350,87 @@ function readRecord(file: string): { record?: PackRecord; error?: string } {
   if (lkind(file) !== "file") return { error: `${file} is not a regular file` };
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8")) as PackRecord;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.files !== "object" || !Array.isArray(parsed.skills)) {
-      return { error: `${file} is not a pack install record` };
-    }
+    const problem = recordProblem(parsed);
+    if (problem) return { error: `${file} is not a usable pack install record (${problem})` };
     return { record: parsed };
   } catch (err) {
     return { error: `${file} is unreadable (${err instanceof Error ? err.message : String(err)})` };
   }
+}
+
+/** A path key the record may hold: "<skill>/<rel>", plain segments only (never "..", ".", absolute, or a backslash). */
+function safeKey(key: string): boolean {
+  if (key.includes("\\") || key.startsWith("/")) return false;
+  const parts = key.split("/");
+  return parts.length >= 2 && parts.every((p) => p !== "" && p !== "." && p !== ".." && !p.includes(":"));
+}
+
+function safeSkill(name: unknown): name is string {
+  return typeof name === "string" && name !== "" && name !== "." && name !== ".." && !/[\\/:]/.test(name);
+}
+
+function fileMapProblem(files: unknown, label: string): string | undefined {
+  if (!files || typeof files !== "object" || Array.isArray(files)) return `${label} is not an object`;
+  for (const [k, v] of Object.entries(files as Record<string, unknown>)) {
+    if (!safeKey(k)) return `${label} has an unsafe path ${JSON.stringify(k)}`;
+    if (typeof v !== "string" || !/^[0-9a-f]{64}$/.test(v)) return `${label}[${JSON.stringify(k)}] is not a sha256`;
+  }
+  return undefined;
+}
+
+/** Why a parsed record cannot be trusted (then nothing it names is touched), or undefined. */
+function recordProblem(r: unknown): string | undefined {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return "not an object";
+  const rec = r as PackRecord;
+  if (!Array.isArray(rec.skills) || !rec.skills.every(safeSkill)) return "skills is not a list of skill names";
+  const files = fileMapProblem(rec.files, "files");
+  if (files) return files;
+  if (rec.pending !== undefined) {
+    if (!rec.pending || typeof rec.pending !== "object") return "pending is not an object";
+    if (!Array.isArray(rec.pending.skills) || !rec.pending.skills.every(safeSkill)) return "pending.skills is not a list of skill names";
+    const pf = fileMapProblem(rec.pending.files, "pending.files");
+    if (pf) return pf;
+  }
+  return undefined;
+}
+
+/** A link or a non-directory in place of a directory BETWEEN the skills root and `key` (never followed). */
+function linkedBelow(root: string, key: string): boolean {
+  const parts = key.split("/");
+  let cur = root;
+  for (const part of parts.slice(0, -1)) {
+    cur = join(cur, part);
+    const k = lkind(cur);
+    if (k === "absent") return false;
+    if (k !== "dir") return true;
+  }
+  return false;
+}
+
+/** Skill names other packs' records claim in this config dir (never adopted by another pack). */
+function claimedByOthers(configDir: string, name: string): Set<string> {
+  const out = new Set<string>();
+  const dir = join(configDir, "wicked-installer", "packs");
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const f of files) {
+    if (!f.endsWith(".json") || f === `${name}.json`) continue;
+    const { record } = readRecord(join(dir, f));
+    if (record) for (const sk of ownedSkillsOf(record)) out.add(sk);
+  }
+  return out;
+}
+
+/**
+ * Where a pre-record install (wicked-installer ≤ 0.8.1) put skills: ~/.claude/skills, always —
+ * it ignored CLAUDE_CONFIG_DIR. Legacy ownership is only ever assumed there.
+ */
+function isLegacyDestination(configDir: string): boolean {
+  return resolve(configDir) === resolve(homedir(), ".claude");
 }
 
 function writeRecord(file: string, record: PackRecord): void {
@@ -434,20 +508,26 @@ function classifyDir(configDir: string, name: string, incoming: Incoming, legacy
   } else {
     owned = new Map();
     ownedSkills = new Set();
-    const candidates = new Set([...incoming.skills, ...(legacy?.skills ?? [])]);
+    // No record: a skill dir is this pack's only when an earlier (pre-record) install of THIS
+    // pack demonstrably put it there — the pack's canonical copy exists, this is the dir that
+    // installer wrote to (~/.claude), no other pack claims the name, and the tree is
+    // byte-identical to that canonical copy. Identical bytes alone (a user's own copy) are not
+    // ownership.
+    const legacyHere = legacy !== undefined && isLegacyDestination(configDir) ? legacy : undefined;
+    const others = claimedByOthers(configDir, name);
+    const candidates = new Set([...incoming.skills, ...(legacyHere?.skills ?? [])]);
     for (const skill of [...candidates].sort()) {
       const kind = lkind(join(skillsRoot, skill));
       if (kind === "absent") continue;
       const disk = kind === "dir" ? treeDigests(skillsRoot, skill) : undefined;
-      const matches = disk !== undefined && (
-        (incoming.skills.includes(skill) && sameFiles(disk, filesOfSkill(incoming.files, skill))) ||
-        (legacy !== undefined && legacy.skills.includes(skill) && sameFiles(disk, filesOfSkill(legacy.files, skill))));
+      const matches = disk !== undefined && legacyHere !== undefined && !others.has(skill) &&
+        legacyHere.skills.includes(skill) && sameFiles(disk, filesOfSkill(legacyHere.files, skill));
       if (matches) {
         ownedSkills.add(skill);
         for (const [k, v] of Object.entries(disk!)) if (!isLitter(k)) owned.set(k, new Set([v]));
         plan.adopted.push(skill);
       } else {
-        plan.items.push({ path: `${skill}/`, state: "foreign", note: "exists and is not this pack's unmodified copy" });
+        plan.items.push({ path: `${skill}/`, state: "foreign", note: legacyHere ? "exists and is not this pack's unmodified earlier copy" : "exists and was not installed by this pack" });
       }
     }
   }
@@ -464,8 +544,12 @@ function classifyDir(configDir: string, name: string, incoming: Incoming, legacy
       if (!key.startsWith(`${skill}/`)) continue;
       seen.add(key);
       const abs = fromKey(skillsRoot, key);
-      const k = lkind(abs);
       const shipped = key in incoming.files;
+      if (linkedBelow(skillsRoot, key)) {
+        plan.items.push({ path: key, state: "edited", note: "a directory on its path was replaced by a link or a file" });
+        continue;
+      }
+      const k = lkind(abs);
       if (k === "absent") {
         if (shipped) plan.items.push({ path: key, state: "missing" });
         continue;
@@ -559,11 +643,8 @@ function applyDir(plan: DirPlan, manifest: PackManifest, origin: string, incomin
   // Journal first: until the final write, a retry accepts either the old or the new bytes.
   writeRecord(plan.recordFile, { ...base, pending: { version: manifest.version, skills: incoming.skills, files: incoming.files, startedAt: now } });
 
-  for (const [key, digest] of Object.entries(incoming.files)) {
-    const dest = fromKey(plan.skillsRoot, key);
-    if (lkind(dest) === "file" && sha256File(dest) === digest) continue;
-    copyFileAtomic(incoming.sources[key], dest);
-  }
+  // Prune first (every obsolete file was verified unchanged): a file that becomes a directory
+  // (or the reverse), or a case-only rename on a case-insensitive filesystem, then lands cleanly.
   const touchedSkills = new Set<string>();
   for (const i of plan.items) {
     if (i.state !== "obsolete") continue;
@@ -571,6 +652,11 @@ function applyDir(plan: DirPlan, manifest: PackManifest, origin: string, incomin
     touchedSkills.add(i.path.split("/")[0]);
   }
   for (const skill of touchedSkills) pruneEmptyDirs(join(plan.skillsRoot, skill));
+  for (const [key, digest] of Object.entries(incoming.files)) {
+    const dest = fromKey(plan.skillsRoot, key);
+    if (lkind(dest) === "file" && sha256File(dest) === digest) continue;
+    copyFileAtomic(incoming.sources[key], dest);
+  }
 
   writeRecord(plan.recordFile, {
     ...base,
@@ -659,13 +745,7 @@ export async function packAdd(source: string, flags: AddFlags): Promise<number> 
       return 0;
     }
 
-    // 3. canonical install home (publisher-managed, replaced whole)
-    rmSync(dest, { recursive: true, force: true });
-    mkdirSync(installedHome(), { recursive: true });
-    cpSync(resolved.dir, dest, { recursive: true });
-    console.log(`  installed to ${dest}`);
-
-    // 4. skill visibility for Claude Code
+    // 3. skill visibility for Claude Code (journaled per dir: an interrupted run retries cleanly)
     if (isPlugin) {
       console.log(chalk.dim("  pack ships as a Claude Code plugin — skills load via the plugin manager; skipping the skills copy."));
     } else {
@@ -674,6 +754,13 @@ export async function packAdd(source: string, flags: AddFlags): Promise<number> 
         console.log(`  skills → ${p.skillsRoot}: ${incoming!.skills.join(", ") || "(none)"}`);
       }
     }
+
+    // 4. canonical install home (publisher-managed, replaced whole) — only once every skills
+    // dir holds the new version, so it never names a version the hosts are not serving.
+    rmSync(dest, { recursive: true, force: true });
+    mkdirSync(installedHome(), { recursive: true });
+    cpSync(resolved.dir, dest, { recursive: true });
+    console.log(`  installed to ${dest}`);
 
     // 5. registration — garden runtime catalog + crew routing + floors
     console.log(chalk.dim("  registering (wicked-garden pack register)..."));
@@ -725,19 +812,28 @@ export async function packRemove(name: string): Promise<number> {
       continue;
     }
     if (isPluginPack && !record) continue;
-    // Ownership: the record, else (an install from before records) the canonical copy's files.
-    let owned: Map<string, Set<string>>;
-    let ownedSkills: Set<string>;
-    if (record) {
-      owned = ownedDigests(record);
-      ownedSkills = ownedSkillsOf(record);
-    } else if (legacy) {
-      owned = new Map(Object.entries(legacy.incoming.files).map(([k, v]) => [k, new Set([v])]));
-      ownedSkills = new Set(legacy.incoming.skills);
-    } else {
+    const removed: string[] = [];
+    if (!record) {
+      // An install from before records: only in ~/.claude (where that installer wrote), only
+      // whole skill dirs byte-identical to the pack's canonical copy, never one another pack claims.
+      if (!legacy || !isLegacyDestination(configDir)) continue;
+      const others = claimedByOthers(configDir, name);
+      for (const skill of legacy.incoming.skills) {
+        const skillDir = join(skillsRoot, skill);
+        if (lkind(skillDir) === "absent") continue;
+        const disk = lkind(skillDir) === "dir" ? treeDigests(skillsRoot, skill) : undefined;
+        if (disk && !others.has(skill) && sameFiles(disk, filesOfSkill(legacy.incoming.files, skill))) {
+          rmSync(skillDir, { recursive: true, force: true });
+          removed.push(skill);
+        } else {
+          kept.push(`${skillDir} (not this pack's unmodified copy — left whole)`);
+        }
+      }
+      if (removed.length > 0) console.log(`  removed from ${skillsRoot}: ${removed.join(", ")}`);
       continue;
     }
-    const removed: string[] = [];
+    const owned = ownedDigests(record);
+    const ownedSkills = ownedSkillsOf(record);
     for (const skill of [...ownedSkills].sort()) {
       const skillDir = join(skillsRoot, skill);
       const dirKind = lkind(skillDir);
@@ -749,6 +845,10 @@ export async function packRemove(name: string): Promise<number> {
       for (const [key, digests] of owned) {
         if (!key.startsWith(`${skill}/`)) continue;
         const abs = fromKey(skillsRoot, key);
+        if (linkedBelow(skillsRoot, key)) {
+          kept.push(`${abs} (a directory on its path is a link or a file — not followed)`);
+          continue;
+        }
         if (lkind(abs) !== "file") continue;
         if (digests.has(sha256File(abs))) rmSync(abs, { force: true });
         else kept.push(`${abs} (edited)`);
