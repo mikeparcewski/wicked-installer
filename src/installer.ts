@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { execa } from "execa";
 import type { Product, InstallResult } from "./types.js";
+import { acquireFromRelease, cargoMissingMessage } from "./release-binary.js";
 import { LEGACY_CLEANUP_ISSUE, claudePluginSpec, detectLegacyCopies, planClaudePlugin, registerClaudePlugin, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
 
 const SKIP_BINARY_EXTS = /\.(md|txt|sha256|sha512|asc|json|toml|yaml|yml|xml|html|css|js|ts)$/i;
@@ -188,30 +189,38 @@ export async function installProduct(product: Product, options: InstallOptions =
         const args = ["install", ...names];
         if (install.version && crates.length === 1) args.push("--version", install.version);
 
+        const note = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
+
+        // Prebuilt + sha256-verified from the product's GitHub release first (no Rust needed);
+        // cargo only when the release has no binary for this platform (src/release-binary.ts).
+        // Under --dry-run the release step only prints its plan: nothing is fetched or spawned.
+        const release = acquireFromRelease(id, install, { dryRun, log });
+        if (release.action === "done") {
+          const notes = release.notes.length > 0 ? ` — ${release.notes.join("; ")}` : "";
+          if (dryRun) return plan([], `${release.notes.join("; ")}`);
+          return { productId: id, success: true, skipped: false, message: `${displayName} installed${notes}${note}` };
+        }
+
         // Not even the toolchain probe runs under --dry-run: a dry run spawns nothing.
         if (dryRun) {
           return plan(
-            [`cargo ${args.join(" ")}    (requires the Rust toolchain: https://rustup.rs)`],
+            [`cargo ${args.join(" ")}    (${release.reason}; requires the Rust toolchain: https://rustup.rs)`],
             `would run cargo ${args.join(" ")}`,
           );
         }
 
-        // Fail with a helpful message if the Rust toolchain is missing.
+        // Fail with an honest message and a working fix if the Rust toolchain is missing.
         try {
           await execa("cargo", ["--version"]);
         } catch {
-          return {
-            productId: id, success: false, skipped: false,
-            message: `cargo not found — install the Rust toolchain (https://rustup.rs) then retry, or run: cargo install ${crates.join(" ")}`,
-          };
+          return { productId: id, success: false, skipped: false, message: cargoMissingMessage(id, install, release.reason) };
         }
 
         await execa("cargo", args, { stdio: "inherit" });
 
-        const note = install.mcpInstructions ? `\n  ${install.mcpInstructions}` : "";
         return {
           productId: id, success: true, skipped: false,
-          message: `${displayName} installed via cargo install ${crates.join(" ")} (binaries in ~/.cargo/bin)${note}`,
+          message: `${displayName} built from source with cargo install ${crates.join(" ")} (${release.reason}; binaries in ~/.cargo/bin)${note}`,
         };
       }
 

@@ -19,18 +19,19 @@ const CLI = join(ROOT, "dist", "index.js");
 const STUB = join(__dirname, "garden-stub.mjs");
 const FIXTURE = join(__dirname, "fixtures", "acme-mini");
 
-function runPack(args, { home, stubLog, stubExit } = {}) {
-  return spawnSync(process.execPath, [CLI, "pack", ...args], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      HOME: home ?? process.env.HOME,
-      USERPROFILE: home ?? process.env.USERPROFILE, // windows homedir()
-      WICKED_GARDEN_BIN: STUB,
-      GARDEN_STUB_LOG: stubLog ?? "",
-      GARDEN_STUB_EXIT: String(stubExit ?? 0),
-    },
-  });
+function runPack(args, { home, stubLog, stubExit, configDir } = {}) {
+  const env = {
+    ...process.env,
+    HOME: home ?? process.env.HOME,
+    USERPROFILE: home ?? process.env.USERPROFILE, // windows homedir()
+    WICKED_GARDEN_BIN: STUB,
+    GARDEN_STUB_LOG: stubLog ?? "",
+    GARDEN_STUB_EXIT: String(stubExit ?? 0),
+  };
+  // Never the runner's own Claude config dir: skills go to the ACTIVE config dir (#48).
+  delete env.CLAUDE_CONFIG_DIR;
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+  return spawnSync(process.execPath, [CLI, "pack", ...args], { encoding: "utf8", env });
 }
 
 function freshHome() {
