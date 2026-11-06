@@ -5,6 +5,36 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pack add` no longer deletes your edits or your own skills (#48).** It used to delete each pack skill
+  directory and copy the new one over it, so an upgrade or re-add lost local edits and added files, a same-named
+  skill of your own was replaced, and `pack remove` then deleted it for good. Each Claude config dir now gets a
+  record (`<config dir>/wicked-installer/packs/<name>.json`: installation id, source, version, destination, the
+  sha256 of every file written). A local edit, a file added inside an installed skill, or a same-named skill the
+  pack does not own holds the pack's update before anything changes, and the paths are listed with the installed
+  and incoming versions; nothing is merged. A clean update repairs missing owned files and prunes obsolete files
+  only while unchanged. `pack remove` keeps and lists edited or foreign files and says the cleanup is incomplete.
+  Skills now go to `$CLAUDE_CONFIG_DIR` when it is set (they always went to `~/.claude/skills`). Packs that ship
+  as Claude Code plugins keep the native path. A pack installed by 0.8.1 is adopted when its skills are unchanged.
+- **`status` reports wicked-garden per host.** It checked only a Claude Code plugin registration, so a Codex,
+  OpenCode or Pi home the installer had just written to read "not installed" and exited 1. It now reads each
+  host's install marker and checks the files it names (Codex's cached plugin payload, or the copied skills), and
+  exits 1 only when garden is installed on no host or broken on one.
+- **wicked-estate installs without Rust.** The knowledge and full bundles failed on any machine without a Rust
+  toolchain, because estate came only from `cargo install`. Every install path (the central installer and the
+  five host scripts) now installs the prebuilt binaries from estate's GitHub release, sha256-verified against its
+  `SHA256SUMS`, into `~/.local/bin`; cargo is used only when the release has no binary for the platform, and its
+  absence is reported with a fix that works. The OpenCode MCP entry looks for the binary where it was installed
+  (it looked only in `~/.cargo/bin`), and the Claude Code entry uses the absolute path when the dir is off PATH.
+- **`uninstall` never installs (#49).** On the Codex, OpenCode, Pi and Antigravity scripts, `uninstall --all`
+  planned an install of every product. Those scripts now refuse `uninstall` and `status` and change nothing, and
+  the central `wicked-installer uninstall` (and any unknown command) exits 1 instead of opening the install picker.
+- **Readiness says when a host has no hooks.** On Codex, OpenCode, Pi and Antigravity it now prints
+  `n/a hooks — <host> has no hook events …`: no garden hook is installed there, and the evidence gate runs only
+  when a skill calls it.
+- **Antigravity and Pi are detected from their CLIs** (`agy`, `pi` on PATH), not only from an existing home.
+
 ## [0.8.1] - 2026-11-05
 
 ### Changed

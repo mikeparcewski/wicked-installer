@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 // The one sanctioned shared module (INTERFACE.md §15): dependency-free lifecycle predicate.
 import { isInstallable, retiredRefusal } from "./types.js";
+import { acquireFromRelease, cargoMissingMessage } from "./release-binary.js";
 
 type ProductStatus = "stable" | "active" | "preview" | "design" | "retired";
 type ProductType = "npm-cli" | "npm-lib" | "mcp-binary" | "claude-plugin" | "desktop-binary";
@@ -37,6 +38,7 @@ interface InstallAction {
   dest?: string;
   crate?: string;
   crates?: string[];
+  release?: { githubRepo: string; binaries: string[]; assetPrefix?: string; checksums?: string }; // prebuilt archives (src/release-binary.ts)
   version?: string;
 }
 
@@ -376,8 +378,15 @@ function installProductBinaries(product: Product, options: Options): string[] {
         ? install.crates
         : singleCrate ? [singleCrate] : [];
       if (crates.length === 0) throw new Error(`${product.id}: install.crate required`);
+      // Prebuilt + sha256-verified from the product's GitHub release first; cargo only when the
+      // release has no binary for this platform (src/release-binary.ts).
+      const release = acquireFromRelease(product.id, install, { dryRun: options.dryRun === true, log: (line) => log(options, line) });
+      notes.push(...release.notes);
+      if (release.action === "done") {
+        break;
+      }
       if (!commandExists("cargo")) {
-        throw new Error("cargo not found; install Rust from https://rustup.rs and retry");
+        throw new Error(cargoMissingMessage(product.id, install, release.reason));
       }
       // `--version` only pins a single crate; with several, pin per-crate via name@version.
       const names = install.version && crates.length > 1
@@ -934,6 +943,21 @@ async function main(): Promise<void> {
     return;
   }
   const options = parseArgs(process.argv.slice(2));
+  // The v1.1 verbs (INTERFACE.md §12.2/§12.3) are not implemented here. Refuse them before
+  // anything is resolved: `uninstall --all` used to drop the verb and plan an install of EVERY
+  // product (wicked-installer#49). An uninstall must never install.
+  const verb = options.productIds.find((id) => id === "uninstall" || id === "status");
+  if (verb) {
+    const marker = join(options.piHome, "wicked-installer", "pi-install.json");
+    console.error(
+      `install-pi.js: \`${verb}\` is not supported by this script yet (wicked-installer#49) — nothing was installed, removed or changed.` +
+      (verb === "uninstall"
+        ? ` What earlier installs put into Pi is recorded in ${marker}; remove those skill directories by hand, then delete the marker.`
+        : ` Run \`npx wicked-installer status\` for what is installed.`),
+    );
+    if (options.json) console.log(JSON.stringify({ verb, supported: false, reports: [] }));
+    process.exit(1);
+  }
   const registry = loadRegistry(options.registryPath);
   const products = resolveProducts(registry, options.productIds, options.all);
 

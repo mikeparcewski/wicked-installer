@@ -17,12 +17,27 @@
 import { spawnSync } from "node:child_process";
 import { prepareClaudeSpawn, probeOnPath } from "./claude-plugin.js";
 import type { Capability, CapabilityNeed, Product } from "./types.js";
+import { dirname } from "node:path";
+import { findInstalledBinary, pathFix } from "./release-binary.js";
 
 /**
  * `unchecked` = nothing is known to be missing, but a need was only found on PATH and not
  * verified (its self-check or version was not run — `--dry-run`). Never shown as `ready`.
  */
-export type ReadinessState = "ready" | "pending" | "unchecked";
+export type ReadinessState = "ready" | "pending" | "unchecked" | "n/a";
+
+/**
+ * Hosts whose hook events the installer wires (INTERFACE.md §8.4: a CLI wires hooks only once its
+ * hook config and event model are stated there — today only Claude Code's settings.json is).
+ * On every other host a product's hooks are not installed, so nothing it ships blocks by itself.
+ */
+export const HOOK_HOSTS: ReadonlySet<string> = new Set(["claude"]);
+
+const HOST_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "Pi", antigravity: "Antigravity" };
+
+function hostName(host: string): string {
+  return HOST_NAMES[host] ?? host.charAt(0).toUpperCase() + host.slice(1);
+}
 
 export interface NeedResult {
   /** e.g. "launcher wicked-garden", "python >= 3.10", "backend wicked-vault". */
@@ -158,6 +173,14 @@ function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): Nee
   if (probe.state === "unknown") {
     return { need: label, met: false, detail: `could not check PATH (${probe.reason})`, remedy: install };
   }
+  if (need.product) {
+    // Installed by the installer, off PATH: ~/.local/bin (release) or ~/.cargo/bin (cargo). The
+    // installer's MCP entries and garden's launcher use that absolute path, so it runs; a shell does not find it.
+    const off = findInstalledBinary(need.bin, { env: ctx.env, platform: ctx.platform });
+    if (off && off.source !== "PATH") {
+      return { need: label, met: true, detail: `installed at ${off.path} (not on PATH: MCP entries use this path; to run it from a shell, ${pathFix(dirname(off.path), ctx.platform)})` };
+    }
+  }
   if (!need.npx) return { need: label, met: false, detail: "not on PATH", remedy: install };
   if (ctx.offline || ctx.probeOnly) {
     return { need: label, met: false, detail: `not on PATH; the \`npx ${need.npx}\` fallback was not checked (${ctx.offline ? "--offline" : "--dry-run"}) and needs the network at first use`, remedy: `${install} (while online)` };
@@ -221,6 +244,21 @@ export function preflight(products: Product[], opts: PreflightOptions = {}): Cap
         state: !needs.every((n) => n.met) ? "pending" : needs.some((n) => n.verified === false) ? "unchecked" : "ready",
         needs,
       });
+    }
+    // Say plainly where a product's hooks do not exist (no silent gap): one `n/a` row per host
+    // without hook events. Never pending — there is nothing to install — and never "ready".
+    if (product.shipsHooks === true && Array.isArray(opts.hosts)) {
+      for (const host of opts.hosts) {
+        if (HOOK_HOSTS.has(host)) continue;
+        out.push({
+          productId: product.id,
+          capability: `hooks:${host}`,
+          label: `hooks — ${hostName(host)} has no hook events, so no ${product.id} hook was installed and nothing blocks on its own there: the evidence gate runs only when a skill calls it`,
+          optional: true,
+          state: "n/a",
+          needs: [],
+        });
+      }
     }
   }
   return out;

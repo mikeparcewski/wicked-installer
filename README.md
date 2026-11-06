@@ -38,7 +38,7 @@ npx wicked-installer install <ids>   Install specific products (space-separated)
 npx wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)
 npx wicked-installer mcp upsert|remove <key>   Write/remove one MCP server in your CLIs
 npx wicked-installer status          Show detected CLIs, installed products, capability
-                                     readiness, and wicked-garden's Claude Code registration
+                                     readiness, and where wicked-garden is installed (per host)
 npx wicked-installer --version
 
 Flags:
@@ -78,7 +78,12 @@ each delivered product's `capabilities` (registry.json) and reports every capabi
   because that package is the plugin's marketplace); the others do not.
 - **python** — `python3` / `python` (`py -3` on Windows) at the floor (3.10 for garden).
 - **backend** — on PATH: `wicked-vault` for garden's evidence gate, `wicked-estate-mcp` for
-  mem/search (optional), `wicked-crew` for the daemon.
+  mem/search (optional), `wicked-crew` for the daemon. An estate binary the installer put in
+  `~/.local/bin` (or `~/.cargo/bin`) off PATH still counts: the MCP entries use its absolute
+  path, and the line says how to put the dir on PATH.
+- **hooks** — `n/a` on Codex, OpenCode, Pi and Antigravity: those hosts have no hook events
+  (INTERFACE.md §8.4), so no garden hook is installed there and nothing blocks on its own;
+  the evidence gate runs only when a skill calls it.
 
 An `npx` fallback is never `ready`: it fetches the package at first use, so it fails offline.
 A missing launcher whose registry answers reads `pending — only the npx fallback is available`;
@@ -87,6 +92,28 @@ fails the install; the closing line says how many capabilities still need someth
 `--offline` skips the registry lookup, `--dry-run` checks PATH only (spawns nothing — a need found
 on PATH but not run makes the capability `unchecked`, never `ready`), and
 `status` runs the same check for the CLIs it detects.
+
+### wicked-estate without Rust
+
+wicked-estate (the knowledge and full bundles) installs from its GitHub release: the prebuilt
+archive for your platform (macOS arm64/x64, Linux x64/arm64 glibc, Windows x64), checked
+against the release's `SHA256SUMS`, with `wicked-estate` and `wicked-estate-mcp` placed in
+`~/.local/bin`. A checksum mismatch, a missing checksum file or a failed download installs
+nothing and says why. `cargo install` is used only when the release has no archive for your
+platform; without a Rust toolchain that case fails with the fix (install Rust from
+https://rustup.rs, then `cargo install wicked-estate wicked-estate-mcp`). When `~/.local/bin`
+is not on PATH, the Claude Code and OpenCode MCP entries use the absolute path, and the install
+says how to add the dir to PATH.
+
+### Uninstall
+
+There is no central `uninstall` yet (issue #49). `npx wicked-installer uninstall` says so and
+changes nothing (it used to open the install picker). On Claude Code,
+`claude plugin uninstall wicked-garden@wicked-garden` removes the plugin and
+`node <installer>/dist/install-claude.js uninstall --all` removes what that script wrote. The
+Codex, OpenCode, Pi and Antigravity scripts refuse `uninstall` (and `status`) with exit 1 and
+change nothing; each host's `<home>/wicked-installer/<cli>-install.json` lists what was
+installed there.
 
 ### Codex — wicked-garden as a plugin
 
@@ -253,9 +280,15 @@ exist; **partially registered (…)** naming what is missing; **copy only (unreg
 for a bare `plugins/wicked-garden` copy; **not installed**; **unreadable (…)** when a
 state file — or any path component below the config dir — is a symlink, resolves outside
 the config dir, or cannot be read. The **overall** line is the worst state across the
-active dirs (unreadable > not installed > copy only > partial > registered) and `status`
-exits 1 unless wicked-garden is registered in every active dir; the product list's
-"installed" for wicked-garden means exactly that. `status` runs no `claude plugin …`
+active dirs (unreadable > not installed > copy only > partial > registered); Claude Code
+counts as installed only when every active dir is registered.
+
+wicked-garden is installed **per host**. For Codex, OpenCode, Pi and Antigravity, `status`
+reads the host's install marker (`<home>/wicked-installer/<cli>-install.json`) and checks the
+files it names: Codex's cached plugin payload (`plugins/cache/<marketplace>/<plugin>/<version>/`)
+or the copied skill directories. A marker whose files are gone is **broken**, never installed.
+The product list shows the hosts garden is installed on, and `status` exits 1 when garden is
+installed on no host, or is broken (partially registered, unreadable, files gone) on any. `status` runs no `claude plugin …`
 command. Its CLI detection is read-only: the `claude --version` probe (verified to write
 nothing) plus the pre-existing product-status probes (`<cli> --version` for the other
 detected CLIs) — no install, no write.
@@ -282,9 +315,27 @@ npx wicked-installer pack check ./acme-seo-pack    # conformance gate only
 `pack add` fetches the source, runs wicked-garden's shipped conformance
 gate (fail-closed; `--force` to override), copies the pack to
 `~/.something-wicked/wicked-garden/packs/installed/<name>`, makes its
-skills visible to **Claude Code** (`~/.claude/skills/` — or skips the copy
-when the pack ships as a Claude Code plugin), and registers it with the
+skills visible to **Claude Code** (`<config dir>/skills/` of every active
+config dir — `$CLAUDE_CONFIG_DIR` when set, else `~/.claude` — or skips the
+copy when the pack ships as a Claude Code plugin), and registers it with the
 garden runtime (catalog + crew specialist routing + peer-floor probe).
+
+**Your edits are never overwritten (issue #48).** Each config dir gets a
+record, `<config dir>/wicked-installer/packs/<name>.json`: the installation
+id, source, version, destination and the sha256 of every file written.
+Before anything changes, `pack add` compares every destination with it.
+A file you edited, a file you added inside an installed skill, or a
+same-named skill the pack does not own **holds** the whole update: nothing
+is changed (installed copy, skills and registration stay as they were), and
+the paths are listed with the installed and incoming versions. Nothing is
+merged; back up or move those paths and re-run. A clean update re-creates
+owned files you deleted and removes obsolete files only while they are
+unchanged. `pack add --dry-run` prints the same classification (unchanged,
+missing, new, obsolete, edited, added, foreign). `pack remove` deletes only
+unchanged files it wrote, keeps and lists the rest, and says the cleanup is
+incomplete (exit 1). A pack installed by 0.8.1 or earlier (no record) is
+adopted when its skill dirs are byte-identical to the installed or incoming
+copy, and held otherwise.
 Validation and registration are wicked-garden's own tooling — this command
 never re-implements them.
 

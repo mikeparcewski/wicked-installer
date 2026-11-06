@@ -16,6 +16,8 @@ import type { InstallResult, Product } from "./types.js";
 import { LEGACY_CLEANUP_ISSUE, cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, detectLegacyCopies, expandHome, readRegistration, registrationVerdict, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
 import type { RegistrationState } from "./claude-plugin.js";
 import { preflight } from "./readiness.js";
+import { NON_CLAUDE_HOSTS, hostProductStatus } from "./host-status.js";
+import type { HostProductStatus } from "./host-status.js";
 import type { CapabilityReadiness } from "./readiness.js";
 
 /**
@@ -312,8 +314,8 @@ export function renderReadiness(rows: CapabilityReadiness[], heading: string): n
   if (rows.length === 0) return 0;
   console.log(chalk.bold(`\n${heading}`));
   for (const r of rows) {
-    const tag = r.state === "ready" ? chalk.green("ready    ") : r.state === "unchecked" ? chalk.cyan("unchecked") : chalk.yellow("pending  ");
-    console.log(`  ${tag}  ${chalk.bold(r.productId)} — ${r.label}${r.optional ? chalk.dim(" (optional)") : ""}`);
+    const tag = r.state === "ready" ? chalk.green("ready    ") : r.state === "unchecked" ? chalk.cyan("unchecked") : r.state === "n/a" ? chalk.dim("n/a      ") : chalk.yellow("pending  ");
+    console.log(`  ${tag}  ${chalk.bold(r.productId)} — ${r.label}${r.optional && r.state !== "n/a" ? chalk.dim(" (optional)") : ""}`);
     for (const n of r.needs) {
       const mark = !n.met ? chalk.yellow("✗") : n.verified === false ? chalk.cyan("?") : chalk.green("✓");
       console.log(`             ${mark} ${n.need}: ${chalk.dim(n.detail)}`);
@@ -399,9 +401,12 @@ export function renderSummary(results: CliRunResult[], productIds: string[]): bo
     } else if (r.home) {
       notes.push(`${chalk.dim(r.displayName + " home:")} ${r.home}`);
     }
-    // A registered plugin's outcome is a sentence, not a copy count — surface it.
+    // A registered plugin's outcome is a sentence, not a copy count — surface it. A failure's
+    // reason (and its fix) is surfaced too: the grid alone only says "failed".
     for (const e of r.entries) {
-      if (getProduct(e.productId)?.type === "claude-plugin" && e.message) {
+      if (!e.success && e.message) {
+        notes.push(`${chalk.red(`${e.displayName ?? e.productId} (${r.displayName}) failed:`)} ${e.message}`);
+      } else if (getProduct(e.productId)?.type === "claude-plugin" && e.message) {
         notes.push(`${chalk.dim((e.displayName ?? e.productId) + ":")} ${e.message}`);
       }
     }
@@ -716,13 +721,47 @@ function renderPluginRegistration(flags: DispatchFlags): RegistrationState | und
 
   const label = STATE_LABEL[worst];
   const colored = worst === "registered" ? chalk.green(label) : worst === "copy-only" ? chalk.yellow(label) : chalk.red(label);
-  console.log(`  overall:     ${colored} across ${dirs.length} config dir(s)${worst === "registered" ? "" : chalk.dim("  (status exits 1 unless wicked-garden is registered in every active config dir)")}`);
+  console.log(`  overall:     ${colored} across ${dirs.length} config dir(s)${worst === "registered" ? "" : chalk.dim("  (Claude Code is registered only when every active config dir is)")}`);
   return worst;
+}
+
+/**
+ * wicked-garden on every NON-Claude host whose script is bundled and whose CLI is detected or
+ * that holds an install marker (host-status.ts — read from disk, nothing spawned).
+ */
+function gardenOnOtherHosts(): HostProductStatus[] {
+  const bundled = new Set(discoverCliScripts(__dirname).map((s) => s.cli));
+  const out: HostProductStatus[] = [];
+  for (const host of Object.keys(NON_CLAUDE_HOSTS)) {
+    if (!bundled.has(host)) continue;
+    const st = hostProductStatus("wicked-garden", host);
+    if (!st) continue;
+    if (!detectCli(host).detected && !existsSync(st.marker)) continue;
+    out.push(st);
+  }
+  return out;
+}
+
+function renderOtherHosts(rows: HostProductStatus[]): void {
+  if (rows.length === 0) return;
+  console.log(chalk.bold("\nwicked-garden on other hosts (from each host's install marker + the files it names):"));
+  const width = Math.max(...rows.map((r) => r.displayName.length));
+  for (const r of rows) {
+    const tag = r.state === "installed" ? chalk.green("✓ installed    ")
+      : r.state === "broken" ? chalk.red("✗ broken       ")
+      : r.state === "unreadable" ? chalk.red("! unreadable   ")
+      : chalk.dim("  not installed");
+    console.log(`  ${r.displayName.padEnd(width)}  ${tag}  ${chalk.dim(`${r.detail}  (${r.home})`)}`);
+  }
 }
 
 async function runStatus(flags: DispatchFlags): Promise<void> {
   const { productInstallState } = await import("./detector.js");
   const products = listProducts(true);
+  // wicked-garden is installed per HOST: a Claude Code plugin registration, or a Codex plugin /
+  // copied skills recorded by that host's install script. One host is enough to be installed.
+  const otherHosts = gardenOnOtherHosts();
+  const gardenElsewhere = otherHosts.filter((h) => h.state === "installed").map((h) => h.displayName);
 
   const clis = detectClis();
   console.log(chalk.bold("Detected CLIs:"));
@@ -741,7 +780,10 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
   console.log(chalk.bold("\nwicked-* products:"));
   for (const p of products) {
     // Same --claude-home target set as the registration section below, so the two agree.
-    const state = productInstallState(p.id, new Set(), flags.claudeHomes);
+    let state = productInstallState(p.id, new Set(), flags.claudeHomes);
+    // garden: the Claude registration above, OR an install on another host.
+    const onHosts = p.id === "wicked-garden" ? [...(state === "installed" ? ["Claude Code"] : []), ...gardenElsewhere] : [];
+    if (onHosts.length > 0) state = "installed";
     const installed = state === "installed";
     // A `manual` product is not installed DIRECTLY — it arrives inside something else
     // (wicked-studio ships in wicked-crew). Both facts matter and neither replaces the other:
@@ -758,7 +800,7 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
         ? chalk.yellow("~ manual")
         : chalk.dim("  not installed");
     const statusBadge = (p.status === "design" || p.status === "retired") ? chalk.gray(` [${p.status}]`) : "";
-    console.log(`  ${statusIcon}  ${chalk.bold(p.id)}${statusBadge}`);
+    console.log(`  ${statusIcon}  ${chalk.bold(p.id)}${statusBadge}${onHosts.length > 0 ? chalk.dim(`  (${onHosts.join(", ")})`) : ""}`);
   }
 
   // Capability readiness, for the hosts actually present: "installed"/"registered" above says
@@ -773,7 +815,19 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
   );
 
   const aggregate = renderPluginRegistration(flags);
-  if (aggregate !== undefined && aggregate !== "registered") process.exitCode = 1;
+  renderOtherHosts(otherHosts);
+  if (aggregate === undefined) return;
+  // Exit 1 when garden is installed on NO host, or when any host's install is broken (a
+  // partial / unreadable Claude registration, or a host marker whose files are gone). A host it
+  // was simply never installed on is not a failure.
+  const claudeBroken = aggregate === "partial" || aggregate === "unreadable";
+  const otherBroken = otherHosts.filter((h) => h.state === "broken" || h.state === "unreadable");
+  const installedOn = [...(aggregate === "registered" ? ["Claude Code"] : []), ...gardenElsewhere];
+  const verdict = installedOn.length === 0
+    ? chalk.red("not installed on any host")
+    : `${chalk.green(`installed on ${installedOn.join(", ")}`)}${claudeBroken || otherBroken.length > 0 ? chalk.red(`; broken on ${[...(claudeBroken ? ["Claude Code"] : []), ...otherBroken.map((h) => h.displayName)].join(", ")}`) : ""}`;
+  console.log(`\n${chalk.bold("wicked-garden:")} ${verdict}${chalk.dim("  (status exits 1 when it is installed on no host, or broken on any)")}`);
+  if (installedOn.length === 0 || claudeBroken || otherBroken.length > 0) process.exitCode = 1;
 }
 
 function printHelp(): void {
@@ -899,8 +953,26 @@ async function main(): Promise<void> {
       process.exit(await runPack(argv.slice(packIdx + 1)));
       break;
     }
-    default:
+    case "uninstall":
+      // There is no central uninstall yet (wicked-installer#49). Refuse plainly: this verb used to
+      // fall through to the interactive INSTALL picker.
+      console.error(chalk.red("wicked-installer has no central `uninstall` yet (wicked-installer#49) — nothing was installed, removed or changed."));
+      console.error([
+        "  Claude Code:  claude plugin uninstall wicked-garden@wicked-garden   (the garden plugin)",
+        `                node ${join(__dirname, "install-claude.js")} uninstall --all   (what install-claude put into the config dir)`,
+        "  Skill packs:  wicked-installer pack remove <name>",
+        "  Codex, OpenCode, Pi, Antigravity: no uninstall yet; each host's <home>/wicked-installer/<cli>-install.json lists what was installed.",
+      ].join("\n"));
+      process.exit(1);
+      break;
+    case undefined:
       await runInteractive(flags);
+      break;
+    default:
+      // An unknown command never opens the install picker: the arguments it carried would be ignored.
+      console.error(chalk.red(`Unknown command: ${cmd}`));
+      printHelp();
+      process.exit(1);
   }
 }
 

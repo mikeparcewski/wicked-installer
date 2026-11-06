@@ -17,6 +17,8 @@ export interface InstallAction {
   crate?: string;            // crates.io crate name — for cargo; when `crates` is present, names the product's primary (MCP) binary
   crates?: string[];         // for cargo products that ship >1 crate (e.g. wicked-estate + wicked-estate-mcp); wins over `crate` for acquisition
   version?: string;          // exact version to pin — for cargo (omit for latest)
+  /** cargo products with prebuilt GitHub release archives: installed from the release (sha256-verified, ~/.local/bin); cargo only when there is no archive for the platform (src/release-binary.ts). */
+  release?: { githubRepo: string; binaries: string[]; assetPrefix?: string; checksums?: string };
   marketplace?: string;      // claude-plugin: what `claude plugin marketplace add` receives (GitHub owner/repo, URL, or path); default mikeparcewski/<id>
   pluginId?: string;         // claude-plugin: `<plugin>@<marketplace>` for `claude plugin install|update`; default <id>@<id>
   codexPlugin?: boolean;     // npm-run: the package ships .codex-plugin/ — install-codex may `npm install -g` it and register it as a Codex plugin
@@ -38,6 +40,8 @@ export interface Product {
   successors?: string[];
   /** What each capability needs at runtime, checked read-only after install (src/readiness.ts). */
   capabilities?: Capability[];
+  /** Ships hook assets (wired only on hosts with hook events — readiness.ts HOOK_HOSTS); readiness reports `n/a` on the rest. */
+  shipsHooks?: boolean;
 }
 
 /**

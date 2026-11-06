@@ -21,6 +21,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isInstallable, retiredRefusal } from "./types.js";
+import { acquireFromRelease, cargoMissingMessage, findInstalledBinary } from "./release-binary.js";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 
@@ -68,6 +69,7 @@ interface InstallAction {
   dest?: string;
   crate?: string;
   crates?: string[];
+  release?: { githubRepo: string; binaries: string[]; assetPrefix?: string; checksums?: string }; // prebuilt archives (src/release-binary.ts)
   version?: string;
   marketplace?: string; // claude-plugin: marketplace source for `claude plugin marketplace add`
   pluginId?: string;    // claude-plugin: `<plugin>@<marketplace>`
@@ -946,8 +948,16 @@ function installProductBinaries(product: Product, options: Options, actions: Act
         ? install.crates
         : singleCrate ? [singleCrate] : [];
       if (crates.length === 0) throw new Error(`${product.id}: install.crate required`);
+      // Prebuilt + sha256-verified from the product's GitHub release first; cargo only when the
+      // release has no binary for this platform (src/release-binary.ts).
+      const release = acquireFromRelease(product.id, install, { dryRun: options.dryRun === true, log: (line) => log(options, line) });
+      notes.push(...release.notes);
+      if (release.action === "done") {
+        actions.push({ kind: "acquire", target: product.id, result: options.dryRun ? "planned" : "ok", detail: release.detail });
+        break;
+      }
       if (!commandExists("cargo")) {
-        throw new Error("cargo not found; install Rust from https://rustup.rs and retry");
+        throw new Error(cargoMissingMessage(product.id, install, release.reason));
       }
       // `--version` only pins a single crate; with several, pin per-crate via name@version.
       const names = install.version && crates.length > 1
@@ -1519,6 +1529,13 @@ function wireMcp(
 
   for (const name of Object.keys(block)) {
     const desired = expandMcpSpec(block[name]);
+    // A bare command that is not on PATH but sits where acquisition put it (~/.local/bin for a
+    // release install, ~/.cargo/bin for a cargo build) is written as that absolute path, so
+    // Claude Code can start the server without the user editing PATH first.
+    if (!desired.command.includes("/") && !desired.command.includes("\\") && !commandExists(desired.command)) {
+      const found = findInstalledBinary(desired.command);
+      if (found) desired.command = found.path;
+    }
     const pointer = `/mcpServers/${encodePointerToken(name)}`;
     const actionTarget = `${fileMarker}${pointer}`;
     const existing = serverMap[name];
@@ -1554,8 +1571,7 @@ function wireMcp(
     // PATH-resolution warning for bare command names (§4.1).
     const cmd = desired.command;
     if (!cmd.includes("/") && !cmd.includes("\\") && !commandExists(cmd)) {
-      const hint = process.platform === "win32" ? "%USERPROFILE%\\.cargo\\bin" : "~/.cargo/bin";
-      notes.push(`mcp server '${name}' command '${cmd}' not found on PATH (check ${hint})`);
+      notes.push(`mcp server '${name}' command '${cmd}' not found on PATH, in ~/.local/bin or in ~/.cargo/bin — install it (npx wicked-installer install ${product.id}) and re-run`);
     }
   }
 

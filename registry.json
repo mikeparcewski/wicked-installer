@@ -15,7 +15,13 @@
         "type": "cargo",
         "crates": ["wicked-estate", "wicked-estate-mcp"],
         "crate": "wicked-estate-mcp",
-        "mcpInstructions": "Index a repo first: wicked-estate index <path> --db ~/.wicked-estate/graph.db. Then add wicked-estate as an MCP server in your CLI config with command: wicked-estate-mcp (both binaries install to ~/.cargo/bin — ensure it is on PATH)"
+        "release": {
+          "githubRepo": "mikeparcewski/wicked-estate",
+          "binaries": ["wicked-estate", "wicked-estate-mcp"],
+          "assetPrefix": "wicked-estate",
+          "checksums": "SHA256SUMS"
+        },
+        "mcpInstructions": "Index a repo first: wicked-estate index <path> --db ~/.wicked-estate/graph.db. The MCP server is wicked-estate-mcp. Both binaries install to ~/.local/bin from the sha256-verified GitHub release (to ~/.cargo/bin only when no prebuilt binary exists for the platform and cargo builds them); put that dir on PATH to run them from a shell."
       },
       "mcp": {
         "wicked-estate": {
@@ -107,6 +113,7 @@
       "displayName": "Wicked Garden",
       "description": "Curated toolkit for what coding agents can't do alone: re-derives 'done' from evidence, sees injected edges, renames across files as a graph operation, multi-model review, 40-specialist QE domain, mem/search via wicked-estate. Opinionated bundle — all or nothing.",
       "type": "claude-plugin",
+      "shipsHooks": true,
       "standalone": false,
       "opinionated": true,
       "status": "active",

@@ -5,6 +5,7 @@ import { execSync } from "node:child_process";
 import type { DetectedCli, Product } from "./types.js";
 import { loadRegistry } from "./registry.js";
 import { claudePluginSpec, findOnPath, probeOnPath, readRegistration, registrationVerdict, resolveClaudeConfigDirs } from "./claude-plugin.js";
+import { findInstalledBinary } from "./release-binary.js";
 
 interface CliSpec {
   id: string;
@@ -126,7 +127,7 @@ const DETECT_SPECS: Record<string, CliDetectSpec> = {
   antigravity: {
     cli: "antigravity",
     displayName: "Antigravity",
-    bins: ["gemini", "antigravity-cli"],
+    bins: ["agy", "gemini", "antigravity-cli"], // agy = the Antigravity CLI
     homeEnv: "GEMINI_HOME",
     homeRoots: [".gemini"],
     markers: ["config.json", "auth", "settings.json"],
@@ -155,7 +156,7 @@ const DETECT_SPECS: Record<string, CliDetectSpec> = {
   pi: {
     cli: "pi",
     displayName: "Pi",
-    bins: [],
+    bins: ["pi"],
     homeRoots: [".pi"],
     markers: ["agent"],
   },
@@ -377,6 +378,18 @@ function commandStateSafe(name: string): InstallState {
   return SAFE_BINARY.test(name) ? commandState(name) : "not-installed";
 }
 
+/**
+ * A `cargo` product's binary: on PATH, or where acquisition puts it off PATH — ~/.local/bin
+ * (the sha256-verified release install) or ~/.cargo/bin (a cargo build). Either way the
+ * installer's MCP wiring uses the absolute path, so the product IS installed; readiness says
+ * when the dir is not on PATH.
+ */
+function installedBinaryState(name: string): InstallState {
+  const state = commandStateSafe(name);
+  if (state !== "not-installed" || !SAFE_BINARY.test(name)) return state;
+  return findInstalledBinary(name) ? "installed" : "not-installed";
+}
+
 /** Detection derived from the product's own `install` spec, so a new product needs no new branch. */
 function installedPerRegistry(productId: string, seen: ReadonlySet<string>, claudeHomes: string[]): InstallState {
   const product: Product | undefined = loadRegistry().products.find((p) => p.id === productId);
@@ -395,13 +408,13 @@ function installedPerRegistry(productId: string, seen: ReadonlySet<string>, clau
       // CLI binary vouch for the missing MCP server. Corrupt entries yield false, never throw.
       if (Array.isArray(install.crates) && install.crates.length > 0) {
         const crates: unknown[] = install.crates;
-        return allOf(crates.map((c) => (typeof c === "string" ? commandStateSafe(c) : "not-installed")));
+        return allOf(crates.map((c) => (typeof c === "string" ? installedBinaryState(c) : "not-installed")));
       }
       // Single-crate: the crate may publish a differently-named binary
       // (wicked-estate-mcp ⇒ wicked-estate), so keep the historical fallback.
       const crate = install.crate ?? install.package;
       if (typeof crate !== "string") return "not-installed";
-      return anyOf([commandStateSafe(crate), commandStateSafe(crate.replace(/-mcp$/, ""))]);
+      return anyOf([installedBinaryState(crate), installedBinaryState(crate.replace(/-mcp$/, ""))]);
     }
     case "manual": {
       // Ships inside something else; installed exactly when that thing is.
