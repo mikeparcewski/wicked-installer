@@ -5,6 +5,8 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-06
+
 ### Fixed
 
 - **`pack add` no longer deletes your edits or your own skills (#48).** It used to delete each pack skill
