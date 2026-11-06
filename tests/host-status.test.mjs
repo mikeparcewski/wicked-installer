@@ -85,6 +85,13 @@ test("status: garden as a Codex plugin is installed when Codex's cached payload 
     const ok = run([CLI, "status", "--offline"], home);
     assert.equal(ok.status, 0, ok.out);
     assert.match(ok.out, /Codex\s+✓ installed\s+Codex plugin wicked-garden@wicked-garden 12\.64\.0/);
+    // The same registration in the other TOML spellings (inline table, dotted key) counts too.
+    for (const spelling of ['[plugins]\n"wicked-garden@wicked-garden" = { enabled = true }\n', 'plugins."wicked-garden@wicked-garden".enabled = true\n']) {
+      writeFileSync(toml, spelling);
+      const alt = run([CLI, "status", "--offline"], home);
+      assert.equal(alt.status, 0, `${spelling}\n${alt.out}`);
+    }
+    writeFileSync(toml, '[plugins."wicked-garden@wicked-garden"]\nenabled = true\n');
 
     // Disabled in Codex's own config (read now, not the marker's snapshot): not installed.
     writeFileSync(join(home, ".codex", "config.toml"), '[plugins."wicked-garden@wicked-garden"]\nenabled = false\n');

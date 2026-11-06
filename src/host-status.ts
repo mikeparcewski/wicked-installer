@@ -109,7 +109,10 @@ function prefixedSkills(dir: string, prefix: string): number {
 /**
  * Codex's own registration of the plugin: `codex plugin add` writes `[plugins."<id>"]` (with
  * `enabled = true`) into config.toml, and Codex loads only plugins configured there. Read, never
- * written. `registered: false` when the table is absent or config.toml cannot be read.
+ * written. The TOML spellings of that one key are all recognized — the table header
+ * `[plugins."<id>"]`, an inline table `"<id>" = { enabled = … }` under `[plugins]`, and dotted keys
+ * (`plugins."<id>".enabled = …` at the root, `"<id>".enabled = …` under `[plugins]`).
+ * `registered: false` when none is present or config.toml cannot be read.
  */
 function codexPluginConfig(home: string, pluginId: string): { registered: boolean; enabled?: boolean } {
   let raw: string;
@@ -118,20 +121,38 @@ function codexPluginConfig(home: string, pluginId: string): { registered: boolea
   } catch {
     return { registered: false };
   }
-  let inTable = false;
+  const esc = pluginId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const quoted = `(?:"${esc}"|'${esc}')`;
+  const bool = (v: string | undefined): boolean | undefined => (v === "true" ? true : v === "false" ? false : undefined);
+  let table = "";
   let registered = false;
   let found: boolean | undefined;
   for (const line of raw.split(/\r?\n/)) {
     const header = /^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$/.exec(line);
     if (header) {
-      const key = header[1].replace(/\s+/g, "");
-      inTable = key === `plugins."${pluginId}"` || key === `plugins.'${pluginId}'`;
-      if (inTable) registered = true;
+      table = header[1].replace(/\s+/g, "");
+      if (new RegExp(`^plugins\\.${quoted}$`).test(table)) registered = true;
       continue;
     }
-    if (!inTable) continue;
-    const m = /^\s*enabled\s*=\s*(true|false)\s*(#.*)?$/.exec(line);
-    if (m) found = m[1] === "true";
+    if (new RegExp(`^plugins\\.${quoted}$`).test(table)) {
+      const m = /^\s*enabled\s*=\s*(true|false)\s*(#.*)?$/.exec(line);
+      if (m) found = bool(m[1]);
+      continue;
+    }
+    const prefix = table === "plugins" ? "" : table === "" ? "plugins\\s*\\.\\s*" : undefined;
+    if (prefix === undefined) continue;
+    const inline = new RegExp(`^\\s*${prefix}${quoted}\\s*=\\s*\\{(.*)\\}\\s*(#.*)?$`).exec(line);
+    if (inline) {
+      registered = true;
+      const m = /(?:^|,)\s*enabled\s*=\s*(true|false)\s*(?:,|$)/.exec(inline[1]);
+      if (m) found = bool(m[1]);
+      continue;
+    }
+    const dotted = new RegExp(`^\\s*${prefix}${quoted}\\s*\\.\\s*enabled\\s*=\\s*(true|false)\\s*(#.*)?$`).exec(line);
+    if (dotted) {
+      registered = true;
+      found = bool(dotted[1]);
+    }
   }
   return { registered, enabled: found };
 }
