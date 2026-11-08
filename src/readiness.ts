@@ -229,13 +229,44 @@ function checkPython(need: Extract<CapabilityNeed, { kind: "python" }>, ctx: Ctx
     }
     seen.push(`${name}: ${res.status === 0 ? version || "no version" : res.error ?? `exit ${res.status ?? "?"}`}`);
   }
-  return {
-    need: label,
-    met: false,
-    detail: seen.length > 0 ? `no interpreter at or above ${need.min} (${seen.join("; ")})` : "no python3 / python on PATH",
-    remedy: `install Python ${need.min}+`,
-  };
+  const none = seen.length > 0 ? `no interpreter at or above ${need.min} (${seen.join("; ")})` : "no python3 / python on PATH";
+  // first-run-2 N2: name a real command. uv is the one mechanism: garden's launcher runs scripts
+  // with a uv-managed Python when uv is on PATH; a host that calls python3 itself (Claude Code's
+  // hooks) gets a uv-managed python3 installed as the default.
+  const uv = findUv({ env: ctx.env, platform: ctx.platform, home: homeOfCtx(ctx) });
+  if (need.launcher && uv?.onPath) {
+    // The launcher's rung is `uv run --project <root> --frozen --no-dev python`: it needs a uv that answers and
+    // knows those flags (uv >= UV_MIN); garden's npm package and plugin copies ship the uv.lock that rung reads.
+    if (ctx.probeOnly) return { need: label, met: true, verified: false, detail: `${none}; uv at ${uv.path} is on PATH (version not checked under --dry-run)` };
+    const res = ctx.spawn(uv.path, ["--version"]);
+    const version = firstLine(`${res.stdout}\n${res.stderr}`.trim());
+    if (res.status === 0 && versionAtLeast(version, UV_MIN)) {
+      return { need: label, met: true, detail: `${none}; ${version} at ${uv.path} is on PATH, so garden's launcher runs scripts with a uv-managed Python ${need.min}+ (uv downloads it at first use)` };
+    }
+    return { need: label, met: false, detail: `${none}; uv at ${uv.path} ${res.status === 0 ? `is ${version || "of an unknown version"}, older than ${UV_MIN}` : "did not answer --version"}`, remedy: "run `uv self update` (or reinstall uv)" };
+  }
+  // `--default` is a preview feature (uv 0.6 refuses it without `--preview`); a path with a space is quoted.
+  const uvCmd = uv && !uv.onPath ? (/\s/.test(uv.path) ? `${ctx.platform === "win32" ? "& " : ""}"${uv.path}"` : uv.path) : "uv";
+  const pyInstall = `${uvCmd} python install ${UV_PYTHON} --default --preview`;
+  let remedy: string;
+  if (uv === undefined) {
+    remedy = need.launcher
+      ? `install uv (${uvInstallCommand(ctx.platform, ctx.env)}), then open a new terminal: garden's launcher runs scripts with a uv-managed Python`
+      : `install uv (${uvInstallCommand(ctx.platform, ctx.env)}), open a new terminal, then run \`uv python install ${UV_PYTHON} --default --preview\``;
+  } else if (!uv.onPath) {
+    remedy = need.launcher
+      ? `uv is installed at ${uv.path} but not on PATH; ${pathFix(dirname(uv.path), ctx.platform)}. Garden's launcher then runs scripts with a uv-managed Python`
+      : `run \`${pyInstall}\`, then ${pathFix(dirname(uv.path), ctx.platform)}`;
+  } else {
+    remedy = `run \`${pyInstall}\` (it puts python3 in uv's bin directory, ~/.local/bin by default, which must come before /usr/bin on PATH)`;
+  }
+  return { need: label, met: false, detail: none, remedy };
 }
+
+/** The Python a remedy asks uv for: inside garden's `requires-python` (>=3.10,<3.15). */
+const UV_PYTHON = "3.12";
+/** The oldest uv whose `uv run` takes `--frozen --no-dev` and downloads a managed Python on demand. */
+const UV_MIN = "0.5.0";
 
 function checkNeed(need: CapabilityNeed, ctx: Ctx): NeedResult {
   if (need.kind === "uv") {

@@ -62,8 +62,12 @@ export interface Capability {
 export type CapabilityNeed =
   /** An executable on PATH. `npx` names the package an `npx` fallback would fetch (and `npm i -g` installs); `product` is the registry id whose install provides it when there is no npm package; `doctor` is a read-only self-check subcommand that prints `{ "ok": bool }` JSON. */
   | { kind: "launcher" | "backend"; bin: string; npx?: string; doctor?: string[]; product?: string }
-  /** A Python 3 interpreter (python3 → python → py -3) at or above `min`. */
-  | { kind: "python"; min: string }
+  /**
+   * A Python 3 interpreter (python3 → python → py -3) at or above `min`. `launcher`: the scripts run
+   * through wicked-garden's launcher, whose ladder takes `uv run` (a uv-managed Python at the
+   * project's floor) before python3, so uv on PATH meets the need.
+   */
+  | { kind: "python"; min: string; launcher?: boolean }
   /** Crew's job skills environment is built with uv; its standalone installer may place it off PATH. */
   | { kind: "uv" }
   /** A wicked-garden plugin root where wicked-crew's daemon looks for it (src/crew-garden.ts mirrors crew's order). */

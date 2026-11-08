@@ -136,7 +136,7 @@
           "hosts": ["codex", "opencode", "pi", "antigravity"],
           "needs": [
             { "kind": "launcher", "bin": "wicked-garden", "npx": "wicked-garden", "doctor": ["doctor"] },
-            { "kind": "python", "min": "3.10" }
+            { "kind": "python", "min": "3.10", "launcher": true }
           ]
         },
         {
