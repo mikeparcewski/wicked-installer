@@ -114,7 +114,7 @@ export async function promptClis(options: CliOption[]): Promise<CliOption[]> {
   });
 
   const selected = await checkbox({
-    message: "Add the tools to which coding agents? (space to toggle, enter to confirm; select none to install only the command-line tools, with Wicked Garden registered in Claude Code):",
+    message: "Add the tools to which coding agents? (space to toggle, enter to confirm; select none to skip per-agent setup: the command-line tools install once for the machine, and Wicked Garden goes to Claude Code if it is installed):",
     choices,
   });
 

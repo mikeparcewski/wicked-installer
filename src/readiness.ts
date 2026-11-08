@@ -18,10 +18,9 @@ import { spawnSync } from "node:child_process";
 import { prepareClaudeSpawn, probeOnPath } from "./claude-plugin.js";
 import type { Capability, CapabilityNeed, Product } from "./types.js";
 import { dirname } from "node:path";
-import { homedir } from "node:os";
 import { findInstalledBinary, pathFix } from "./release-binary.js";
 import { findUv, uvInstallCommand } from "./uv.js";
-import { findGardenForCrew } from "./crew-garden.js";
+import { crewEnv, findGardenForCrew, homeOf } from "./crew-garden.js";
 
 /**
  * `unchecked` = nothing is known to be missing, but a need was only found on PATH and not
@@ -158,8 +157,8 @@ function npxReachable(pkg: string, ctx: Ctx): { reachable: boolean; detail: stri
 }
 
 /** The checked environment's home (tests and sandboxes set HOME), else this user's. */
-function homeOf(ctx: Ctx): string {
-  return (ctx.platform === "win32" ? ctx.env.USERPROFILE ?? ctx.env.HOME : ctx.env.HOME ?? ctx.env.USERPROFILE) ?? homedir();
+function homeOfCtx(ctx: Ctx): string {
+  return homeOf(ctx.env, ctx.platform);
 }
 
 function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): NeedResult {
@@ -195,7 +194,7 @@ function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): Nee
   if (need.product) {
     // Installed by the installer, off PATH: ~/.local/bin (release) or ~/.cargo/bin (cargo). The
     // installer's MCP entries and garden's launcher use that absolute path, so it runs; a shell does not find it.
-    const off = findInstalledBinary(need.bin, { env: ctx.env, platform: ctx.platform, home: homeOf(ctx) });
+    const off = findInstalledBinary(need.bin, { env: ctx.env, platform: ctx.platform, home: homeOfCtx(ctx) });
     if (off && off.source !== "PATH") {
       return { need: label, met: true, detail: `installed at ${off.path} (not on PATH: MCP entries use this path; to run it from a shell, ${pathFix(dirname(off.path), ctx.platform)})` };
     }
@@ -237,18 +236,18 @@ function checkPython(need: Extract<CapabilityNeed, { kind: "python" }>, ctx: Ctx
 
 function checkNeed(need: CapabilityNeed, ctx: Ctx): NeedResult {
   if (need.kind === "uv") {
-    // A file probe is sufficient: uv has no doctor/version floor to defer under --dry-run.
-    // Use the caller's home, so a sandboxed readiness check cannot see the operator's uv.
-    const found = findUv({ env: ctx.env, platform: ctx.platform, home: homeOf(ctx) });
-    return found
-      ? { need: "uv", met: true, detail: `installed at ${found.path} (${found.onPath ? "on PATH" : `not on PATH; ${pathFix(dirname(found.path), ctx.platform)}`})` }
-      : { need: "uv", met: false, detail: "not installed; wicked-crew needs uv to build each job's skills environment", remedy: uvInstallCommand(ctx.platform, ctx.env) };
+    // Only wicked-crew declares this need, and its ctx.env carries crew's own PATH (see preflight):
+    // "met" = crew's `uv sync` will find it. A uv elsewhere (UV_INSTALL_DIR, CARGO_HOME) needs PATH.
+    const found = findUv({ env: ctx.env, platform: ctx.platform, home: homeOfCtx(ctx) });
+    if (found?.onPath) return { need: "uv", met: true, detail: `found at ${found.path}` };
+    if (found) return { need: "uv", met: false, detail: `installed at ${found.path}, which is not on PATH, so crew's \`uv sync\` cannot find it`, remedy: pathFix(dirname(found.path), ctx.platform) };
+    return { need: "uv", met: false, detail: "not installed; wicked-crew needs uv to build each job's skills environment", remedy: uvInstallCommand(ctx.platform, ctx.env) };
   }
   if (need.kind === "crew-garden") {
     // Garden delivered to some host is not garden crew can load (first-run B3): check crew's own sources.
     const hit = findGardenForCrew(ctx.env, ctx.platform);
     return hit
-      ? { need: "wicked-garden for crew", met: true, detail: `${hit.source} (${hit.path})` }
+      ? { need: "wicked-garden for crew", met: true, detail: `${hit.source}, version ${hit.version} (${hit.path}); crew checks its minimum garden version at boot` }
       : {
         need: "wicked-garden for crew",
         met: false,
@@ -273,9 +272,12 @@ export function preflight(products: Product[], opts: PreflightOptions = {}): Cap
   for (const product of products) {
     const caps = Array.isArray(product.capabilities) ? product.capabilities : [];
     const hosts = opts.hostsFor ? opts.hostsFor(product.id) : opts.hosts;
+    // crew's daemon looks up its tools on its own PATH (it appends ~/.local/bin & co. at boot):
+    // judge crew's needs against that, not against this shell's PATH.
+    const pctx = product.id === "wicked-crew" ? { ...ctx, env: crewEnv(ctx.env, ctx.platform) } : ctx;
     for (const cap of caps) {
       if (!applies(cap, hosts)) continue;
-      const needs = (Array.isArray(cap.needs) ? cap.needs : []).map((n) => checkNeed(n, ctx));
+      const needs = (Array.isArray(cap.needs) ? cap.needs : []).map((n) => checkNeed(n, pctx));
       out.push({
         productId: product.id,
         capability: cap.id,

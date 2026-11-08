@@ -25,7 +25,7 @@
 npx wicked-installer
 ```
 
-Interactive TUI — pick a bundle or select products individually. Detects which AI coding CLIs you have installed and guides you from there. When it asks **"Add the tools to which coding agents?"**, selecting none installs only the command-line tools (with Wicked Garden registered in Claude Code), without adding skills to any other agent.
+Interactive TUI — pick a bundle or select products individually. Detects which AI coding CLIs you have installed and guides you from there. When it asks **"Add the tools to which coding agents?"**, selecting none skips per-agent setup: the command-line tools install once for the machine, and Wicked Garden goes to Claude Code if it is installed.
 
 ---
 

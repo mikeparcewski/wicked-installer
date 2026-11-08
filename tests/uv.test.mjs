@@ -200,7 +200,7 @@ for (const scenario of ["exit 0 without binary", "exit 1 with binary", "spawn er
 
 test("install of a product requiring crew stops offline before installing any dependency", (t) => {
   const sb = sandbox(t);
-  const env = { ...process.env, ...sb.env, UV_INSTALL_DIR: "", XDG_BIN_HOME: "" };
+  const env = { ...process.env, ...sb.env, UV_INSTALL_DIR: "", UV_UNMANAGED_INSTALL: "", XDG_BIN_HOME: "", XDG_DATA_HOME: "" };
   delete env.CLAUDE_CONFIG_DIR;
   const result = spawnSync(process.execPath, ["dist/index.js", "install", "wicked-core", "--offline"], { env, encoding: "utf8" });
   assert.equal(result.status, 1, result.stderr);
@@ -210,7 +210,7 @@ test("install of a product requiring crew stops offline before installing any de
 
 test("dispatch returns 1 before launching any per-CLI script when uv is absent offline", (t) => {
   const sb = sandbox(t);
-  const env = { ...process.env, ...sb.env, UV_INSTALL_DIR: "", XDG_BIN_HOME: "" };
+  const env = { ...process.env, ...sb.env, UV_INSTALL_DIR: "", UV_UNMANAGED_INSTALL: "", XDG_BIN_HOME: "", XDG_DATA_HOME: "" };
   const script = `
     import { dispatchToClis } from "./dist/index.js";
     process.exitCode = await dispatchToClis(

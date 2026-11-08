@@ -21,6 +21,10 @@ All notable changes to wicked-installer are documented here. The format follows
   estate, and a wicked-garden crew can load (the places crew looks: Claude Code's and Codex's plugin caches, the
   wicked-garden npm package), with the fix for each. A host whose delivery failed (say, a failed Claude Code
   plugin registration) no longer gets a "ready" line, and `status` checks capabilities only for installed products.
+  crew's needs are judged on crew's own PATH (it adds `~/.local/bin` and `~/.cargo/bin` at boot).
+- **crew can always find the garden it was installed with.** When crew and garden are installed together and
+  garden landed only where crew does not look (OpenCode, Pi or Antigravity skill copies, or a failed Claude Code
+  registration), the installer also installs the wicked-garden npm package globally, which crew finds.
 - **The end message says how to start.** With crew installed it ends with `wicked-crew serve` (or
   `npx wicked-crew serve`) and `http://127.0.0.1:7701`, and never says "Done!" while crew's needs are pending.
 - **Wording.** The CLI picker no longer says "legacy direct install"; the summary grid says "skills added" instead

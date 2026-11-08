@@ -212,7 +212,7 @@ test("crew daemon stays pending without uv and is ready with HOME/.local/bin/uv,
     writeFileSync(join(bin, "wicked-estate"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     const garden = join(sb.env.HOME, ".codex", "plugins", "cache", "wicked-garden", "wicked-garden", "12.66.0", ".claude-plugin");
     mkdirSync(garden, { recursive: true });
-    writeFileSync(join(garden, "plugin.json"), "{}");
+    writeFileSync(join(garden, "plugin.json"), JSON.stringify({ version: "12.66.0" }));
     for (const probeOnly of [true, false]) {
       const ready = by(preflight([crew], { ...opts, probeOnly }), "daemon");
       assert.equal(ready.state, "ready");
@@ -220,7 +220,7 @@ test("crew daemon stays pending without uv and is ready with HOME/.local/bin/uv,
       assert.equal(found.met, true);
       assert.notEqual(found.verified, false);
       assert.ok(found.detail.includes(uv));
-      assert.match(found.detail, /not on PATH; add it to PATH/);
+      // crew's daemon appends ~/.local/bin to its own PATH at boot, so crew finds it there.
     }
     assert.equal(sb.spawned(), "", "neither crew nor uv was executed");
   } finally {

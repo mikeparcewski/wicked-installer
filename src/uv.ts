@@ -4,6 +4,7 @@
  * installed, using filesystem probes only, and let Astral's installer manage its own PATH fix.
  */
 import { spawnSync } from "node:child_process";
+import type { SpawnSyncOptions } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -24,7 +25,17 @@ export function findUv(opts: UvLocations = {}): { path: string; onPath: boolean 
   const file = exeName("uv", platform);
   const probe = probeOnPath(file, env, platform);
   if (probe.state === "found") return { path: probe.path, onPath: true };
-  const dirs = [env.UV_INSTALL_DIR, env.XDG_BIN_HOME, join(home, ".local", "bin"), join(home, ".cargo", "bin"), env.CARGO_HOME ? join(env.CARGO_HOME, "bin") : undefined];
+  // astral's destination order (docs.astral.sh/uv/reference/installer + storage): UV_INSTALL_DIR,
+  // UV_UNMANAGED_INSTALL, XDG_BIN_HOME, XDG_DATA_HOME/../bin, ~/.local/bin; then pre-0.5 cargo dirs.
+  const dirs = [
+    env.UV_INSTALL_DIR,
+    env.UV_UNMANAGED_INSTALL,
+    env.XDG_BIN_HOME,
+    env.XDG_DATA_HOME ? join(env.XDG_DATA_HOME, "..", "bin") : undefined,
+    join(home, ".local", "bin"),
+    env.CARGO_HOME ? join(env.CARGO_HOME, "bin") : undefined,
+    join(home, ".cargo", "bin"),
+  ];
   for (const dir of dirs) {
     if (!dir) continue;
     const path = join(dir, file);
@@ -45,6 +56,20 @@ export function uvInstallCommand(platform: NodeJS.Platform = process.platform, e
   const downloader = probeOnPath("curl", env, platform).state !== "found" && probeOnPath("wget", env, platform).state === "found"
     ? "wget -qO-" : "curl -LsSf";
   return `${downloader} https://astral.sh/uv/install.sh | sh`;
+}
+
+type SpawnLike = (cmd: string, args: string[] | undefined, options: SpawnSyncOptions) => { status: number | null; error?: Error };
+
+/**
+ * Run astral's documented command so the user sees its output. On Windows PowerShell receives the
+ * script as one argument (no cmd.exe quoting); on POSIX the documented pipe runs through sh.
+ * Profile modification is left on: astral knows the platform-correct persistent PATH fix.
+ */
+export function runUvInstaller(command: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv, spawn: SpawnLike = (c, a, o) => (a ? spawnSync(c, a, o) : spawnSync(c, o))): { status: number | null; error?: string } {
+  const result = platform === "win32"
+    ? spawn("powershell", ["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"], { env, stdio: "inherit" })
+    : spawn(command, undefined, { env, shell: true, stdio: "inherit" });
+  return { status: result.status, error: result.error?.message };
 }
 
 export interface EnsureUvOptions extends UvLocations {
@@ -78,21 +103,17 @@ export async function ensureUv(opts: EnsureUvOptions): Promise<UvResult> {
   if (opts.offline) return { ok: false, action: "offline", message: instruction };
   if (opts.confirm && !await opts.confirm()) return { ok: false, action: "declined", message: instruction };
   opts.log?.(`Installing uv with: ${command}`);
-  const run = opts.run ?? ((cmd: string, target: NodeJS.Platform) => {
-    // PowerShell receives its script as one argument on Windows; POSIX uses the documented pipe.
-    // Do not disable profile modification: Astral knows the platform-correct persistent PATH fix.
-    const result = target === "win32"
-      ? spawnSync("powershell", ["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"], { env, stdio: "inherit" })
-      : spawnSync(cmd, { env, shell: true, stdio: "inherit" });
-    return { status: result.status, error: result.error?.message };
-  });
+  const run = opts.run ?? ((cmd: string, target: NodeJS.Platform) => runUvInstaller(cmd, target, env));
   try {
     const result = run(command, platform);
     const installed = findUv(opts);
     if (result.status === 0 && !result.error && installed) {
       // astral's installer has just added its folder to the shell profile (.zshrc/.profile, or the
       // Windows user PATH); only this process's PATH is stale. Say that, not "edit your profile".
-      const where = installed.onPath ? "(on PATH)" : "(astral's installer added its folder to your shell's PATH: open a new terminal to use it there)";
+      const profileEdited = !env.UV_NO_MODIFY_PATH && !env.INSTALLER_NO_MODIFY_PATH && !env.UV_UNMANAGED_INSTALL;
+      const where = installed.onPath ? "(on PATH)"
+        : profileEdited ? "(astral's installer added its folder to your shell's PATH: open a new terminal to use it there)"
+        : `(not on PATH: ${pathFix(dirname(installed.path), platform)})`;
       return { ok: true, action: "installed", path: installed.path, message: `Installed uv at ${installed.path} ${where}.` };
     }
   } catch {
