@@ -7,6 +7,12 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ### Fixed
 
+- **Garden's Python check names a command you can run.** On a stock Mac (python3 3.9.6) the readiness line read
+  "install Python 3.10+" with nothing to run. Garden's launcher already runs its scripts with a uv-managed Python
+  when uv is on PATH, so for the script-backed skills (Codex, OpenCode, Pi, Antigravity) a uv 0.5.0 or newer on PATH now counts
+  as ready. When it isn't ready the remedy is a real command: the PATH line when uv is installed off PATH, astral's
+  install command when there is no uv, and `uv python install 3.12 --default` for Claude Code's hooks, which call
+  python3 directly.
 - **Installing wicked-crew makes sure uv is installed.** crew's daemon builds the skills environment every job
   uses with `uv sync`, so on a machine without uv every launch was refused and nothing said why. When crew is in
   the install set and uv is missing, the installer now runs astral's official installer

@@ -227,3 +227,91 @@ test("crew daemon stays pending without uv and is ready with HOME/.local/bin/uv,
     sb.cleanup();
   }
 });
+
+// first-run-2 N2: a stock Mac (python3 3.9.6) read "install Python 3.10+" with no command, though uv
+// was just installed. Garden's launcher runs scripts with a uv-managed Python when uv is on PATH.
+const LAUNCHED = {
+  ...GARDEN,
+  capabilities: GARDEN.capabilities.map((c) =>
+    c.id === "skill-scripts" ? { ...c, needs: c.needs.map((n) => (n.kind === "python" ? { ...n, launcher: true } : n)) } : c),
+};
+const pyNeed = (rows, id) => by(rows, id).needs.find((n) => n.need === "python >= 3.10");
+
+test("N2: python3 3.9 + uv on PATH: launcher-run skills are met by uv; Claude's hooks get `uv python install`", { skip }, () => {
+  const sb = sandbox();
+  try {
+    sb.fake("python3", "Python 3.9.6");
+    sb.fake("uv", "uv 0.13.7");
+    const rows = preflight([LAUNCHED], { hosts: ["codex", "claude"], env: sb.env, platform: "darwin", offline: true });
+    const skills = pyNeed(rows, "skill-scripts");
+    assert.equal(skills.met, true);
+    assert.match(skills.detail, /uv 0\.13\.7 at .*uv is on PATH, so garden's launcher runs scripts with a uv-managed Python 3\.10\+/);
+    const hooks = pyNeed(rows, "plugin-scripts");
+    assert.equal(hooks.met, false);
+    assert.match(hooks.remedy, /^run `uv python install 3\.12 --default --preview` \(it puts python3 in uv's bin directory/);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test("N2: python3 3.9 + uv installed off PATH (~/.local/bin): the remedy is the PATH line, not 'install Python'", { skip }, () => {
+  const sb = sandbox();
+  try {
+    sb.fake("python3", "Python 3.9.6");
+    const local = join(sb.env.HOME, ".local", "bin");
+    mkdirSync(local, { recursive: true });
+    writeFileSync(join(local, "uv"), "#!/bin/sh\necho uv 0.13.7\n", { mode: 0o755 });
+    const rows = preflight([LAUNCHED], { hosts: ["codex", "claude"], env: sb.env, platform: "darwin", offline: true });
+    const skills = pyNeed(rows, "skill-scripts");
+    assert.equal(skills.met, false);
+    assert.match(skills.detail, /no interpreter at or above 3\.10 \(python3: Python 3\.9\.6\)/);
+    assert.match(skills.remedy, /uv is installed at .*\.local\/bin\/uv but not on PATH; add it to PATH: echo 'export PATH=".*\.local\/bin:\$PATH"' >> ~\/\.zprofile/);
+    const hooks = pyNeed(rows, "plugin-scripts");
+    assert.match(hooks.remedy, /^run `.*\.local\/bin\/uv python install 3\.12 --default --preview`, then add it to PATH/);
+    for (const n of [skills, hooks]) assert.doesNotMatch(n.remedy, /^install Python/);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test("N2: no uv at all: the remedy names astral's install command", { skip }, () => {
+  const sb = sandbox();
+  try {
+    sb.fake("python3", "Python 3.9.6");
+    sb.fake("curl", "");
+    const rows = preflight([LAUNCHED], { hosts: ["codex", "claude"], env: sb.env, platform: "darwin", offline: true });
+    assert.match(pyNeed(rows, "skill-scripts").remedy, /^install uv \(curl -LsSf https:\/\/astral\.sh\/uv\/install\.sh \| sh\), then open a new terminal/);
+    assert.match(pyNeed(rows, "plugin-scripts").remedy, /open a new terminal, then run `uv python install 3\.12 --default --preview`$/);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test("N2: the registry marks garden's launcher-run python need (and only that one) as launcher", () => {
+  const reg = JSON.parse(readFileSync(new URL("../registry.json", import.meta.url), "utf8"));
+  const garden = JSON.stringify(reg).includes('"launcher":true');
+  assert.ok(garden, "registry.json carries launcher: true on a python need");
+  const needs = [];
+  const walk = (v) => { if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === "object") { if (v.kind === "python") needs.push(v); Object.values(v).forEach(walk); } };
+  walk(reg);
+  assert.deepEqual(needs.map((n) => Boolean(n.launcher)).sort(), [false, true]);
+  const caps = reg.products.find((p) => p.id === "wicked-garden").capabilities;
+  const flag = (id) => caps.find((c) => c.id === id).needs.find((n) => n.kind === "python").launcher === true;
+  assert.equal(flag("skill-scripts"), true, "the launcher-run skills carry it");
+  assert.equal(flag("plugin-scripts"), false, "Claude's hooks call python3 directly");
+});
+
+test("N2 review: an old uv on PATH does not meet the launcher need; the remedy updates it", { skip }, () => {
+  const sb = sandbox();
+  try {
+    sb.fake("python3", "Python 3.9.6");
+    sb.fake("uv", "uv 0.2.3");
+    const rows = preflight([LAUNCHED], { hosts: ["codex"], env: sb.env, platform: "linux", offline: true });
+    const skills = pyNeed(rows, "skill-scripts");
+    assert.equal(skills.met, false);
+    assert.match(skills.detail, /is uv 0\.2\.3, older than 0\.5\.0/);
+    assert.equal(skills.remedy, "run `uv self update` (or reinstall uv)");
+  } finally {
+    sb.cleanup();
+  }
+});
