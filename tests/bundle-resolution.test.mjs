@@ -27,3 +27,14 @@ test("a bare `install wicked-crew` also pulls wicked-garden (the dependency is o
   const ids = idsOf(resolve(["wicked-crew"]));
   assert.ok(ids.has("wicked-crew") && ids.has("wicked-garden"), "the most common path grounds too");
 });
+
+test("first-run B2: quick-start and a bare `install wicked-crew` both pull wicked-estate (adding a repository needs it)", () => {
+  const qs = registry.bundles.find((b) => b.id === "quick-start");
+  for (const ids of [idsOf(resolve(qs.products)), idsOf(resolve(["wicked-crew"]))]) {
+    assert.ok(ids.has("wicked-estate"), "estate is installed with crew");
+  }
+  // Order: requirements before crew, so crew's readiness sees estate.
+  const r = resolve(["wicked-crew"]);
+  const order = [...r.added, ...r.selected].map((p) => p.id);
+  assert.ok(order.indexOf("wicked-estate") < order.indexOf("wicked-crew"), order.join(","));
+});

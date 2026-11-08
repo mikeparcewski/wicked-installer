@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import chalk from "chalk";
 import boxen from "boxen";
+import { confirm } from "@inquirer/prompts";
 import { detectClis, discoverCliScripts, detectCli } from "./detector.js";
 import { installProduct } from "./installer.js";
 import type { InstallOptions } from "./installer.js";
@@ -19,6 +20,8 @@ import { preflight } from "./readiness.js";
 import { NON_CLAUDE_HOSTS, hostProductStatus } from "./host-status.js";
 import type { HostProductStatus } from "./host-status.js";
 import type { CapabilityReadiness } from "./readiness.js";
+import { ensureUv } from "./uv.js";
+import { ensureGardenForCrew } from "./crew-garden.js";
 
 /**
  * Everything a claude-plugin product needs resolved is checked BEFORE anything is installed,
@@ -44,6 +47,21 @@ interface DispatchFlags {
   sourceRoot?: string;    // --source-root <dir>: local checkout root (the shared per-CLI flag, INTERFACE.md §3.2)
   claudeHomes: string[];  // --claude-home <dir> (repeatable): explicit Claude config dir(s)
   offline?: boolean;      // --offline: the readiness check makes no network lookup (npx fallback not checked)
+  interactive?: boolean;  // the picker asks before running Astral's installer; `install <ids>` already authorizes it
+}
+
+/** Gate the whole resolved set before its first product: installing deps first could leave a partial crew setup. */
+async function prepareUv(productIds: string[], flags: DispatchFlags): Promise<boolean> {
+  const result = await ensureUv({
+    needed: productIds.includes("wicked-crew"),
+    dryRun: flags.dryRun,
+    offline: flags.offline === true,
+    log: (line) => console.log(chalk.cyan(`\n${line}`)),
+    ...(flags.interactive ? { confirm: () => confirm({ message: "wicked-crew needs uv, which is not installed. Install it now with astral's official installer?", default: true }) } : {}),
+  });
+  if (!result.ok) console.error(chalk.red(result.message));
+  else if (result.action !== "not-needed") console.log(chalk.dim(result.message));
+  return result.ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +279,8 @@ export async function dispatchToClis(
     }
   }
 
+  if (!await prepareUv(productIds, flags)) return 1;
+
   for (const [index, cli] of clis.entries()) {
     // Binaries are machine-scoped: acquire once (first script), skip thereafter. A Codex-plugin
     // product's npm package is the exception (it IS that plugin's marketplace and no other CLI's
@@ -284,17 +304,33 @@ export async function dispatchToClis(
   const hadFailure = renderSummary(results, productIds);
   const hookAdapter = (host: string, productId: string): boolean =>
     results.some((r) => r.cli === host && r.entries.some((e) => e.productId === productId && typeof e.assets?.hooks === "number" && e.assets.hooks > 0));
+  // Per product: only the hosts it was actually delivered to. A failed Claude Code registration
+  // leaves no "ready … (Claude Code)" row (first-run C5).
+  const hostsFor = (productId: string): string[] =>
+    results.filter((r) => r.present && r.entries.some((e) => e.productId === productId && e.success && !e.skipped)).map((r) => r.cli);
+  gardenForCrew(productIds, flags);
+  const rows = readinessFor(productIds, results.filter((r) => r.present).map((r) => r.cli), flags, hookAdapter, hostsFor);
   const pending = renderReadiness(
-    readinessFor(productIds, results.filter((r) => r.present).map((r) => r.cli), flags, hookAdapter),
+    rows,
     flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):",
   );
+  const crew = crewStateOf(productIds, rows);
 
   if (hadFailure) {
     console.log(chalk.red("\nOne or more installations failed. See the summary above."));
+    // A failed host (say, Claude Code's plugin registration) need not stop Studio: say so when crew is ready.
+    if (!flags.dryRun && crew === "ready") console.log(`${chalk.green("Wicked Crew is ready all the same. Start Wicked Studio:")}\n${startStudioLines()}`);
     return 1;
   }
-  console.log(doneLine(flags, pending));
+  console.log(doneLine(flags, pending, crew));
   return 0;
+}
+
+/** After the products are in place, before readiness: make crew's garden visible to crew (B3). */
+function gardenForCrew(productIds: string[], flags: DispatchFlags): void {
+  const r = ensureGardenForCrew({ productIds, dryRun: flags.dryRun, ...(flags.sourceRoot ? { sourceRoot: flags.sourceRoot } : {}) });
+  if (r.action === "failed") console.log(chalk.yellow(`\n${r.message}`));
+  else if (r.message) console.log(chalk.dim(`\n${r.message}`));
 }
 
 /** A plugin's registration outcome in the same vocabulary the scripts report. */
@@ -330,9 +366,9 @@ export function renderReadiness(rows: CapabilityReadiness[], heading: string): n
 }
 
 /** Script slugs → registry `hosts`; `undefined` ⇒ every capability applies. */
-function readinessFor(productIds: string[], hosts: string[] | undefined, flags: DispatchFlags, hookAdapter?: (host: string, productId: string) => boolean): CapabilityReadiness[] {
+function readinessFor(productIds: string[], hosts: string[] | undefined, flags: DispatchFlags, hookAdapter?: (host: string, productId: string) => boolean, hostsFor?: (productId: string) => string[]): CapabilityReadiness[] {
   const products = productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined);
-  return preflight(products, { hosts, offline: flags.offline === true, probeOnly: flags.dryRun, hookAdapter });
+  return preflight(products, { hosts, offline: flags.offline === true, probeOnly: flags.dryRun, hookAdapter, ...(hostsFor ? { hostsFor } : {}) });
 }
 
 interface Cell {
@@ -353,12 +389,18 @@ function statusCell(result: CliRunResult, productId: string): Cell {
   if (entry.skipped) return cell("manual", chalk.yellow);
   // What was DELIVERED — registered with the host, or only copied. Readiness is reported below.
   if (entry.delivery === "registered") return cell("registered", chalk.green);
-  if (entry.delivery === "copied") return cell("copied", chalk.cyan);
+  if (entry.delivery === "copied") return cell("skills added", chalk.cyan);
   if (entry.delivery === "acquired") return cell("acquired", chalk.green);
   if (entry.delivery === "planned") return cell("planned", chalk.cyan);
   if (entry.delivery === "manual") return cell("manual", chalk.yellow);
   return cell("ok", chalk.green);
 }
+
+/**
+ * What each grid word means (first-run P11: "copied" under every CLI read as if the product itself
+ * had been copied into each agent). The tools themselves are installed once for the machine.
+ */
+export const GRID_LEGEND = "registered = the agent loads it as a plugin or MCP server · skills added = its skills were added to that agent · acquired = installed for the machine; the command-line tools are installed once, for every agent";
 
 /** Render the product × CLI grid. Returns true when any run failed. */
 export function renderSummary(results: CliRunResult[], productIds: string[]): boolean {
@@ -392,6 +434,7 @@ export function renderSummary(results: CliRunResult[], productIds: string[]): bo
       .join("   ");
     console.log(`  ${line}`);
   }
+  console.log(chalk.dim(`  ${GRID_LEGEND}`));
 
   // Per-CLI homes + failure diagnostics.
   const notes: string[] = [];
@@ -411,7 +454,9 @@ export function renderSummary(results: CliRunResult[], productIds: string[]): bo
       if (!e.success && e.message) {
         notes.push(`${chalk.red(`${e.displayName ?? e.productId} (${r.displayName}) failed:`)} ${e.message}`);
       } else if (getProduct(e.productId)?.type === "claude-plugin" && e.message) {
-        notes.push(`${chalk.dim((e.displayName ?? e.productId) + ":")} ${e.message}`);
+        // Script messages already start with "<display name>: "; do not say it twice.
+        const name = e.displayName ?? e.productId;
+        notes.push(`${chalk.dim(name + ":")} ${e.message.startsWith(`${name}: `) ? e.message.slice(name.length + 2) : e.message}`);
       }
     }
   }
@@ -440,9 +485,36 @@ function productIdsFromSelection(selection: UserSelection): string[] {
   return ids;
 }
 
-function doneLine(flags: DispatchFlags, pending: number): string {
+/** Where Studio opens on a default `wicked-crew serve` (crew's DEFAULT_DAEMON_PORT). */
+export const STUDIO_URL = "http://127.0.0.1:7701";
+
+/** Was wicked-crew installed here, and can its daemon run jobs (its readiness rows)? */
+export type CrewState = "absent" | "ready" | "pending";
+
+export function crewStateOf(productIds: string[], rows: CapabilityReadiness[]): CrewState {
+  if (!productIds.includes("wicked-crew")) return "absent";
+  return rows.some((r) => r.productId === "wicked-crew" && r.state !== "ready" && r.state !== "n/a") ? "pending" : "ready";
+}
+
+/** The two lines that say exactly how to open Studio. */
+export function startStudioLines(): string {
+  return `  ${chalk.bold("wicked-crew serve")}   ${chalk.dim("(or: npx wicked-crew serve)")}\n  then open ${chalk.bold(STUDIO_URL)}`;
+}
+
+/**
+ * The last thing the user reads (first-run C5). With crew installed it says exactly how to start
+ * Studio, and never "Done!" while crew's own needs (uv, estate, a garden it can load) are pending.
+ */
+export function doneLine(flags: Pick<DispatchFlags, "dryRun">, pending: number, crew: CrewState = "absent"): string {
   if (flags.dryRun) return chalk.green("\nDry run complete — nothing was installed or written.");
-  if (pending > 0) return chalk.yellow(`\nInstalled, but ${pending} capability(ies) are pending — see Readiness above for what each still needs.`);
+  if (crew === "pending") {
+    return chalk.yellow("\nInstalled, but Wicked Crew can't run jobs yet — see its pending line(s) under Readiness above. Once they are met, start Wicked Studio:\n") + startStudioLines();
+  }
+  if (pending > 0) {
+    const more = chalk.yellow(`\nInstalled, but ${pending} capability(ies) are pending — see Readiness above for what each still needs.`);
+    return crew === "ready" ? `${more}\n${chalk.green("Wicked Crew is ready. Start Wicked Studio:")}\n${startStudioLines()}` : more;
+  }
+  if (crew === "ready") return `${chalk.green("\nDone! Start Wicked Studio:")}\n${startStudioLines()}`;
   return chalk.green("\nDone! Start your coding agent to activate the installed tools.");
 }
 
@@ -484,6 +556,18 @@ async function installDirectly(products: Product[], flags: DispatchFlags): Promi
   return results;
 }
 
+/**
+ * The direct path's only host is Claude Code, and only a plugin it REGISTERED (or plans to) is
+ * delivered there: a failed registration or the unregistered bare-copy fallback is not (first-run C5).
+ */
+export function directHostsFor(results: Array<Pick<InstallResult, "productId" | "success" | "skipped" | "registration">>): (productId: string) => string[] {
+  return (productId) => {
+    if (getProduct(productId)?.type !== "claude-plugin") return ["claude"];
+    const r = results.find((x) => x.productId === productId);
+    return r && r.success && !r.skipped && (r.registration === "registered" || r.registration === "planned") ? ["claude"] : [];
+  };
+}
+
 async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Promise<void> {
   const all = [...selection.addedDeps, ...selection.products]; // deps first
   try {
@@ -492,6 +576,7 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
     console.error(chalk.red(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
+  if (!await prepareUv(all.map((p) => p.id), flags)) process.exit(1);
   console.log(chalk.bold(flags.dryRun
     ? "\nDry run (direct) — printing the plan; nothing will be installed or written.\n"
     : "\nInstalling (direct)...\n"));
@@ -518,12 +603,14 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
   }
 
   // The direct path registers plugins with Claude Code; every other product is machine-wide.
-  const pending = renderReadiness(readinessFor(all.map((p) => p.id), ["claude"], flags), flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):");
+  gardenForCrew(all.map((p) => p.id), flags);
+  const rows = readinessFor(all.map((p) => p.id), ["claude"], flags, undefined, directHostsFor(results));
+  const pending = renderReadiness(rows, flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):");
   if (failures.length > 0) {
     console.log(chalk.red(`\n${failures.length} installation(s) failed. Check output above for details.`));
     process.exit(1);
   }
-  console.log(doneLine(flags, pending));
+  console.log(doneLine(flags, pending, crewStateOf(all.map((p) => p.id), rows)));
 }
 
 // ---------------------------------------------------------------------------
@@ -579,12 +666,12 @@ async function runInteractive(flags: DispatchFlags): Promise<void> {
 
     if (selectedClis.length === 0) {
       // Zero CLIs selected (or none available) → legacy behavior.
-      await legacyInstall(selection, flags);
+      await legacyInstall(selection, { ...flags, interactive: true });
       return;
     }
 
     const productIds = productIdsFromSelection(selection);
-    const code = await dispatchToClis(selectedClis, productIds, flags);
+    const code = await dispatchToClis(selectedClis, productIds, { ...flags, interactive: true });
     if (code !== 0) process.exit(code);
   } catch (err) {
     // Inquirer throws on Ctrl+C
@@ -631,6 +718,8 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
     process.exit(1);
   }
 
+  if (!await prepareUv([...added, ...selected].map((p) => p.id), flags)) process.exit(1);
+
   if (added.length > 0) {
     console.log(chalk.cyan(`Adding required dependencies: ${added.map(p => p.displayName).join(", ")}\n`));
   }
@@ -640,8 +729,10 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
 
   const results = await installDirectly([...added, ...selected], flags);
   const failures = results.filter((r) => !r.success && !r.skipped);
+  gardenForCrew([...added, ...selected].map((p) => p.id), flags);
+  const rows = readinessFor([...added, ...selected].map((p) => p.id), ["claude"], flags, undefined, directHostsFor(results));
   const pending = renderReadiness(
-    readinessFor([...added, ...selected].map((p) => p.id), ["claude"], flags),
+    rows,
     flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):",
   );
 
@@ -650,14 +741,14 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
       console.log(chalk.red(`\nDry run finished with ${failures.length} problem(s); nothing was written.`));
       process.exit(1);
     }
-    console.log(doneLine(flags, pending));
+    console.log(doneLine(flags, pending, crewStateOf([...added, ...selected].map((p) => p.id), rows)));
     return;
   }
   if (failures.length > 0) {
     console.log(chalk.red(`\n${failures.length} installation(s) failed. Check output above for details.`));
     process.exit(1);
   }
-  console.log(doneLine(flags, pending));
+  console.log(doneLine(flags, pending, crewStateOf([...added, ...selected].map((p) => p.id), rows)));
 }
 
 /** Worst-first: the aggregate across config dirs is the lowest-ranked state. */
@@ -786,13 +877,19 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
   }
 
   console.log(chalk.bold("\nwicked-* products:"));
+  const installedIds = new Set<string>();
+  // Where garden really is (Claude Code registration + each other host's marker): its host-scoped
+  // capabilities are checked only there, never for a host it is merely detectable on.
+  const gardenHostSlugs: string[] = otherHosts.filter((h) => h.state === "installed").map((h) => h.host);
   for (const p of products) {
     // Same --claude-home target set as the registration section below, so the two agree.
     let state = productInstallState(p.id, new Set(), flags.claudeHomes);
     // garden: the Claude registration above, OR an install on another host.
+    if (p.id === "wicked-garden" && state === "installed") gardenHostSlugs.push("claude");
     const onHosts = p.id === "wicked-garden" ? [...(state === "installed" ? ["Claude Code"] : []), ...gardenElsewhere] : [];
     if (onHosts.length > 0) state = "installed";
     const installed = state === "installed";
+    if (installed) installedIds.add(p.id);
     // A `manual` product is not installed DIRECTLY — it arrives inside something else
     // (wicked-studio ships in wicked-crew). Both facts matter and neither replaces the other:
     // "is it here?" and "how would I get it?" are different questions, and until detection was
@@ -817,11 +914,16 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
   // Hosts = the install scripts whose CLI the picker would pre-check (binary on PATH or a home
   // with an identity marker, §11.2) — the same signal the interactive install uses.
   const hosts = discoverCliScripts(__dirname).filter((s) => detectCli(s.cli).detected).map((s) => s.cli);
+  // Only what is installed: a capability of a product that is not here is not "ready" just
+  // because its other needs (say, Python) are (first-run C5: "ready wicked-garden" before install).
+  const notInstalled = listProducts(false).filter((p) => !installedIds.has(p.id) && Array.isArray(p.capabilities) && p.capabilities.length > 0);
+  if (notInstalled.length > 0) console.log(chalk.dim(`\nCapabilities not checked (product not installed): ${notInstalled.map((p) => p.id).join(", ")}`));
   renderReadiness(
-    preflight(listProducts(false), {
+    preflight(listProducts(false).filter((p) => installedIds.has(p.id)), {
       hosts,
       offline: flags.offline === true,
       probeOnly: flags.dryRun,
+      hostsFor: (productId) => (productId === "wicked-garden" ? gardenHostSlugs.filter((h) => hosts.includes(h)) : hosts),
       // Hook adapters a host's script recorded installing (Pi / OpenCode), read from its marker.
       hookAdapter: (host, productId) => (hostProductStatus(productId, host)?.hooks ?? 0) > 0,
     }),

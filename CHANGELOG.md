@@ -5,6 +5,32 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Installing wicked-crew makes sure uv is installed.** crew's daemon builds the skills environment every job
+  uses with `uv sync`, so on a machine without uv every launch was refused and nothing said why. When crew is in
+  the install set and uv is missing, the installer now runs astral's official installer
+  (`curl -LsSf https://astral.sh/uv/install.sh | sh`; on Windows
+  `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`) before anything else is
+  installed. The interactive flow asks first; `install wicked-crew` runs it directly; `--dry-run` prints it. If it
+  is declined or fails (or `--offline`), the installer stops before installing anything and prints that one command.
+- **wicked-crew requires wicked-estate.** Adding a repository in Studio indexes it with estate, so a Quick Start
+  install failed at the first repository. Quick Start and every other way of installing crew now install estate
+  too, and estate is no longer described as optional for crew.
+- **The readiness check no longer says "ready" when crew can't run a job.** crew's line now also checks uv,
+  estate, and a wicked-garden crew can load (the places crew looks: Claude Code's and Codex's plugin caches, the
+  wicked-garden npm package), with the fix for each. A host whose delivery failed (say, a failed Claude Code
+  plugin registration) no longer gets a "ready" line, and `status` checks capabilities only for installed products.
+  crew's needs are judged on crew's own PATH (it adds `~/.local/bin` and `~/.cargo/bin` at boot).
+- **crew can always find the garden it was installed with.** When crew and garden are installed together and
+  garden landed only where crew does not look (OpenCode, Pi or Antigravity skill copies, or a failed Claude Code
+  registration), the installer also installs the wicked-garden npm package globally, which crew finds.
+- **The end message says how to start.** With crew installed it ends with `wicked-crew serve` (or
+  `npx wicked-crew serve`) and `http://127.0.0.1:7701`, and never says "Done!" while crew's needs are pending.
+- **Wording.** The CLI picker no longer says "legacy direct install"; the summary grid says "skills added" instead
+  of "copied" and explains its words in one line; a plugin's note no longer repeats its name; the macOS PATH fix
+  writes to `~/.zprofile` (zsh does not read `~/.profile`). The README now names uv, estate and the PATH step.
+
 ## [0.8.2] - 2026-11-06
 
 ### Fixed
