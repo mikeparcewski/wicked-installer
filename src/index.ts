@@ -328,7 +328,7 @@ export async function dispatchToClis(
 
 /** After the products are in place, before readiness: make crew's garden visible to crew (B3). */
 function gardenForCrew(productIds: string[], flags: DispatchFlags): void {
-  const r = ensureGardenForCrew({ productIds, dryRun: flags.dryRun });
+  const r = ensureGardenForCrew({ productIds, dryRun: flags.dryRun, ...(flags.sourceRoot ? { sourceRoot: flags.sourceRoot } : {}) });
   if (r.action === "failed") console.log(chalk.yellow(`\n${r.message}`));
   else if (r.message) console.log(chalk.dim(`\n${r.message}`));
 }

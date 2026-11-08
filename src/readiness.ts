@@ -20,7 +20,7 @@ import type { Capability, CapabilityNeed, Product } from "./types.js";
 import { dirname } from "node:path";
 import { findInstalledBinary, pathFix } from "./release-binary.js";
 import { findUv, uvInstallCommand } from "./uv.js";
-import { crewEnv, findGardenForCrew, homeOf } from "./crew-garden.js";
+import { CREW_FINDS_INSTALLER_LOCATIONS, crewEnv, crewKnowsInstallerLocations, findGardenForCrew, homeOf, isCrewGardenHit } from "./crew-garden.js";
 
 /**
  * `unchecked` = nothing is known to be missing, but a need was only found on PATH and not
@@ -246,14 +246,19 @@ function checkNeed(need: CapabilityNeed, ctx: Ctx): NeedResult {
   if (need.kind === "crew-garden") {
     // Garden delivered to some host is not garden crew can load (first-run B3): check crew's own sources.
     const hit = findGardenForCrew(ctx.env, ctx.platform);
-    return hit
-      ? { need: "wicked-garden for crew", met: true, detail: `${hit.source}, version ${hit.version} (${hit.path}); crew checks its minimum garden version at boot` }
-      : {
-        need: "wicked-garden for crew",
-        met: false,
-        detail: "crew finds no wicked-garden plugin (it looks in Claude Code's and Codex's plugin caches and the wicked-garden npm package), so it would refuse every job",
-        remedy: "npm i -g wicked-garden",
-      };
+    if (isCrewGardenHit(hit)) {
+      return { need: "wicked-garden for crew", met: true, detail: `${hit.source}, version ${hit.version} (${hit.path}); crew checks its minimum garden version at boot` };
+    }
+    if (hit) return { need: "wicked-garden for crew", met: false, detail: hit.refused };
+    const modern = crewKnowsInstallerLocations(ctx.env, ctx.platform);
+    return {
+      need: "wicked-garden for crew",
+      met: false,
+      detail: modern
+        ? "crew finds no wicked-garden plugin (it looks in Claude Code's and Codex's plugin caches and the wicked-garden npm package), so it would refuse every job"
+        : `the wicked-crew on PATH is older than ${CREW_FINDS_INSTALLER_LOCATIONS} and looks for wicked-garden only in Claude Code's plugin dirs, where there is none, so it would refuse every job`,
+      remedy: modern ? "npm i -g wicked-garden" : "npm i -g wicked-crew@latest",
+    };
   }
   return need.kind === "python" ? checkPython(need, ctx) : checkBin(need, ctx);
 }

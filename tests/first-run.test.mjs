@@ -11,7 +11,7 @@
 // except the installer's own `status` under an isolated HOME and PATH.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -115,9 +115,9 @@ test("findGardenForCrew: Claude Code cache under CLAUDE_CONFIG_DIR, and a bad ov
   const sb = sandbox(t);
   const cfg = join(sb.tmp, "claude-cfg");
   const dir = sb.pluginRoot(join(cfg, "plugins", "cache", "wicked-garden", "wicked-garden", "12.66.0"));
-  assert.deepEqual(findGardenForCrew({ ...sb.env, CLAUDE_CONFIG_DIR: cfg }, "linux"), { path: dir, source: "Claude Code plugin cache", version: "12.66.0" });
+  assert.deepEqual(findGardenForCrew({ ...sb.env, CLAUDE_CONFIG_DIR: cfg }, "linux"), { path: realpathSync(dir), source: "Claude Code plugin cache", version: "12.66.0" });
   // crew reads ONLY the override when it is set.
-  assert.equal(findGardenForCrew({ ...sb.env, CLAUDE_CONFIG_DIR: cfg, WICKED_CREW_SKILLS_SOURCE: join(sb.tmp, "nope") }, "linux"), undefined);
+  assert.match(findGardenForCrew({ ...sb.env, CLAUDE_CONFIG_DIR: cfg, WICKED_CREW_SKILLS_SOURCE: join(sb.tmp, "nope") }, "linux")?.refused ?? "", /WICKED_CREW_SKILLS_SOURCE=.*fix or unset it/);
 });
 
 test("first-run B3/C5: crew readiness is PENDING while crew sees no garden, uv or estate — and names each fix", { skip }, (t) => {
@@ -235,16 +235,13 @@ test("first-run C5: `status` on a clean machine reports no capability of an unin
 
 // --- review r1 folds ----------------------------------------------------------------------
 
-test("findGardenForCrew: manifests crew would reject are not a garden (corrupt, versionless, name != version, linked)", { skip }, (t) => {
+test("findGardenForCrew: manifests crew would reject are not a garden (corrupt, versionless, name != version)", { skip }, (t) => {
   const sb = sandbox(t);
   const cache = join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden");
   const write = (name, text) => { mkdirSync(join(cache, name, ".claude-plugin"), { recursive: true }); writeFileSync(join(cache, name, ".claude-plugin", "plugin.json"), text); };
   write("12.66.0", "{not json");
   write("12.66.1", '{"name":"wicked-garden"}');
   write("12.66.2", '{"version":"12.66.9"}');
-  mkdirSync(join(cache, "12.66.3", ".claude-plugin"), { recursive: true });
-  writeFileSync(join(sb.tmp, "real.json"), '{"version":"12.66.3"}');
-  symlinkSync(join(sb.tmp, "real.json"), join(cache, "12.66.3", ".claude-plugin", "plugin.json"));
   assert.equal(findGardenForCrew(sb.env, "linux"), undefined);
   write("12.66.4", '{"version":"12.66.4"}');
   write("12.9.0", '{"version":"12.9.0"}');
@@ -258,7 +255,8 @@ test("findGardenForCrew: every CLAUDE_CONFIG_DIR entry, then ~/.claude, as crew 
   sb.pluginRoot(join(b, "plugins", "cache", "wicked-garden", "wicked-garden", "12.66.0"));
   assert.equal(findGardenForCrew({ ...sb.env, CLAUDE_CONFIG_DIR: `${a}:${b}` }, "linux")?.source, "Claude Code plugin cache");
   const dflt = sb.pluginRoot(join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.65.0"));
-  assert.equal(findGardenForCrew({ ...sb.env, CLAUDE_CONFIG_DIR: a }, "linux")?.path, dflt, "~/.claude is walked after a custom config dir");
+  mkdirSync(a, { recursive: true });
+  assert.equal(findGardenForCrew({ ...sb.env, CLAUDE_CONFIG_DIR: a }, "linux")?.path, realpathSync(dflt), "~/.claude is walked after a custom config dir");
 });
 
 test("findGardenForCrew: a garden launcher only in ~/.local/bin is found (crew appends it to its PATH)", { skip }, (t) => {
@@ -342,4 +340,75 @@ test("first-run B3: crew + garden installed where crew can't see garden -> the g
   const failed = ensureGardenForCrew({ productIds: ["wicked-crew", "wicked-garden"], dryRun: false, env: { ...sb.env, PATH: join(sb.tmp, "empty") }, platform: "linux", run: () => ({ status: 1 }) });
   assert.equal(failed.action, "failed");
   assert.match(failed.message, /npm install -g wicked-garden/);
+});
+
+// --- review r2 folds ----------------------------------------------------------------------
+
+/** A wicked-crew npm package of `version` whose launcher is on the sandbox PATH. */
+function fakeCrew(sb, version) {
+  const crew = join(sb.tmp, "prefix", "lib", "node_modules", "wicked-crew");
+  mkdirSync(join(crew, "dist"), { recursive: true });
+  writeFileSync(join(crew, "package.json"), JSON.stringify({ name: "wicked-crew", version }));
+  writeFileSync(join(crew, "dist", "cli.js"), "", { mode: 0o755 });
+  symlinkSync(join(crew, "dist", "cli.js"), join(sb.bin, "wicked-crew"));
+  return crew;
+}
+
+test("an older crew (< 0.18.0) is judged by its own rules: no ~/.local/bin on its PATH, no Codex/npm garden", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrew(sb, "0.17.1");
+  const local = join(sb.home, ".local", "bin");
+  sb.exe(local, "uv");
+  sb.exe(local, "wicked-estate");
+  sb.pluginRoot(join(sb.home, ".codex", "plugins", "cache", "wicked-garden", "wicked-garden", "12.66.0"));
+  assert.equal(findGardenForCrew(sb.env, "linux"), undefined, "0.17.1 reads only Claude Code's dirs");
+  const row = preflight([byId["wicked-crew"]], { env: sb.env, platform: "linux", probeOnly: true }).find((r) => r.capability === "daemon");
+  assert.equal(row.state, "pending");
+  assert.equal(row.needs.find((n) => n.need === "uv").met, false, "0.17.1 does not add ~/.local/bin to its PATH");
+  assert.equal(row.needs.find((n) => n.need === "wicked-garden for crew").remedy, "npm i -g wicked-crew@latest");
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew", "wicked-garden"], dryRun: false, env: sb.env, platform: "linux", run: () => assert.fail("an npm garden would not help this crew") });
+  assert.equal(r.action, "failed");
+  assert.match(r.message, /older than 0\.18\.0/);
+});
+
+test("the current crew (>= 0.18.0) on PATH gets the installer locations", { skip }, (t) => {
+  const sb = sandbox(t);
+  const crew = fakeCrew(sb, "0.18.0");
+  sb.pluginRoot(join(dirname(crew), "wicked-garden"));
+  assert.equal(findGardenForCrew(sb.env, "linux")?.source, "npm package beside wicked-crew");
+});
+
+test("findGardenForCrew: a linked <config>/plugins is not walked; a symlinked manifest anywhere in the cache is a refusal; non-SemVer names are ignored", { skip }, (t) => {
+  const sb = sandbox(t);
+  const elsewhere = join(sb.tmp, "elsewhere");
+  sb.pluginRoot(join(elsewhere, "cache", "wicked-garden", "wicked-garden", "12.66.0"));
+  mkdirSync(join(sb.home, ".claude"), { recursive: true });
+  symlinkSync(elsewhere, join(sb.home, ".claude", "plugins"));
+  assert.equal(findGardenForCrew(sb.env, "linux"), undefined, "crew never follows a link below the config root");
+
+  const sb2 = sandbox(t);
+  const cache = join(sb2.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden");
+  sb2.pluginRoot(join(cache, "12.66.0"));
+  mkdirSync(join(cache, "12.65.0", ".claude-plugin"), { recursive: true });
+  writeFileSync(join(sb2.tmp, "m.json"), '{"version":"12.65.0"}');
+  symlinkSync(join(sb2.tmp, "m.json"), join(cache, "12.65.0", ".claude-plugin", "plugin.json"));
+  assert.match(findGardenForCrew(sb2.env, "linux")?.refused ?? "", /symlink/);
+
+  const sb3 = sandbox(t);
+  const c3 = join(sb3.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "012.66.0");
+  mkdirSync(join(c3, ".claude-plugin"), { recursive: true });
+  writeFileSync(join(c3, ".claude-plugin", "plugin.json"), '{"version":"012.66.0"}');
+  assert.equal(findGardenForCrew(sb3.env, "linux"), undefined);
+});
+
+test("ensureGardenForCrew never installs the published garden under --source-root, nor to fix a bad override", { skip }, (t) => {
+  const sb = sandbox(t);
+  const never = () => assert.fail("must not run npm");
+  const ids = ["wicked-crew", "wicked-garden"];
+  const src = ensureGardenForCrew({ productIds: ids, dryRun: false, sourceRoot: join(sb.tmp, "src"), env: sb.env, platform: "linux", run: never });
+  assert.equal(src.action, "failed");
+  assert.match(src.message, /--source-root/);
+  const bad = ensureGardenForCrew({ productIds: ids, dryRun: false, env: { ...sb.env, WICKED_CREW_SKILLS_SOURCE: join(sb.tmp, "nope") }, platform: "linux", run: never });
+  assert.equal(bad.action, "failed");
+  assert.match(bad.message, /fix or unset it/);
 });
