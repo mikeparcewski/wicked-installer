@@ -114,7 +114,7 @@ export async function promptClis(options: CliOption[]): Promise<CliOption[]> {
   });
 
   const selected = await checkbox({
-    message: "Install into which CLIs? (space to toggle, enter to confirm — select none for legacy direct install):",
+    message: "Add the tools to which coding agents? (space to toggle, enter to confirm; select none to install only the command-line tools, with Wicked Garden registered in Claude Code):",
     choices,
   });
 

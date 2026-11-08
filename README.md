@@ -25,7 +25,7 @@
 npx wicked-installer
 ```
 
-Interactive TUI — pick a bundle or select products individually. Detects which AI coding CLIs you have installed and guides you from there.
+Interactive TUI — pick a bundle or select products individually. Detects which AI coding CLIs you have installed and guides you from there. When it asks **"Add the tools to which coding agents?"**, selecting none installs only the command-line tools (with Wicked Garden registered in Claude Code), without adding skills to any other agent.
 
 ---
 
@@ -54,7 +54,8 @@ Flags:
                          reported as not checked)
 ```
 
-`install <ids>` resolves required dependencies first (garden pulls in wicked-vault),
+`install <ids>` resolves required dependencies first (garden pulls in wicked-vault; crew pulls in
+wicked-estate, wicked-garden and wicked-vault),
 installs each product directly, and exits 1 if any of them failed. With `--dry-run`
 every product type prints its plan and nothing is installed or written — the only process
 a dry run may start is the read-only `claude --version` probe the Claude plugin plan is
@@ -111,6 +112,33 @@ platform; without a Rust toolchain that case fails with the fix (install Rust fr
 https://rustup.rs, then `cargo install wicked-estate wicked-estate-mcp`). When `~/.local/bin`
 is not on PATH, the Claude Code and OpenCode MCP entries use the absolute path, and the install
 says how to add the dir to PATH.
+
+### wicked-crew: uv, the start command, and readiness
+
+wicked-crew's daemon builds its skills environment with `uv sync` (once per skills baseline), so
+**uv** must be present before a job can launch. When wicked-crew is being installed and `uv` is
+missing, the installer installs it with [astral's official installer](https://docs.astral.sh/uv/getting-started/installation/):
+the interactive flow asks first, and `npx wicked-installer install wicked-crew` runs it directly. If
+that is declined or fails, the installer **stops before installing anything** and prints the one
+command to run yourself:
+
+- **macOS / Linux:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- **Windows:** `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+
+Installing wicked-crew in any way also installs **wicked-estate** (crew requires it: adding a
+repository in Studio runs onboarding's index phase on the `wicked-estate` tool), and pulls in
+wicked-garden and wicked-vault — the skills every governed worker follows.
+
+estate's binaries, and uv when astral's installer places it, land in `~/.local/bin`, which is **not**
+on macOS's default PATH. Put the directory on PATH so the daemon and your shell find them:
+
+- **macOS (zsh):** `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`, then open a new terminal.
+- **Linux (bash):** the same line into `~/.profile`.
+- **Windows:** `%USERPROFILE%\.local\bin` — astral's uv installer adds it to the user PATH; otherwise add it via Environment Variables.
+
+The install's end message names the start command (`wicked-crew serve`) and the Studio URL
+(`http://127.0.0.1:7701`), and the readiness check lists wicked-crew as **pending** (not ready)
+while `uv`, wicked-estate or wicked-garden is still missing.
 
 ### Uninstall
 
@@ -372,13 +400,13 @@ Pack authoring guide: wicked-garden's `docs/extending.md`.
 
 | Bundle | What it installs | Best for |
 |---|---|---|
-| `quick-start` | wicked-bus + wicked-crew | Fastest path to a governed multi-agent session — daemon up, Wicked Studio open, first job in under five minutes |
+| `quick-start` | wicked-crew + wicked-bus, plus crew's requirements wicked-estate + wicked-garden + wicked-vault (and uv, if missing) | Fastest path to a governed multi-agent session — daemon up, Wicked Studio open, first job in under five minutes |
 | `garden` | wicked-bus + wicked-garden | Recommended starting point for Claude Code users — evidence-gated work, graph-aware refactoring, and the full 40-specialist QE domain |
 | `knowledge` | wicked-bus + wicked-estate | Persistent memory, knowledge, and code-graph layer — everything else queries it |
 | `creative` | wicked-interactive + wicked-crew | The document & render engine (HTML/PDF/PPTX), driven through Crew + the AI workflow console (Studio ships inside Crew) |
 | `full` | wicked-bus + wicked-estate + wicked-garden + wicked-interactive + wicked-crew | The complete wicked-\* experience |
 
-Required dependencies resolve automatically: wicked-garden requires **wicked-vault** (the evidence backend its gate re-derives against), so any selection containing garden also installs it.
+Required dependencies resolve automatically: wicked-garden requires **wicked-vault** (the evidence backend its gate re-derives against), and **wicked-crew** requires **wicked-estate** (adding a repository in Studio runs onboarding's index phase on the `wicked-estate` tool) and pulls in **wicked-garden** (and so **wicked-vault**) — the skills every governed worker follows. So any selection containing garden installs vault, and installing **wicked-crew** in any way also installs wicked-estate, wicked-garden and wicked-vault. When crew is installed and `uv` is missing, the installer also installs uv — see [wicked-crew: uv, the start command, and readiness](#wicked-crew-uv-the-start-command-and-readiness).
 
 ---
 

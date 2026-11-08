@@ -187,7 +187,8 @@ export function dirOnPath(dir: string, env: NodeJS.ProcessEnv = process.env): bo
 export function pathFix(dir: string, platform: NodeJS.Platform = process.platform): string {
   return platform === "win32"
     ? `add ${dir} to your user PATH (System Properties → Environment Variables), then open a new terminal`
-    : `add it to PATH: echo 'export PATH="${dir}:$PATH"' >> ~/.profile (or your shell's rc file), then open a new terminal`;
+    // macOS's login shell is zsh, which never reads ~/.profile: the line must go to ~/.zprofile there.
+    : `add it to PATH: echo 'export PATH="${dir}:$PATH"' >> ${platform === "darwin" ? "~/.zprofile" : "~/.profile"} (or your shell's rc file), then open a new terminal`;
 }
 
 // ---------------------------------------------------------------------------

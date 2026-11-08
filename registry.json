@@ -21,7 +21,7 @@
           "assetPrefix": "wicked-estate",
           "checksums": "SHA256SUMS"
         },
-        "mcpInstructions": "Index a repo first: wicked-estate index <path> --db ~/.wicked-estate/graph.db. The MCP server is wicked-estate-mcp. Both binaries install to ~/.local/bin from the sha256-verified GitHub release (to ~/.cargo/bin only when no prebuilt binary exists for the platform and cargo builds them); put that dir on PATH to run them from a shell."
+        "mcpInstructions": "Index a repo first: wicked-estate index <path> --db ~/.wicked-estate/graph.db. The MCP server is wicked-estate-mcp. Both binaries install to ~/.local/bin from the sha256-verified GitHub release (~/.cargo/bin only when no prebuilt binary exists for the platform and cargo builds them). wicked-crew needs them to add a repository."
       },
       "mcp": {
         "wicked-estate": {
@@ -191,13 +191,13 @@
     {
       "id": "wicked-crew",
       "displayName": "Wicked Crew",
-      "description": "The harness for the coding agents you already use: it runs them in sandboxes through gated jobs. By default a different agent reviews the work; when none can, the job stops unless you launch it as reduced assurance, which is labelled. Gates report the checks that actually ran. Runs Apps (live apps and dashboards over your databases; a change asked for in a chat is built, checked and reviewed by a different agent), and agents read your databases only through one read-only gate. Ships with Wicked Studio.",
+      "description": "The harness for the coding agents you already use: it runs them in sandboxes through gated jobs. By default a different agent reviews the work; when none can, the job stops unless you launch it as reduced assurance, which is labelled. Gates report the checks that actually ran. Runs Apps (live apps and dashboards over your databases; a change asked for in a chat is built, checked and reviewed by a different agent), and agents read your databases only through one read-only gate. Ships with Wicked Studio. Needs Wicked Garden (the skills every job follows), Wicked Estate (adding a repository indexes it) and uv (the skills environment); the installer brings all three.",
       "type": "npm-cli",
       "standalone": true,
       "opinionated": false,
       "status": "active",
-      "requires": ["wicked-garden"],
-      "recommended": ["wicked-estate", "wicked-bus"],
+      "requires": ["wicked-garden", "wicked-estate"],
+      "recommended": ["wicked-bus"],
       "install": {
         "type": "npm-global",
         "package": "wicked-crew"
@@ -206,7 +206,12 @@
         {
           "id": "daemon",
           "label": "daemon for governed jobs + bundled Studio (wicked-crew serve)",
-          "needs": [{ "kind": "backend", "bin": "wicked-crew", "npx": "wicked-crew" }]
+          "needs": [
+            { "kind": "backend", "bin": "wicked-crew", "npx": "wicked-crew" },
+            { "kind": "uv" },
+            { "kind": "backend", "bin": "wicked-estate", "product": "wicked-estate" },
+            { "kind": "crew-garden" }
+          ]
         }
       ]
     },
@@ -232,7 +237,7 @@
     {
       "id": "quick-start",
       "displayName": "Quick Start",
-      "description": "Crew + Bus — the fastest way to run a governed multi-agent session. Install crew, start the daemon, open Wicked Studio, and launch a job in under five minutes. After install, start the daemon with `wicked-crew serve` — it opens Wicked Studio.",
+      "description": "Crew + Bus (Crew brings Garden, Vault and Estate) — the fastest way to run a governed multi-agent session in Wicked Studio. Also makes sure uv is installed (Crew builds its skills environment with it). After install, run `wicked-crew serve` and open http://127.0.0.1:7701.",
       "products": ["wicked-bus", "wicked-crew"]
     },
     {

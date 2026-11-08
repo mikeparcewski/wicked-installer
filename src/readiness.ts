@@ -18,7 +18,10 @@ import { spawnSync } from "node:child_process";
 import { prepareClaudeSpawn, probeOnPath } from "./claude-plugin.js";
 import type { Capability, CapabilityNeed, Product } from "./types.js";
 import { dirname } from "node:path";
+import { homedir } from "node:os";
 import { findInstalledBinary, pathFix } from "./release-binary.js";
+import { findUv, uvInstallCommand } from "./uv.js";
+import { findGardenForCrew } from "./crew-garden.js";
 
 /**
  * `unchecked` = nothing is known to be missing, but a need was only found on PATH and not
@@ -65,6 +68,12 @@ export interface CapabilityReadiness {
 export interface PreflightOptions {
   /** CLI slugs the products were delivered to; a capability with `hosts` is checked only when one matches. Absent ⇒ every capability. */
   hosts?: string[];
+  /**
+   * Per product, the hosts it was actually delivered to (overrides `hosts` for that product). A
+   * host whose delivery FAILED is not one: a failed Claude Code registration must not leave a
+   * "ready … (Claude Code)" row behind (first-run C5).
+   */
+  hostsFor?: (productId: string) => string[];
   /** Skip the network: the npx fallback is reported as not checked. */
   offline?: boolean;
   /**
@@ -148,6 +157,11 @@ function npxReachable(pkg: string, ctx: Ctx): { reachable: boolean; detail: stri
   return out;
 }
 
+/** The checked environment's home (tests and sandboxes set HOME), else this user's. */
+function homeOf(ctx: Ctx): string {
+  return (ctx.platform === "win32" ? ctx.env.USERPROFILE ?? ctx.env.HOME : ctx.env.HOME ?? ctx.env.USERPROFILE) ?? homedir();
+}
+
 function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): NeedResult {
   const label = `${need.kind} ${need.bin}`;
   const install = need.npx
@@ -181,7 +195,7 @@ function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): Nee
   if (need.product) {
     // Installed by the installer, off PATH: ~/.local/bin (release) or ~/.cargo/bin (cargo). The
     // installer's MCP entries and garden's launcher use that absolute path, so it runs; a shell does not find it.
-    const off = findInstalledBinary(need.bin, { env: ctx.env, platform: ctx.platform });
+    const off = findInstalledBinary(need.bin, { env: ctx.env, platform: ctx.platform, home: homeOf(ctx) });
     if (off && off.source !== "PATH") {
       return { need: label, met: true, detail: `installed at ${off.path} (not on PATH: MCP entries use this path; to run it from a shell, ${pathFix(dirname(off.path), ctx.platform)})` };
     }
@@ -222,6 +236,26 @@ function checkPython(need: Extract<CapabilityNeed, { kind: "python" }>, ctx: Ctx
 }
 
 function checkNeed(need: CapabilityNeed, ctx: Ctx): NeedResult {
+  if (need.kind === "uv") {
+    // A file probe is sufficient: uv has no doctor/version floor to defer under --dry-run.
+    // Use the caller's home, so a sandboxed readiness check cannot see the operator's uv.
+    const found = findUv({ env: ctx.env, platform: ctx.platform, home: homeOf(ctx) });
+    return found
+      ? { need: "uv", met: true, detail: `installed at ${found.path} (${found.onPath ? "on PATH" : `not on PATH; ${pathFix(dirname(found.path), ctx.platform)}`})` }
+      : { need: "uv", met: false, detail: "not installed; wicked-crew needs uv to build each job's skills environment", remedy: uvInstallCommand(ctx.platform, ctx.env) };
+  }
+  if (need.kind === "crew-garden") {
+    // Garden delivered to some host is not garden crew can load (first-run B3): check crew's own sources.
+    const hit = findGardenForCrew(ctx.env, ctx.platform);
+    return hit
+      ? { need: "wicked-garden for crew", met: true, detail: `${hit.source} (${hit.path})` }
+      : {
+        need: "wicked-garden for crew",
+        met: false,
+        detail: "crew finds no wicked-garden plugin (it looks in Claude Code's and Codex's plugin caches and the wicked-garden npm package), so it would refuse every job",
+        remedy: "npm i -g wicked-garden",
+      };
+  }
   return need.kind === "python" ? checkPython(need, ctx) : checkBin(need, ctx);
 }
 
@@ -238,8 +272,9 @@ export function preflight(products: Product[], opts: PreflightOptions = {}): Cap
   const out: CapabilityReadiness[] = [];
   for (const product of products) {
     const caps = Array.isArray(product.capabilities) ? product.capabilities : [];
+    const hosts = opts.hostsFor ? opts.hostsFor(product.id) : opts.hosts;
     for (const cap of caps) {
-      if (!applies(cap, opts.hosts)) continue;
+      if (!applies(cap, hosts)) continue;
       const needs = (Array.isArray(cap.needs) ? cap.needs : []).map((n) => checkNeed(n, ctx));
       out.push({
         productId: product.id,
@@ -252,8 +287,8 @@ export function preflight(products: Product[], opts: PreflightOptions = {}): Cap
     }
     // Say plainly where a product's hooks do not exist (no silent gap): one `n/a` row per host
     // without hook events. Never pending — there is nothing to install — and never "ready".
-    if (product.shipsHooks === true && Array.isArray(opts.hosts)) {
-      for (const host of opts.hosts) {
+    if (product.shipsHooks === true && Array.isArray(hosts)) {
+      for (const host of hosts) {
         if (HOOK_HOSTS.has(host)) continue;
         const adapterHost = ADAPTER_HOSTS.has(host);
         if (adapterHost && opts.hookAdapter?.(host, product.id) === true) continue; // the product's own adapter is installed

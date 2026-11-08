@@ -186,7 +186,44 @@ test("the registry declares garden's runtime needs — launcher, python, vault b
   for (const p of reg.products) {
     for (const c of p.capabilities ?? []) {
       assert.ok(typeof c.id === "string" && typeof c.label === "string" && Array.isArray(c.needs) && c.needs.length > 0, `${p.id}/${c.id} shape`);
-      for (const n of c.needs) assert.ok(["launcher", "backend", "python"].includes(n.kind), `${p.id}/${c.id} need kind ${n.kind}`);
+      for (const n of c.needs) assert.ok(["launcher", "backend", "python", "uv", "crew-garden"].includes(n.kind), `${p.id}/${c.id} need kind ${n.kind}`);
     }
+  }
+});
+
+test("crew daemon stays pending without uv and is ready with HOME/.local/bin/uv, even under probeOnly", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const reg = JSON.parse(readFileSync(new URL("../registry.json", import.meta.url), "utf8"));
+    const crew = reg.products.find((p) => p.id === "wicked-crew");
+    sb.fake("wicked-crew", "must not run");
+    const opts = { env: sb.env, platform: "linux", probeOnly: true };
+    const missing = by(preflight([crew], opts), "daemon");
+    assert.equal(missing.state, "pending");
+    const need = missing.needs.find((n) => n.need === "uv");
+    assert.equal(need.met, false);
+    assert.equal(need.remedy, "curl -LsSf https://astral.sh/uv/install.sh | sh");
+
+    const bin = join(sb.env.HOME, ".local", "bin");
+    mkdirSync(bin, { recursive: true });
+    const uv = join(bin, "uv");
+    writeFileSync(uv, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    // crew's other needs (first-run B2/B3): estate where the installer puts it, a garden crew loads.
+    writeFileSync(join(bin, "wicked-estate"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const garden = join(sb.env.HOME, ".codex", "plugins", "cache", "wicked-garden", "wicked-garden", "12.66.0", ".claude-plugin");
+    mkdirSync(garden, { recursive: true });
+    writeFileSync(join(garden, "plugin.json"), "{}");
+    for (const probeOnly of [true, false]) {
+      const ready = by(preflight([crew], { ...opts, probeOnly }), "daemon");
+      assert.equal(ready.state, "ready");
+      const found = ready.needs.find((n) => n.need === "uv");
+      assert.equal(found.met, true);
+      assert.notEqual(found.verified, false);
+      assert.ok(found.detail.includes(uv));
+      assert.match(found.detail, /not on PATH; add it to PATH/);
+    }
+    assert.equal(sb.spawned(), "", "neither crew nor uv was executed");
+  } finally {
+    sb.cleanup();
   }
 });

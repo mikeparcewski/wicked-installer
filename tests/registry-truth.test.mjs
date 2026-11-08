@@ -79,6 +79,16 @@ test("wicked-core is a manual entry that rides wicked-crew — never installed o
   }
 });
 
+test("crew daemon needs its backend and uv for the job skills environment (B1)", () => {
+  const daemon = byId["wicked-crew"].capabilities.find((c) => c.id === "daemon");
+  assert.deepEqual(daemon.needs, [
+    { kind: "backend", bin: "wicked-crew", npx: "wicked-crew" },
+    { kind: "uv" },
+    { kind: "backend", bin: "wicked-estate", product: "wicked-estate" },
+    { kind: "crew-garden" },
+  ]);
+});
+
 test("wicked-crew requires wicked-garden — expressed ONCE, not also in recommended (BC-74, F-W1-102)", () => {
   // A crew-only install boots a daemon that refuses every launch under the default `require`
   // base-skill policy until garden's skills are present (F-W1-102; crew #605 surfaces the warning).
@@ -86,12 +96,26 @@ test("wicked-crew requires wicked-garden — expressed ONCE, not also in recomme
   // crew (quick-start, creative, `install wicked-crew`, full) gets garden. Expressing it on the
   // quick-start bundle instead would fix one path and leave `install wicked-crew` broken.
   const crew = byId["wicked-crew"];
-  assert.deepEqual(crew.requires, ["wicked-garden"], "crew hard-requires garden for the default policy");
+  assert.deepEqual(crew.requires, ["wicked-garden", "wicked-estate"], "crew hard-requires garden for the default policy, and estate to add a repository");
   assert.ok(!(crew.recommended ?? []).includes("wicked-garden"), "garden is a requirement now, not also a recommendation — once");
   // quick-start does NOT list garden directly: it arrives through crew.requires (one place).
   const qs = registry.bundles.find((b) => b.id === "quick-start");
   assert.ok(!qs.products.includes("wicked-garden"), "quick-start pulls garden via crew.requires, never a second listing");
   assert.match(qs.description, /wicked-crew serve/, "the quick-start description names the post-install next step");
+  assert.match(qs.description, /http:\/\/127\.0\.0\.1:7701/, "and where Studio opens");
+  assert.ok(!qs.products.includes("wicked-estate"), "estate arrives through crew.requires too, never a second listing");
+});
+
+test("first-run B2: wicked-crew requires wicked-estate, which is not called optional for crew", () => {
+  // Adding a repository in Studio indexes it with wicked-estate (the onboarding workflow's
+  // `index` phase), so a crew install without estate failed at its first repository.
+  const crew = byId["wicked-crew"];
+  assert.ok(crew.requires.includes("wicked-estate"), "estate is a requirement of crew");
+  assert.ok(!(crew.recommended ?? []).includes("wicked-estate"), "a requirement, not also a recommendation");
+  const daemon = crew.capabilities.find((c) => c.id === "daemon");
+  assert.ok(daemon.needs.some((n) => n.bin === "wicked-estate" && n.product === "wicked-estate"), "crew's readiness checks estate");
+  assert.notEqual(daemon.optional, true, "the daemon capability is required");
+  assert.doesNotMatch(byId["wicked-estate"].install.mcpInstructions, /optional/i);
 });
 
 test("release-1104 descriptions: estate's real tool and language counts, studio is the ADE with Apps, crew's review is a default", () => {
