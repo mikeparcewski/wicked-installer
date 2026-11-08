@@ -84,7 +84,7 @@ test("findGardenForCrew: Codex plugin cache (CODEX_HOME honoured)", { skip }, (t
   const codexHome = join(sb.tmp, "codex-home");
   const dir = sb.pluginRoot(join(codexHome, "plugins", "cache", "wicked-garden", "wicked-garden", "12.66.0"));
   assert.equal(findGardenForCrew(sb.env, "linux"), undefined, "the default ~/.codex holds nothing");
-  assert.deepEqual(findGardenForCrew({ ...sb.env, CODEX_HOME: codexHome }, "linux"), { path: dir, source: "Codex plugin cache", version: "12.66.0" });
+  assert.deepEqual(findGardenForCrew({ ...sb.env, CODEX_HOME: codexHome }, "linux"), { path: realpathSync(dir), source: "Codex plugin cache", version: "12.66.0" });
 });
 
 test("findGardenForCrew: the npm package behind the wicked-garden launcher on PATH", { skip }, (t) => {
@@ -411,4 +411,53 @@ test("ensureGardenForCrew never installs the published garden under --source-roo
   const bad = ensureGardenForCrew({ productIds: ids, dryRun: false, env: { ...sb.env, WICKED_CREW_SKILLS_SOURCE: join(sb.tmp, "nope") }, platform: "linux", run: never });
   assert.equal(bad.action, "failed");
   assert.match(bad.message, /fix or unset it/);
+});
+
+// --- review r3 folds ----------------------------------------------------------------------
+
+test("older crew: estate only in ~/.local/bin is not on its PATH, so crew is pending even with uv and garden met", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrew(sb, "0.17.1");
+  sb.exe(sb.bin, "uv");
+  sb.pluginRoot(join(sb.home, ".claude", "plugins", "wicked-garden"));
+  sb.exe(join(sb.home, ".local", "bin"), "wicked-estate");
+  const row = preflight([byId["wicked-crew"]], { env: sb.env, platform: "linux", probeOnly: true }).find((r) => r.capability === "daemon");
+  assert.deepEqual(row.needs.filter((n) => !n.met).map((n) => n.need), ["backend wicked-estate"]);
+  assert.equal(row.state, "pending");
+});
+
+test("findGardenForCrew: Codex — linked plugins/ is not walked; a linked npm manifest or one in any marketplace is a refusal", { skip }, (t) => {
+  const sb = sandbox(t);
+  const elsewhere = join(sb.tmp, "elsewhere");
+  sb.pluginRoot(join(elsewhere, "cache", "m", "wicked-garden", "12.66.0"));
+  mkdirSync(join(sb.home, ".codex"), { recursive: true });
+  symlinkSync(elsewhere, join(sb.home, ".codex", "plugins"));
+  assert.equal(findGardenForCrew(sb.env, "linux"), undefined);
+
+  const sb2 = sandbox(t);
+  const cache = join(sb2.home, ".codex", "plugins", "cache");
+  sb2.pluginRoot(join(cache, "a", "wicked-garden", "12.66.0"));
+  mkdirSync(join(cache, "b", "wicked-garden", "12.65.0", ".claude-plugin"), { recursive: true });
+  writeFileSync(join(sb2.tmp, "m.json"), '{"version":"12.65.0"}');
+  symlinkSync(join(sb2.tmp, "m.json"), join(cache, "b", "wicked-garden", "12.65.0", ".claude-plugin", "plugin.json"));
+  assert.match(findGardenForCrew(sb2.env, "linux")?.refused ?? "", /symlink/);
+
+  const sb3 = sandbox(t);
+  const pkg = join(sb3.tmp, "prefix", "lib", "node_modules", "wicked-garden");
+  mkdirSync(join(pkg, ".claude-plugin"), { recursive: true });
+  writeFileSync(join(sb3.tmp, "m.json"), '{"version":"12.66.0"}');
+  symlinkSync(join(sb3.tmp, "m.json"), join(pkg, ".claude-plugin", "plugin.json"));
+  writeFileSync(join(pkg, "package.json"), '{"name":"wicked-garden"}');
+  writeFileSync(join(pkg, "install.mjs"), "", { mode: 0o755 });
+  symlinkSync(join(pkg, "install.mjs"), join(sb3.bin, "wicked-garden"));
+  sb3.pluginRoot(join(sb3.home, ".codex", "plugins", "cache", "m", "wicked-garden", "12.66.0"));
+  assert.match(findGardenForCrew(sb3.env, "linux")?.refused ?? "", /symlink/, "no silent fallback past a linked npm manifest");
+});
+
+test("an explicit override whose manifest version is the string 'link' is still a garden (crew accepts any non-empty version there)", { skip }, (t) => {
+  const sb = sandbox(t);
+  const dir = join(sb.tmp, "override");
+  mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
+  writeFileSync(join(dir, ".claude-plugin", "plugin.json"), '{"version":"link"}');
+  assert.equal(findGardenForCrew({ ...sb.env, WICKED_CREW_SKILLS_SOURCE: dir }, "linux")?.version, "link");
 });

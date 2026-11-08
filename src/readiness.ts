@@ -129,6 +129,8 @@ export function versionAtLeast(found: string, min: string): boolean {
 }
 
 interface Ctx {
+  /** Judging wicked-crew's own needs: crew resolves binaries on its PATH only (env is crewEnv). */
+  crew?: boolean;
   env: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
   offline: boolean;
@@ -194,7 +196,8 @@ function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): Nee
   if (need.product) {
     // Installed by the installer, off PATH: ~/.local/bin (release) or ~/.cargo/bin (cargo). The
     // installer's MCP entries and garden's launcher use that absolute path, so it runs; a shell does not find it.
-    const off = findInstalledBinary(need.bin, { env: ctx.env, platform: ctx.platform, home: homeOfCtx(ctx) });
+    // Not for crew: its daemon runs `wicked-estate` by name on its own PATH (ctx.env), never through an MCP entry.
+    const off = ctx.crew ? undefined : findInstalledBinary(need.bin, { env: ctx.env, platform: ctx.platform, home: homeOfCtx(ctx) });
     if (off && off.source !== "PATH") {
       return { need: label, met: true, detail: `installed at ${off.path} (not on PATH: MCP entries use this path; to run it from a shell, ${pathFix(dirname(off.path), ctx.platform)})` };
     }
@@ -279,7 +282,7 @@ export function preflight(products: Product[], opts: PreflightOptions = {}): Cap
     const hosts = opts.hostsFor ? opts.hostsFor(product.id) : opts.hosts;
     // crew's daemon looks up its tools on its own PATH (it appends ~/.local/bin & co. at boot):
     // judge crew's needs against that, not against this shell's PATH.
-    const pctx = product.id === "wicked-crew" ? { ...ctx, env: crewEnv(ctx.env, ctx.platform) } : ctx;
+    const pctx = product.id === "wicked-crew" ? { ...ctx, crew: true, env: crewEnv(ctx.env, ctx.platform) } : ctx;
     for (const cap of caps) {
       if (!applies(cap, hosts)) continue;
       const needs = (Array.isArray(cap.needs) ? cap.needs : []).map((n) => checkNeed(n, pctx));

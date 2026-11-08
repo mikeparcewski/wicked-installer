@@ -98,12 +98,15 @@ const isLink = (p: string): boolean => {
 
 /**
  * The manifest version of a plugin root, undefined when it is not one crew would accept, or
- * "link" when crew REFUSES the whole discovery (a symlinked `.claude-plugin/` or `plugin.json`).
+ * LINK when crew REFUSES the whole discovery (a symlinked `.claude-plugin/` or `plugin.json`).
  */
-function manifestVersion(dir: string): string | "link" | undefined {
+const LINK: unique symbol = Symbol("symlinked manifest");
+type Linked = typeof LINK;
+
+function manifestVersion(dir: string): string | Linked | undefined {
   const cp = join(dir, ".claude-plugin");
   const manifest = join(cp, "plugin.json");
-  if (isLink(cp) || isLink(manifest)) return "link";
+  if (isLink(cp) || isLink(manifest)) return LINK;
   try {
     if (!lstatSync(cp).isDirectory() || !lstatSync(manifest).isFile()) return undefined;
     const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));
@@ -146,16 +149,16 @@ function linkFreeBelow(root: string, segments: string[]): string | undefined {
 
 /**
  * A marketplace cache: every SemVer-named entry is judged, as crew does; a symlinked manifest in ANY
- * of them makes crew refuse discovery ("link"). The pick: an entry whose manifest version equals its name.
+ * of them makes crew refuse discovery (LINK). The pick: an entry whose manifest version equals its name.
  */
-function cacheHit(root: string, segments: string[]): { path: string; version: string } | "link" | undefined {
+function cacheHit(root: string, segments: string[]): { path: string; version: string } | Linked | undefined {
   const cache = linkFreeBelow(root, segments);
   if (!cache) return undefined;
   let pick: { path: string; version: string } | undefined;
   for (const dir of subdirs(cache).sort(byVersionDesc)) {
     if (!SEMVER.test(basename(dir)) || isLink(dir)) continue;
     const version = manifestVersion(dir);
-    if (version === "link") return "link";
+    if (version === LINK) return LINK;
     if (!pick && version !== undefined && version === basename(dir)) pick = { path: dir, version };
   }
   return pick;
@@ -226,7 +229,7 @@ export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform
   if (override) {
     // An explicit override is the only source crew reads (and crew does not judge its version floor).
     const version = manifestVersion(resolve(override));
-    return version !== undefined && version !== "link"
+    return typeof version === "string"
       ? { path: resolve(override), source: "WICKED_CREW_SKILLS_SOURCE", version }
       : { refused: `WICKED_CREW_SKILLS_SOURCE=${override} is not a wicked-garden plugin root (no usable .claude-plugin/plugin.json); crew reads only that, so fix or unset it` };
   }
@@ -234,13 +237,13 @@ export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform
   const roots = crewClaudeConfigRoots(env, platform);
   for (const root of roots) {
     const hit = cacheHit(root, ["plugins", "cache", "wicked-garden", "wicked-garden"]);
-    if (hit === "link") return linked;
+    if (hit === LINK) return linked;
     if (hit) return { ...hit, source: "Claude Code plugin cache" };
   }
   for (const root of roots) {
     const dir = linkFreeBelow(root, ["plugins", "wicked-garden"]);
     const version = dir ? manifestVersion(dir) : undefined;
-    if (version === "link") return linked;
+    if (version === LINK) return linked;
     if (dir && version !== undefined) return { path: dir, source: "Claude Code plugin copy", version };
   }
   // Tiers 4-5 exist from crew 0.18.0; an older crew stops at its Claude Code sources.
@@ -249,21 +252,34 @@ export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform
   const path = crewEnv(env, platform);
   const fromLauncher = launcherPackage("wicked-garden", "wicked-garden", path, platform);
   const launcherVersion = fromLauncher ? manifestVersion(fromLauncher) : undefined;
-  if (fromLauncher && launcherVersion !== undefined && launcherVersion !== "link") return { path: fromLauncher, source: "npm package (wicked-garden on PATH)", version: launcherVersion };
+  if (launcherVersion === LINK) return linked;
+  if (fromLauncher && launcherVersion !== undefined) return { path: fromLauncher, source: "npm package (wicked-garden on PATH)", version: launcherVersion };
   const crewPkg = launcherPackage("wicked-crew", "wicked-crew", path, platform);
   if (crewPkg) {
     const beside = join(dirname(crewPkg), "wicked-garden");
     const version = manifestVersion(beside);
-    if (version !== undefined && version !== "link") return { path: beside, source: "npm package beside wicked-crew", version };
+    if (version === LINK) return linked;
+    if (version !== undefined) return { path: beside, source: "npm package beside wicked-crew", version };
   }
 
-  const codexHome = env.CODEX_HOME ? resolve(env.CODEX_HOME) : join(home, ".codex");
-  for (const marketplace of subdirs(join(codexHome, "plugins", "cache"))) {
-    const hit = cacheHit(marketplace, ["wicked-garden"]);
-    if (hit === "link") return linked;
-    if (hit) return { ...hit, source: "Codex plugin cache" };
+  // Codex: below the canonical CODEX_HOME nothing is followed, and every marketplace is judged
+  // before the pick (a linked manifest in any of them makes crew refuse).
+  let codexRoot: string;
+  try {
+    codexRoot = realpathSync(env.CODEX_HOME ? resolve(env.CODEX_HOME) : join(home, ".codex"));
+  } catch {
+    return undefined;
   }
-  return undefined;
+  const cacheDir = linkFreeBelow(codexRoot, ["plugins", "cache"]);
+  if (!cacheDir) return undefined;
+  let pick: CrewGardenHit | undefined;
+  for (const marketplace of subdirs(cacheDir)) {
+    if (isLink(marketplace)) continue;
+    const hit = cacheHit(marketplace, ["wicked-garden"]);
+    if (hit === LINK) return linked;
+    if (hit && !pick) pick = { ...hit, source: "Codex plugin cache" };
+  }
+  return pick;
 }
 
 export { usable as isCrewGardenHit };
