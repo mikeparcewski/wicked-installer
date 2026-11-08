@@ -5,6 +5,14 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-08
+
+A fresh install of wicked-crew works: the installer makes sure uv is there, installs wicked-estate with crew
+(it is now required, not optional), makes sure crew can find the garden it installed, says "ready" only when crew
+can run a job (and, when garden's Python is not ready, names a command that fixes it), and ends by saying how
+to start. Minor because crew's install set changed. Pairs with wicked-crew
+0.18.0, which finds uv, estate and garden where this installer puts them.
+
 ### Fixed
 
 - **Garden's Python check names a command you can run.** On a stock Mac (python3 3.9.6) the readiness line read
