@@ -127,7 +127,7 @@ test("first-run B3/C5: crew readiness is PENDING while crew sees no garden, uv o
   const pending = preflight([crew], { env: sb.env, platform: "linux", probeOnly: true }).find((r) => r.capability === "daemon");
   assert.equal(pending.state, "pending");
   const unmet = Object.fromEntries(pending.needs.filter((n) => !n.met).map((n) => [n.need, n.remedy]));
-  assert.deepEqual(Object.keys(unmet).sort(), ["backend wicked-estate", "uv", "wicked-garden for crew"]);
+  assert.deepEqual(Object.keys(unmet).sort(), ["backend wicked-estate", "local Kubernetes (governed seats run in pods)", "uv", "wicked-garden for crew"]);
   assert.equal(unmet["backend wicked-estate"], "npx wicked-installer install wicked-estate");
   assert.equal(unmet["wicked-garden for crew"], "npm i -g wicked-garden");
 
@@ -135,8 +135,12 @@ test("first-run B3/C5: crew readiness is PENDING while crew sees no garden, uv o
   sb.exe(local, "uv");
   sb.exe(local, "wicked-estate");
   sb.pluginRoot(join(sb.home, ".codex", "plugins", "cache", "wicked-garden", "wicked-garden", "12.66.0"));
+  sb.exe(local, "kubectl");
   const ready = preflight([crew], { env: sb.env, platform: "linux", probeOnly: true }).find((r) => r.capability === "daemon");
-  assert.equal(ready.state, "ready", JSON.stringify(ready.needs));
+  // Every need is met; a dry run cannot prove the cluster (it spawns nothing), so the row says unchecked, never ready.
+  assert.ok(ready.needs.every((n) => n.met), JSON.stringify(ready.needs));
+  assert.equal(ready.state, "unchecked", JSON.stringify(ready.needs));
+  assert.equal(ready.needs.find((n) => n.need.startsWith("local Kubernetes")).verified, false);
 });
 
 // --- C5: per-product hosts ----------------------------------------------------------------
@@ -581,7 +585,8 @@ test("older crew: estate only in ~/.local/bin is not on its PATH, so crew is pen
   sb.pluginRoot(join(sb.home, ".claude", "plugins", "wicked-garden"));
   sb.exe(join(sb.home, ".local", "bin"), "wicked-estate");
   const row = preflight([byId["wicked-crew"]], { env: sb.env, platform: "linux", probeOnly: true }).find((r) => r.capability === "daemon");
-  assert.deepEqual(row.needs.filter((n) => !n.met).map((n) => n.need), ["backend wicked-estate"]);
+  // (the local-Kubernetes need is unmet here too: no kubectl; kubernetes.test.mjs covers it)
+  assert.deepEqual(row.needs.filter((n) => !n.met && !n.need.startsWith("local Kubernetes")).map((n) => n.need), ["backend wicked-estate"]);
   assert.equal(row.state, "pending");
 });
 

@@ -86,6 +86,7 @@ test("crew daemon needs its backend and uv for the job skills environment (B1)",
     { kind: "uv" },
     { kind: "backend", bin: "wicked-estate", product: "wicked-estate" },
     { kind: "crew-garden" },
+    { kind: "kubernetes" },
   ]);
 });
 

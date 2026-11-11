@@ -71,7 +71,10 @@ export type CapabilityNeed =
   /** Crew's job skills environment is built with uv; its standalone installer may place it off PATH. */
   | { kind: "uv" }
   /** A wicked-garden plugin root where wicked-crew's daemon looks for it (src/crew-garden.ts mirrors crew's order). */
-  | { kind: "crew-garden" };
+  | { kind: "crew-garden" }
+  /** The local Kubernetes cluster crew's governed seats run in (src/kubernetes.ts): kubectl, a local
+   *  context that answers, a kubelet pod process limit, and crew's part installed (`wicked-core cluster install`). */
+  | { kind: "kubernetes" };
 
 export interface Bundle {
   id: string;

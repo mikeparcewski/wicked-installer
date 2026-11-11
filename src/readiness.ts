@@ -20,6 +20,7 @@ import type { Capability, CapabilityNeed, Product } from "./types.js";
 import { dirname } from "node:path";
 import { findInstalledBinary, pathFix } from "./release-binary.js";
 import { findUv, uvInstallCommand } from "./uv.js";
+import { checkKubernetes, defaultSpawn as kubeDefaultSpawn, type Spawn as KubeSpawn } from "./kubernetes.js";
 import { CREW_FINDS_INSTALLER_LOCATIONS, crewEnv, crewKnowsInstallerLocations, findGardenForCrew, homeOf, isCrewGardenHit } from "./crew-garden.js";
 
 /**
@@ -136,6 +137,8 @@ interface Ctx {
   offline: boolean;
   probeOnly: boolean;
   spawn: NonNullable<PreflightOptions["spawn"]>;
+  /** A test's spawn seam, adapted for the Kubernetes need (absent: that need spawns with crew's env). */
+  kubeSpawn?: KubeSpawn;
   npxCache: Map<string, { reachable: boolean; detail: string }>;
 }
 
@@ -294,6 +297,11 @@ function checkNeed(need: CapabilityNeed, ctx: Ctx): NeedResult {
       remedy: modern ? "npm i -g wicked-garden" : "npm i -g wicked-crew@latest",
     };
   }
+  if (need.kind === "kubernetes") {
+    // ctx.env is crew's own PATH (crewEnv): the kubectl and wicked-core crew's daemon will find.
+    // The engine is spawned with that same env (plus its pinned kubectl), so the kube spawn takes an env.
+    return checkKubernetes({ env: ctx.env, platform: ctx.platform, probeOnly: ctx.probeOnly, spawn: ctx.kubeSpawn ?? kubeDefaultSpawn(ctx.env) });
+  }
   return need.kind === "python" ? checkPython(need, ctx) : checkBin(need, ctx);
 }
 
@@ -306,7 +314,8 @@ function applies(cap: Capability, hosts: string[] | undefined): boolean {
 export function preflight(products: Product[], opts: PreflightOptions = {}): CapabilityReadiness[] {
   const env = opts.env ?? process.env;
   const platform = opts.platform ?? process.platform;
-  const ctx: Ctx = { env, platform, offline: opts.offline === true, probeOnly: opts.probeOnly === true, spawn: opts.spawn ?? defaultSpawn(env, platform), npxCache: new Map() };
+  const injected = opts.spawn;
+  const ctx: Ctx = { env, platform, offline: opts.offline === true, probeOnly: opts.probeOnly === true, spawn: injected ?? defaultSpawn(env, platform), ...(injected ? { kubeSpawn: (bin: string, args: string[]) => injected(bin, args) } : {}), npxCache: new Map() };
   const out: CapabilityReadiness[] = [];
   for (const product of products) {
     const caps = Array.isArray(product.capabilities) ? product.capabilities : [];
