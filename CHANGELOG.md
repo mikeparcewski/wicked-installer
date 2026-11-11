@@ -14,6 +14,10 @@ All notable changes to wicked-installer are documented here. The format follows
   12.66.1). A stale npm package is upgraded once with `npm install -g wicked-garden@latest` and checked again; a
   stale Claude Code or Codex registration is left as it is and the exact update steps are printed. An explicit
   `WICKED_CREW_SKILLS_SOURCE` is still exempt, as it is for crew.
+- **Governed runs' checks floor builds before it tests (#57).** The tests import the compiled `dist/`, so the floor's
+  `npm run test` failed all 194 tests on the base and the change alike, and every governed run on the installer had
+  a red floor it could not attribute. `.wicked/checks.json` now declares `test` (and `test_targeted`, used by
+  the floor's targeted re-run) as `npm run build && npm test`, the same as CI. Seats' scratch `tmp/` is ignored.
 
 ## [0.9.0] - 2026-11-08
 

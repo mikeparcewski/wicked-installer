@@ -1,0 +1,4 @@
+{
+  "test": ["sh", "-c", "npm run build && npm test"],
+  "test_targeted": ["sh", "-c", "npm run build && npm test"]
+}
