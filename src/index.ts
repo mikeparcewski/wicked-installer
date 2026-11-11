@@ -21,6 +21,7 @@ import { NON_CLAUDE_HOSTS, hostProductStatus } from "./host-status.js";
 import type { HostProductStatus } from "./host-status.js";
 import type { CapabilityReadiness } from "./readiness.js";
 import { ensureUv } from "./uv.js";
+import { ensureClusterForCrew } from "./kubernetes.js";
 import { ensureGardenForCrew } from "./crew-garden.js";
 
 /**
@@ -331,6 +332,11 @@ function gardenForCrew(productIds: string[], flags: DispatchFlags): void {
   const r = ensureGardenForCrew({ productIds, dryRun: flags.dryRun, ...(flags.sourceRoot ? { sourceRoot: flags.sourceRoot } : {}) });
   if (r.action === "failed") console.log(chalk.yellow(`\n${r.message}`));
   else if (r.message) console.log(chalk.dim(`\n${r.message}`));
+  // Crew's governed seats run in pods on a local cluster: install crew's part of it when the cluster can
+  // hold seats (the engine's install proves the pod process limit and NetworkPolicy enforcement).
+  const k = ensureClusterForCrew({ productIds, dryRun: flags.dryRun });
+  if (k.action === "failed" || k.action === "skipped") console.log(chalk.yellow(`\n${k.message}`));
+  else if (k.message) console.log(chalk.dim(`\n${k.message}`));
 }
 
 /** A plugin's registration outcome in the same vocabulary the scripts report. */

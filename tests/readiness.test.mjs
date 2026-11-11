@@ -186,7 +186,7 @@ test("the registry declares garden's runtime needs — launcher, python, vault b
   for (const p of reg.products) {
     for (const c of p.capabilities ?? []) {
       assert.ok(typeof c.id === "string" && typeof c.label === "string" && Array.isArray(c.needs) && c.needs.length > 0, `${p.id}/${c.id} shape`);
-      for (const n of c.needs) assert.ok(["launcher", "backend", "python", "uv", "crew-garden"].includes(n.kind), `${p.id}/${c.id} need kind ${n.kind}`);
+      for (const n of c.needs) assert.ok(["launcher", "backend", "python", "uv", "crew-garden", "kubernetes"].includes(n.kind), `${p.id}/${c.id} need kind ${n.kind}`);
     }
   }
 });
@@ -195,7 +195,9 @@ test("crew daemon stays pending without uv and is ready with HOME/.local/bin/uv,
   const sb = sandbox();
   try {
     const reg = JSON.parse(readFileSync(new URL("../registry.json", import.meta.url), "utf8"));
-    const crew = reg.products.find((p) => p.id === "wicked-crew");
+    const registered = reg.products.find((p) => p.id === "wicked-crew");
+    // This case is about uv; the local-Kubernetes need has its own tests (kubernetes.test.mjs).
+    const crew = { ...registered, capabilities: registered.capabilities.map((c) => ({ ...c, needs: c.needs.filter((n) => n.kind !== "kubernetes") })) };
     sb.fake("wicked-crew", "must not run");
     const opts = { env: sb.env, platform: "linux", probeOnly: true };
     const missing = by(preflight([crew], opts), "daemon");

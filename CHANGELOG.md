@@ -5,6 +5,17 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Local Kubernetes for crew (the Kubernetes runner, with the wicked-core k8s-swap train).** Crew's governed seats run
+  in pods on a local cluster. The crew daemon's readiness gains a `kubernetes` need: kubectl installed, a LOCAL context
+  (`rancher-desktop`, then `docker-desktop`, or `WICKED_K8S_ADMIN_CONTEXT`; never the current context) that answers, a
+  kubelet pod process limit of 4096 or less (read from the node's `configz`; the fix for Rancher Desktop's k3s is
+  given, never applied), and crew's part installed with its sandbox controller ready (`wicked-core cluster status`).
+  After install, when the cluster can hold seats, the installer runs `wicked-core cluster install --admin-context <ctx>
+  --home <crew's state home>`, which itself proves the pod process limit and NetworkPolicy enforcement and refuses a
+  cluster that fails either. `--dry-run` spawns nothing for it.
+
 ### Fixed
 
 - **A garden older than crew's floor is no longer kept (#56).** With wicked-crew in the install set, the installer

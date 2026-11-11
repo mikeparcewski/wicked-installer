@@ -210,7 +210,8 @@
             { "kind": "backend", "bin": "wicked-crew", "npx": "wicked-crew" },
             { "kind": "uv" },
             { "kind": "backend", "bin": "wicked-estate", "product": "wicked-estate" },
-            { "kind": "crew-garden" }
+            { "kind": "crew-garden" },
+            { "kind": "kubernetes" }
           ]
         }
       ]

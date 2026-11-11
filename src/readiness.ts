@@ -20,6 +20,7 @@ import type { Capability, CapabilityNeed, Product } from "./types.js";
 import { dirname } from "node:path";
 import { findInstalledBinary, pathFix } from "./release-binary.js";
 import { findUv, uvInstallCommand } from "./uv.js";
+import { checkKubernetes } from "./kubernetes.js";
 import { CREW_FINDS_INSTALLER_LOCATIONS, crewEnv, crewKnowsInstallerLocations, findGardenForCrew, homeOf, isCrewGardenHit } from "./crew-garden.js";
 
 /**
@@ -293,6 +294,10 @@ function checkNeed(need: CapabilityNeed, ctx: Ctx): NeedResult {
         : `the wicked-crew on PATH is older than ${CREW_FINDS_INSTALLER_LOCATIONS} and looks for wicked-garden only in Claude Code's plugin dirs, where there is none, so it would refuse every job`,
       remedy: modern ? "npm i -g wicked-garden" : "npm i -g wicked-crew@latest",
     };
+  }
+  if (need.kind === "kubernetes") {
+    // ctx.env is crew's own PATH (crewEnv): the kubectl and wicked-core crew's daemon will find.
+    return checkKubernetes({ env: ctx.env, platform: ctx.platform, probeOnly: ctx.probeOnly, spawn: (bin, args) => ctx.spawn(bin, args) });
   }
   return need.kind === "python" ? checkPython(need, ctx) : checkBin(need, ctx);
 }
