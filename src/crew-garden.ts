@@ -19,15 +19,14 @@
  *   A candidate counts only when `.claude-plugin/plugin.json` is a regular file (no link) that parses
  *   with a non-empty string `version`; a cache entry's directory name must equal that version.
  *   OpenCode / Pi / Antigravity skill copies are not a source for crew: they carry skills only.
- * Crew also compares the version with its own minimum, which lives in crew; the found version is
- * reported so a stale garden is visible, but the floor is not judged here.
- * Filesystem probes only — nothing is spawned.
+ * Crew also refuses a garden below its own minimum (REQUIRED_GARDEN_VERSION): `ensureGardenForCrew`
+ * judges that floor. The discovery functions here are filesystem probes only — nothing is spawned.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { probeOnPath } from "./claude-plugin.js";
+import { probeOnPath, renderClaudeCommand } from "./claude-plugin.js";
 
 export interface CrewGardenHit {
   path: string;
@@ -284,11 +283,78 @@ export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform
 
 export { usable as isCrewGardenHit };
 
+/** crew's garden floor when no crew is installed to read it from (REQUIRED_GARDEN_VERSION in crew 0.18.1). */
+export const FALLBACK_GARDEN_FLOOR = "12.66.1";
+
+const FLOOR_LITERAL = /REQUIRED_GARDEN_VERSION\s*=\s*["'](\d+\.\d+\.\d+)["']/;
+
+/**
+ * The garden version the crew being installed demands: REQUIRED_GARDEN_VERSION, read as text from the
+ * installed crew's dist/skills/plugin-source.js (never executed), else the pinned fallback.
+ */
+export function crewGardenFloor(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): { version: string; from: "crew" | "fallback" } {
+  const pkg = launcherPackage("wicked-crew", "wicked-crew", crewEnv(env, platform), platform);
+  if (pkg) {
+    try {
+      const m = FLOOR_LITERAL.exec(readFileSync(join(pkg, "dist", "skills", "plugin-source.js"), "utf8"));
+      if (m?.[1]) return { version: m[1], from: "crew" };
+    } catch {
+      // unreadable: use the pinned floor
+    }
+  }
+  return { version: FALLBACK_GARDEN_FLOOR, from: "fallback" };
+}
+
+/** What to do for a registered (not npm) garden below the floor; the registration itself is never touched. */
+function pluginUpdateSteps(hit: CrewGardenHit, platform: NodeJS.Platform): string {
+  const up = (n: number): string => {
+    let d = hit.path;
+    for (let i = 0; i < n; i += 1) d = dirname(d);
+    return d;
+  };
+  if (hit.source === "Codex plugin cache") {
+    const marketplace = basename(up(2));
+    return `Codex: make the "${marketplace}" marketplace offer a newer wicked-garden (update its source), then run \`codex plugin add wicked-garden@${marketplace} --json\``;
+  }
+  const root = hit.source === "Claude Code plugin cache" ? up(5) : up(2);
+  // renderClaudeCommand pins CLAUDE_CONFIG_DIR and quotes it for the platform's shell.
+  const cmd = (args: string[]): string => renderClaudeCommand(root, args, platform);
+  const update = cmd(["plugin", "update", "wicked-garden@wicked-garden"]);
+  if (hit.source === "Claude Code plugin cache") {
+    return `Claude Code: ${cmd(["plugin", "marketplace", "update", "wicked-garden"])}, then ${update} (add --scope project|local when it is registered there: a scopeless update covers the user scope only)`;
+  }
+  return `Claude Code: this is the older installer copy (${hit.path}); register wicked-garden again with ${cmd(["plugin", "install", "wicked-garden@wicked-garden"])}, or update an existing registration with ${update}`;
+}
+
+/** Run npm once with `args`, then look again: success needs a garden crew finds AND at or above `floor`. */
+function npmInstallGarden(
+  run: (cmd: string, args: string[]) => { status: number | null; error?: string },
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  floor: string,
+  failure: string,
+): { action: "installed" | "failed"; message: string } {
+  const r = run("npm", args);
+  const found = r.status === 0 ? findGardenForCrew(env, platform) : undefined;
+  if (usable(found) && (found.source === "WICKED_CREW_SKILLS_SOURCE" || atLeast(found.version, floor))) {
+    return { action: "installed", message: `the wicked-garden npm package was installed globally for crew (${found.version}, ${found.path})` };
+  }
+  const why = r.status !== 0 ? `npm ${r.error ?? `exited ${r.status ?? "?"}`}` : usable(found) ? `crew still finds ${found.version} at ${found.path}, below ${floor}` : "crew still finds no garden";
+  return { action: "failed", message: `${failure} (${why})` };
+}
+
 /**
  * Garden delivered only as OpenCode / Pi / Antigravity skill copies (or a failed Claude Code
  * registration) is invisible to crew, which then refuses every job (first-run B3). When crew and
  * garden are both being installed and crew would find no garden, install the wicked-garden npm
- * package globally — crew finds it there on every platform (source 4). Returns a line to print.
+ * package globally — crew finds it there on every platform (source 4).
+ *
+ * A garden crew does find is judged against the floor of the crew being installed whenever crew is
+ * in the install set (#56): an older one makes `wicked-crew serve` refuse every launch with 422
+ * garden_required. A stale npm package is upgraded once; a stale Claude Code / Codex registration is
+ * left alone and the update steps are returned. An explicit WICKED_CREW_SKILLS_SOURCE is exempt
+ * (crew does not judge it). Returns a line to print.
  */
 export function ensureGardenForCrew(opts: {
   productIds: string[];
@@ -299,25 +365,32 @@ export function ensureGardenForCrew(opts: {
   platform?: NodeJS.Platform;
   run?: (cmd: string, args: string[]) => { status: number | null; error?: string };
 }): { action: "not-needed" | "present" | "planned" | "installed" | "failed"; message: string } {
-  if (!opts.productIds.includes("wicked-crew") || !opts.productIds.includes("wicked-garden")) return { action: "not-needed", message: "" };
+  if (!opts.productIds.includes("wicked-crew")) return { action: "not-needed", message: "" };
   const env = opts.env ?? process.env;
   const platform = opts.platform ?? process.platform;
+  const run = opts.run ?? ((cmd: string, args: string[]) => {
+    // npm is npm.cmd on Windows: a shell resolves it (fixed args, nothing user-supplied).
+    const r = spawnSync(cmd, args, { env, stdio: "inherit", shell: platform === "win32" });
+    return { status: r.status, error: r.error?.message };
+  });
   const now = findGardenForCrew(env, platform);
-  if (usable(now)) return { action: "present", message: "" };
+  if (usable(now)) {
+    if (now.source === "WICKED_CREW_SKILLS_SOURCE") return { action: "present", message: "" };
+    const floor = crewGardenFloor(env, platform);
+    if (atLeast(now.version, floor.version)) return { action: "present", message: "" };
+    const stale = `wicked-garden ${now.version} (${now.source}, ${now.path}) is older than the ${floor.version} this wicked-crew requires, so crew would refuse every launch with garden_required`;
+    if (!now.source.startsWith("npm package")) return { action: "failed", message: `${stale}. Left as is; update it: ${pluginUpdateSteps(now, platform)}` };
+    const fix = "npm install -g wicked-garden@latest";
+    if (opts.sourceRoot) return { action: "failed", message: `${stale}; with --source-root the published package is not installed in its place: update that checkout, or run \`${fix}\`` };
+    if (opts.dryRun) return { action: "planned", message: `dry-run: ${stale}; would run \`${fix}\`` };
+    return npmInstallGarden(run, ["install", "-g", "wicked-garden@latest"], env, platform, floor.version, `${stale}; run \`${fix}\` yourself`);
+  }
+  if (!opts.productIds.includes("wicked-garden")) return { action: "not-needed", message: "" };
   // Another copy cannot fix a refusal (a bad override, a linked manifest), and an older crew does
   // not look at npm packages: say what to do instead of installing something crew ignores.
   if (now && "refused" in now) return { action: "failed", message: `crew will not load wicked-garden here: ${now.refused}` };
   if (!crewKnowsInstallerLocations(env, platform)) return { action: "failed", message: `the wicked-crew on PATH is older than ${CREW_FINDS_INSTALLER_LOCATIONS} and finds wicked-garden only through Claude Code: npm i -g wicked-crew@latest, or install wicked-garden into Claude Code` };
   if (opts.sourceRoot) return { action: "failed", message: "crew finds no wicked-garden plugin, and with --source-root the published package is not installed in its place: register that checkout with Claude Code, or point WICKED_CREW_SKILLS_SOURCE at it" };
   if (opts.dryRun) return { action: "planned", message: "dry-run: after install, if crew finds no wicked-garden plugin (no Claude Code or Codex registration): npm install -g wicked-garden" };
-  const run = opts.run ?? ((cmd: string, args: string[]) => {
-    // npm is npm.cmd on Windows: a shell resolves it (fixed args, nothing user-supplied).
-    const r = spawnSync(cmd, args, { env, stdio: "inherit", shell: platform === "win32" });
-    return { status: r.status, error: r.error?.message };
-  });
-  const r = run("npm", ["install", "-g", "wicked-garden"]);
-  const found = r.status === 0 ? findGardenForCrew(env, platform) : undefined;
-  return usable(found)
-    ? { action: "installed", message: `crew found no wicked-garden plugin, so the wicked-garden npm package was installed globally (${found.path})` }
-    : { action: "failed", message: `crew finds no wicked-garden plugin, and \`npm install -g wicked-garden\` did not fix it (${r.error ?? `exit ${r.status ?? "?"}`}); run it yourself` };
+  return npmInstallGarden(run, ["install", "-g", "wicked-garden"], env, platform, crewGardenFloor(env, platform).version, "crew finds no wicked-garden plugin, and `npm install -g wicked-garden` did not fix it; run it yourself");
 }

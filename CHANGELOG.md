@@ -5,6 +5,16 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A garden older than crew's floor is no longer kept (#56).** With wicked-crew in the install set, the installer
+  compared nothing: any garden crew could find counted as present, so an old global `wicked-garden` made
+  `wicked-crew serve` refuse every launch with 422 `garden_required`. The found garden is now compared with the
+  floor of the crew being installed (read from the installed crew's `REQUIRED_GARDEN_VERSION`, else the pinned
+  12.66.1). A stale npm package is upgraded once with `npm install -g wicked-garden@latest` and checked again; a
+  stale Claude Code or Codex registration is left as it is and the exact update steps are printed. An explicit
+  `WICKED_CREW_SKILLS_SOURCE` is still exempt, as it is for crew.
+
 ## [0.9.0] - 2026-11-08
 
 A fresh install of wicked-crew works: the installer makes sure uv is there, installs wicked-estate with crew
