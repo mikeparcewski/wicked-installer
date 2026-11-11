@@ -6,7 +6,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { checkKubernetes, ensureClusterForCrew, pickContext, isLocalServer, publicDiagnostic, shellWord, findWickedCore, PODS_PIDS_MAX } = await import("../dist/kubernetes.js");
+const { checkKubernetes, ensureClusterForCrew, findKubectl, pickContext, isLocalServer, publicDiagnostic, shellWord, findWickedCore, PODS_PIDS_MAX } = await import("../dist/kubernetes.js");
 
 const skip = process.platform === "win32" ? "fake executables are POSIX files" : false;
 
@@ -29,14 +29,14 @@ function fakeSpawn(world) {
     const no = (stderr) => ({ status: 1, stdout: "", stderr });
     if (bin.endsWith("kubectl")) {
       if (a.endsWith("config get-contexts -o name")) return world.configBroken ? no("error loading config file: yaml: line 3") : ok((world.contexts ?? ["rancher-desktop"]).join("\n") + "\n");
-      if (a.includes("config view --minify")) return ok(world.server ?? "https://127.0.0.1:6443");
+      if (a.includes("config view --minify")) return ok(`${world.server ?? "https://127.0.0.1:6443"} ${world.proxy ?? ""}`.trim());
       if (a.includes(" version ")) return world.down ? no("The connection to the server 127.0.0.1:6443 was refused") : ok("{}");
       if (a.includes("get nodes")) return ok((world.nodes ?? ["lima-rancher-desktop"]).join(" "));
       if (a.includes("/proxy/configz")) return ok(JSON.stringify({ kubeletconfig: world.pids === undefined ? {} : { podPidsLimit: world.pids } }));
     }
     if (bin.endsWith("wicked-core")) {
       if (args[0] === "cluster" && args[1] === "status") {
-        if (world.status !== undefined) return { status: 1, stdout: world.status, stderr: "" };
+        if (world.status !== undefined) return { status: world.statusExit ?? 1, stdout: world.status, stderr: "" };
         return { status: world.installed ? 0 : 1, stdout: JSON.stringify(world.installed ? { configured: true, reachable: true, controller: { ready: world.controller !== false } } : { configured: false, reachable: false, kind: "no_cluster" }), stderr: "" };
       }
       if (args[0] === "cluster" && args[1] === "install") return world.installRefuses ? no(`pids_unlimited: probe failed; token=supersecret at ${world.home}/.wicked-crew/k8s`) : ok("{\"installed\":true}");
@@ -169,3 +169,23 @@ test("findWickedCore: the FIRST wicked-crew on PATH decides; a later install is 
   assert.equal(findWickedCore({ ...env, PATH: b.dir }, "linux", "x64"), realpathSync(b.withCore));
 });
 
+
+test("codex r2 folds: a remote proxy, a merged KUBECONFIG, an exit that contradicts its document", { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core");
+  assert.equal(checkKubernetes(ctxOf(sb, { proxy: "http://proxy.corp:3128", pids: 4096 })).state, "not_local");
+  const two = { ...sb.env, KUBECONFIG: [join(sb.tmp, "a"), join(sb.tmp, "b")].join(":") };
+  assert.equal(checkKubernetes({ ...ctxOf(sb, { pids: 4096 }), env: two }).state, "config_unreadable");
+  // "not configured" printed with exit 0, or "installed" printed by a failed process: never trusted.
+  assert.equal(checkKubernetes(ctxOf(sb, { pids: 4096, status: JSON.stringify({ configured: false, reachable: false }), statusExit: 0 })).state, "engine_unanswered");
+  assert.equal(checkKubernetes(ctxOf(sb, { pids: 4096, status: JSON.stringify({ configured: true, reachable: true, controller: { ready: true } }), statusExit: 1 })).state, "engine_unanswered");
+});
+
+test("codex r2 folds: prefixed tokens, password-less userinfo, sanitized names, ~ outside quotes, bare WICKED_KUBECTL", { skip }, (t) => {
+  const env = { HOME: "/home/alice" };
+  const s = publicDiagnostic("access_token=aaa refresh_token: bbb id_token=ccc https://hunter2@example.test/x", env, "linux");
+  for (const leak of ["aaa", "bbb", "ccc", "hunter2"]) assert.ok(!s.includes(leak), `${leak} in ${s}`);
+  assert.equal(shellWord("~/Library/Application Support/core", "linux"), "~/'Library/Application Support/core'");
+  const sb = sandbox(t); const kubectl = sb.exe("kubectl", join(sb.tmp, "bin2"));
+  assert.equal(findKubectl({ PATH: join(sb.tmp, "bin2"), HOME: sb.tmp, WICKED_KUBECTL: "kubectl" }, "linux"), kubectl);
+  assert.equal(findKubectl({ PATH: sb.tmp, HOME: sb.tmp, WICKED_KUBECTL: "kubectl" }, "linux"), null);
+});
