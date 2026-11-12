@@ -326,6 +326,21 @@ export function checkKubernetes(ctx: KubeCtx): Checked {
   return { need: NEED, met: true, state: "ready", detail: `${shownCtx}: answers, pod process limit ${node.pids}, crew's part installed and its sandbox controller ready`, target: t, core };
 }
 
+/** The line the installer prints when Rancher Desktop runs the containerd engine (wicked-core#1449). */
+export const RANCHER_CONTAINERD_WARNING = "On Rancher Desktop, choose the dockerd (moby) container engine (Preferences → Container Engine). With containerd, crew's floor images aren't visible to the kubelet and seats won't start (wicked-core#1449).";
+
+/**
+ * Read-only: on the `rancher-desktop` context, whether its node runs the containerd engine (the
+ * kubelet's `containerRuntimeVersion` is `containerd://…`; dockerd reads `docker://…`). The engine
+ * builds its images with the first container CLI that answers, which under containerd is `nerdctl`
+ * into a namespace the kubelet does not read. Changes nothing; any read failure says nothing.
+ */
+export function rancherContainerdWarning(t: Target, ctx: { spawn: Spawn }): string | null {
+  if (t.context !== "rancher-desktop") return null;
+  const r = ctx.spawn(t.kubectl, ["--kubeconfig", t.kubeconfig, "--context", t.context, "get", "nodes", "-o", "jsonpath={.items[*].status.nodeInfo.containerRuntimeVersion}", "--request-timeout=10s"]);
+  return r.status === 0 && /(^|\s)containerd:\/\//.test(r.stdout) ? RANCHER_CONTAINERD_WARNING : null;
+}
+
 export interface EnsureClusterResult {
   action: "not-needed" | "installed" | "already" | "skipped" | "failed";
   message: string;
@@ -337,7 +352,7 @@ export interface EnsureClusterResult {
  * missing pod process limit or a remote context is the operator's: nothing is changed. Under `dryRun`
  * nothing is spawned. `env` is crew's own environment (its PATH), as for readiness.
  */
-export function ensureClusterForCrew(input: { productIds: string[]; dryRun: boolean; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; spawn?: Spawn }): EnsureClusterResult {
+export function ensureClusterForCrew(input: { productIds: string[]; dryRun: boolean; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; spawn?: Spawn; warn?: (line: string) => void }): EnsureClusterResult {
   if (!input.productIds.includes("wicked-crew")) return { action: "not-needed", message: "" };
   const env = input.env ?? process.env;
   const platform = input.platform ?? process.platform;
@@ -345,6 +360,11 @@ export function ensureClusterForCrew(input: { productIds: string[]; dryRun: bool
   if (input.dryRun) return { action: "skipped", message: "Would install crew's part of the local Kubernetes cluster (wicked-core cluster install) [dry-run]." };
   const spawn = input.spawn ?? defaultSpawn(env);
   const check = checkKubernetes({ env, platform, probeOnly: false, spawn });
+  // Before anything is installed: a Rancher Desktop on the containerd engine cannot start crew's seats.
+  if (check.target !== undefined) {
+    const warning = rancherContainerdWarning(check.target, { spawn });
+    if (warning !== null) input.warn?.(warning);
+  }
   if (check.met) return { action: "already", message: `Kubernetes for crew: ${check.detail}.` };
   if ((check.state !== "not_installed" && check.state !== "controller_not_ready") || check.target === undefined || check.core === undefined) {
     return { action: "skipped", message: `Kubernetes for crew is not ready: ${check.detail}.${check.remedy ? ` Fix: ${check.remedy}.` : ""}` };
