@@ -5,6 +5,11 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-12
+
+The cluster install's refusal and fix command are usable as printed (#65). Patch: no readiness need changes. Pairs
+with wicked-crew 0.18.12 (wicked-core-ts 0.15.41); works with crew 0.18.11 as 0.10.0 does.
+
 ### Fixed
 
 - **Cluster install refusals keep the engine's full remedy (#62).** The first diagnostic line is retained
