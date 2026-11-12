@@ -20,7 +20,7 @@
 import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 
 /** Local contexts, in preference order. `WICKED_K8S_ADMIN_CONTEXT` names another (still local) one. */
 export const LOCAL_CONTEXTS = ["rancher-desktop", "docker-desktop"] as const;
@@ -97,7 +97,7 @@ function isExecutable(p: string, platform: NodeJS.Platform): boolean {
   }
 }
 
-/** A path as it may be printed: this user's home spelled `~`. */
+/** A diagnostic path: home paths (including another account's) spelled `~`; not for pasted commands. */
 export function publicPath(p: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
   const home = homeOf(env, platform).replace(/[\\/]+$/, "");
   if (home !== "" && (p === home || p.startsWith(home + "/") || p.startsWith(home + "\\"))) return "~" + p.slice(home.length);
@@ -106,19 +106,25 @@ export function publicPath(p: string, env: NodeJS.ProcessEnv, platform: NodeJS.P
 }
 
 /** An external diagnostic (kubectl, the engine) as it may be printed: one line, no control characters,
- *  credential shapes and URL userinfo redacted, home paths spelled `~`, bounded (sanitized before the cut). */
-export function publicDiagnostic(raw: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
+ *  credential shapes and URL userinfo redacted, home paths spelled `~`, bounded (default 240; sanitized before the cut). */
+export function publicDiagnostic(raw: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform, maxLength = 240): string {
   const home = homeOf(env, platform).replace(/[\\/]+$/, "");
   let s = (raw.trim().split(/\r?\n/)[0] ?? "").replace(/[\u0000-\u001f\u007f]/g, "");
   s = s
     .replace(/\b(authorization)\s*[:=]\s*\S+(?:\s+\S+)?/gi, "$1: [redacted]")
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/g, "$1 [redacted]")
-    .replace(/((?:\b|_)(?:token|password|passwd|secret|api[_-]?key))(["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, "$1$2[redacted]")
+    .replace(/((?:\b|_)(?:token|password|passwd|secret|api[ _-]?key))(["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, "$1$2[redacted]")
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
     .replace(/\b(?:ghp|gho|ghu|ghs|github_pat|sk|xox[abprs])[-_][A-Za-z0-9_-]{12,}/g, "[redacted]");
   if (home !== "") s = s.split(home).join("~");
   s = s.replace(/\/(?:Users|home)\/[^/\s"'`]+/g, "~").replace(/[A-Za-z]:\\+Users\\+[^\\\s"'`]+/g, "~");
-  return s.length <= 240 ? s : `${s.slice(0, 239)}…`;
+  return s.length <= maxLength ? s : `${s.slice(0, maxLength - 1)}…`;
+}
+
+/** A pasteable path: abbreviate only this user's HOME; other paths must keep their literal meaning. */
+function pastePath(p: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
+  const home = homeOf(env, platform).replace(/[\\/]+$/, "");
+  return home !== "" && (p === home || p.startsWith(home + "/") || p.startsWith(home + "\\")) ? "~" + p.slice(home.length) : p;
 }
 
 /** A shell word that pastes safely (POSIX single quotes; PowerShell-style on Windows). */
@@ -269,9 +275,9 @@ function statusDoc(stdout: string): { configured: boolean; reachable: boolean; c
   }
 }
 
-/** The command an operator can paste: the resolved engine binary (home spelled ~), each word quoted. */
+/** The command an operator can paste: only this user's HOME spelled `~`, other paths literal, each word quoted. */
 export function installCommand(core: string, t: Target, env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
-  return [publicPath(core, env, platform), "cluster", "install", "--admin-context", t.context, "--admin-kubeconfig", publicPath(t.kubeconfig, env, platform), "--home", publicPath(crewStateHome(env, platform), env, platform)]
+  return [pastePath(core, env, platform), "cluster", "install", "--admin-context", t.context, "--admin-kubeconfig", pastePath(t.kubeconfig, env, platform), "--home", pastePath(crewStateHome(env, platform), env, platform)]
     .map((w) => shellWord(w, platform)).join(" ")
     .replace(/^'/, platform === "win32" ? "& '" : "'");
 }
@@ -341,6 +347,50 @@ export function rancherContainerdWarning(t: Target, ctx: { spawn: Spawn }): stri
   return r.status === 0 && /(^|\s)containerd:\/\//.test(r.stdout) ? RANCHER_CONTAINERD_WARNING : null;
 }
 
+/** Docker as the engine tries it: crew's PATH first, then desktop apps' usual locations. */
+function findDocker(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | null {
+  const named = (env.WICKED_CONTAINER_RUNTIME ?? "").trim();
+  if (named !== "" && basename(named) !== "docker") return null;
+  if (isAbsolute(named)) return named;
+  const name = named || (platform === "win32" ? "docker.exe" : "docker");
+  for (const dir of pathOf(env).split(delimiter)) if (dir !== "" && isExecutable(join(dir, name), platform)) return join(dir, name);
+  if (named !== "") return null;
+  const home = homeOf(env, platform);
+  return [join(home, ".rd", "bin", name), join(home, ".orbstack", "bin", name), join(home, ".colima", "bin", name), join("/usr/local/bin", name), join("/opt/homebrew/bin", name), ...(platform === "darwin" ? ["/Applications/Docker.app/Contents/Resources/bin/docker"] : [])]
+    .find((p) => isExecutable(p, platform)) ?? null;
+}
+
+/** Read-only context diagnosis after container_runtime_down. Failed reads omit only that observation. */
+function dockerRuntimeDiagnostic(core: string, t: Target, ctx: KubeCtx): string | null {
+  const { env, platform } = ctx;
+  const named = (env.WICKED_CONTAINER_RUNTIME ?? "").trim();
+  if (named !== "" && basename(named) !== "docker") return `WICKED_CONTAINER_RUNTIME chose ${publicPath(named, env, platform)}; its engine did not answer. Retry: ${installCommand(core, t, env, platform)}`;
+  const docker = findDocker(env, platform);
+  if (docker === null) return null;
+  const command = shellWord(pastePath(docker, env, platform), platform);
+  const hostOverride = (env.DOCKER_HOST ?? "").trim() !== "";
+  const contextOverride = (env.DOCKER_CONTEXT ?? "").trim();
+  const unset = `${hostOverride ? "unset DOCKER_HOST && " : ""}${contextOverride !== "" && contextOverride !== "rancher-desktop" ? "unset DOCKER_CONTEXT && " : ""}`;
+  const overrides = `${hostOverride ? " DOCKER_HOST overrides Docker contexts." : ""}${contextOverride !== "" ? " DOCKER_CONTEXT overrides the current Docker context." : ""}`;
+  const read = (args: string[]): string | null => {
+    try {
+      const r = ctx.spawn(docker, ["context", ...args], { timeoutMs: 5000, env: engineEnv(env, t) });
+      return r.status === 0 && !r.error && !r.timedOut ? r.stdout.trim() : null;
+    } catch { return null; }
+  };
+  const current = read(["show"]);
+  const endpoint = current && !hostOverride ? read(["inspect", current, "--format", "{{.Endpoints.docker.Host}}"]) : null;
+  const contexts = read(["ls", "--format", "{{.Name}}"]);
+  const shown = `docker CLI at \`${publicPath(docker, env, platform)}\``;
+  const context = current ? `current context \`${publicDiagnostic(current, env, platform)}\`${endpoint ? ` (${publicDiagnostic(endpoint, env, platform)})` : ""}` : "";
+  if (t.context === "rancher-desktop" && current && (current !== "rancher-desktop" || unset !== "") && contexts !== null) {
+    const remedy = lines(contexts).includes("rancher-desktop") ? `${command} context use rancher-desktop`
+      : existsSync(join(homeOf(env, platform), ".rd", "docker.sock")) ? `${command} context create rancher-desktop --docker "host=unix://$HOME/.rd/docker.sock" && ${command} context use rancher-desktop` : null;
+    if (remedy !== null) return `Rancher Desktop's Kubernetes answers, but wicked-core could not reach its engine to build crew's images. The ${shown} reports ${context}.${overrides}\nRun: \`${unset}${remedy}\`, then run the installer again${unset !== "" ? " in the same shell" : ""}.`;
+  }
+  return `The ${shown}${context ? ` with ${context}` : ""} was tried, but its engine did not answer.${overrides}\nStart the runtime, then run the installer again.\nRun: \`${installCommand(core, t, env, platform)}\`.`;
+}
+
 export interface EnsureClusterResult {
   action: "not-needed" | "installed" | "already" | "skipped" | "failed";
   message: string;
@@ -374,5 +424,9 @@ export function ensureClusterForCrew(input: { productIds: string[]; dryRun: bool
   const shown = publicDiagnostic(t.context, env, platform);
   if (run.status === 0) return { action: "installed", message: `Installed crew's part of the ${shown} cluster (pod process limit and NetworkPolicy enforcement proven by wicked-core).` };
   if (run.timedOut === true) return { action: "failed", message: `wicked-core cluster install did not finish within ${INSTALL_TIMEOUT_MS / 60_000} min; the installer stopped waiting, and the engine's own steps may still be finishing. Check \`wicked-core cluster status --home ~/.wicked-crew\` before running \`${installCommand(check.core, t, env, platform)}\` again.` };
-  return { action: "failed", message: `wicked-core cluster install refused the ${shown} cluster: ${publicDiagnostic(run.stderr || run.error || "no reason given", env, platform)}` };
+  const stderr = run.stderr || run.error || "no reason given";
+  const host = (env.DOCKER_HOST ?? "").trim();
+  const diagnostic = publicDiagnostic(host ? stderr.split(host).join("[redacted]") : stderr, env, platform, 4000);
+  const docker = /\bcontainer_runtime_down\b/.test(run.stderr) ? dockerRuntimeDiagnostic(check.core, t, { env, platform, probeOnly: false, spawn }) : null;
+  return { action: "failed", message: `wicked-core cluster install refused the ${shown} cluster: ${diagnostic}${docker ? `\n${docker}` : ""}` };
 }
