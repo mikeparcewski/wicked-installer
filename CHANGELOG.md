@@ -5,6 +5,15 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cluster install refusals keep the engine's full remedy (#62).** The first diagnostic line is retained
+  within a larger bound, with credentials redacted. Runtime diagnosis honours
+  `WICKED_CONTAINER_RUNTIME`; read-only Docker context probes account for `DOCKER_HOST` and `DOCKER_CONTEXT`
+  overrides and print remedies using the resolved CLI (including the Docker.app fallback) and a quoted HOME socket.
+- **Cluster install commands preserve paths outside this user's HOME (#63).** Pasteable engine, kubeconfig and
+  crew home paths abbreviate only this user's HOME as `~`; other paths stay literal and are quoted when needed.
+
 ## [0.10.0] - 2026-11-12
 
 The installer readies local Kubernetes for crew: its readiness checks kubectl, a local context, the kubelet's pod
