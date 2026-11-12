@@ -335,7 +335,7 @@ function gardenForCrew(productIds: string[], flags: DispatchFlags): void {
   // Crew's governed seats run in pods on a local cluster: install crew's part of it when the cluster can
   // hold seats (the engine's install proves the pod process limit and NetworkPolicy enforcement).
   // Judged and run in crew's own environment (its PATH), as readiness judges crew's needs.
-  const k = ensureClusterForCrew({ productIds, dryRun: flags.dryRun, env: crewEnv(process.env, process.platform) });
+  const k = ensureClusterForCrew({ productIds, dryRun: flags.dryRun, env: crewEnv(process.env, process.platform), warn: (line) => console.log(chalk.yellow(`\n${line}`)) });
   if (k.action === "failed" || k.action === "skipped") console.log(chalk.yellow(`\n${k.message}`));
   else if (k.message) console.log(chalk.dim(`\n${k.message}`));
 }

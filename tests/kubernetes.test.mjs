@@ -6,7 +6,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { checkKubernetes, ensureClusterForCrew, findKubectl, pickContext, isLocalServer, publicDiagnostic, shellWord, findWickedCore, PODS_PIDS_MAX } = await import("../dist/kubernetes.js");
+const { RANCHER_CONTAINERD_WARNING, checkKubernetes, ensureClusterForCrew, findKubectl, pickContext, isLocalServer, publicDiagnostic, shellWord, findWickedCore, PODS_PIDS_MAX } = await import("../dist/kubernetes.js");
 
 const skip = process.platform === "win32" ? "fake executables are POSIX files" : false;
 
@@ -31,6 +31,7 @@ function fakeSpawn(world) {
       if (a.endsWith("config get-contexts -o name")) return world.configBroken ? no("error loading config file: yaml: line 3") : ok((world.contexts ?? ["rancher-desktop"]).join("\n") + "\n");
       if (a.includes("config view --minify")) return ok(`${world.server ?? "https://127.0.0.1:6443"} ${world.proxy ?? ""}`.trim());
       if (a.includes(" version ")) return world.down ? no("The connection to the server 127.0.0.1:6443 was refused") : ok("{}");
+      if (a.includes("containerRuntimeVersion")) return world.runtimeUnread ? no("forbidden") : ok(world.runtime ?? "docker://29.5.3");
       if (a.includes("get nodes")) return ok((world.nodes ?? ["lima-rancher-desktop"]).join(" "));
       if (a.includes("/proxy/configz")) return ok(JSON.stringify({ kubeletconfig: world.pids === undefined ? {} : { podPidsLimit: world.pids } }));
     }
@@ -140,6 +141,28 @@ test("ensureClusterForCrew installs crew's part only on a state that says so, on
   const dry = run({ pids: 4096 }, true);
   assert.equal(dry.r.action, "skipped"); assert.equal(dry.calls.length, 0);
   assert.equal(ensureClusterForCrew({ productIds: ["wicked-garden"], dryRun: false, env: sb.env, platform: "linux", spawn: () => { throw new Error("no"); } }).action, "not-needed");
+});
+
+test("Rancher Desktop on containerd: the installer warns before the cluster install, read-only (wicked-core#1449)", { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core");
+  const run = (world) => {
+    const f = fakeSpawn({ home: sb.tmp, ...world }); const order = [];
+    const spawn = (bin, args, opts) => { order.push(args.includes("install") ? "install" : "spawn"); return f.spawn(bin, args, opts); };
+    const r = ensureClusterForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", spawn, warn: (l) => order.push(`warn:${l}`) });
+    return { r, order, calls: f.calls };
+  };
+  const c = run({ pids: 4096, runtime: "containerd://1.7.27" });
+  const warns = c.order.filter((x) => x.startsWith("warn:"));
+  assert.deepEqual(warns, [`warn:${RANCHER_CONTAINERD_WARNING}`]);
+  assert.ok(c.order.indexOf(warns[0]) < c.order.indexOf("install"), "warned before the install");
+  assert.match(RANCHER_CONTAINERD_WARNING, /dockerd \(moby\).*Preferences → Container Engine.*wicked-core#1449/);
+  assert.equal(c.r.action, "installed");
+  // read-only: the engine read is a kubectl get, nothing else touches the desktop's settings
+  assert.ok(c.calls.filter((x) => x.argv.includes("containerRuntimeVersion") || x.argv.some((a) => a.includes("containerRuntimeVersion"))).every((x) => x.argv[0] === "kubectl" && x.argv.includes("get")));
+  // dockerd, an unreadable node, another context: no warning
+  for (const world of [{ pids: 4096 }, { pids: 4096, runtimeUnread: true }, { pids: 4096, contexts: ["docker-desktop"], runtime: "containerd://1.7.27" }]) {
+    assert.equal(run(world).order.filter((x) => x.startsWith("warn:")).length, 0, JSON.stringify(world));
+  }
 });
 
 test("diagnostics and pasted words are safe to print", () => {

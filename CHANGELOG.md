@@ -5,6 +5,20 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-12
+
+The installer readies local Kubernetes for crew: its readiness checks kubectl, a local context, the kubelet's pod
+process limit and crew's part on the cluster, and after install it runs `wicked-core cluster install` when the
+cluster can hold seats. A garden older than crew's floor is upgraded (or the update steps printed) instead of kept,
+and governed runs' checks floor builds before it tests. Minor because crew's readiness gains a need. Pairs with
+wicked-crew 0.18.11, which depends on wicked-core-ts 0.15.40, whose `wicked-core cluster install` this runs; with an
+older crew the `kubernetes` need is unmet (`engine_unanswered`: that wicked-core predates the Kubernetes runner) and
+names `npm i -g wicked-crew@latest`.
+
+On Rancher Desktop, choose the dockerd (moby) container engine (Preferences → Container Engine). With containerd,
+crew's floor images aren't visible to the kubelet and seats won't start (wicked-core#1449); the installer warns
+before the cluster install when the node runs containerd (read-only).
+
 ### Added
 
 - **Local Kubernetes for crew (the Kubernetes runner, with the wicked-core k8s-swap train).** Crew's governed seats run
