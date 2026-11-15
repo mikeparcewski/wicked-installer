@@ -70,12 +70,17 @@ About 20 minutes on a Mac with Homebrew.
 ```bash
 brew install node@22 python@3.12 uv git gh
 brew link --overwrite node@22
+PY312="$(brew --prefix python@3.12)/libexec/bin"
+echo "export PATH=\"$PY312:\$PATH\"" >> ~/.zprofile
+export PATH="$PY312:$PATH"
+python3 --version
 npm install -g @anthropic-ai/claude-code @openai/codex
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
 gh auth login
 ```
 
+- `python3 --version` must print 3.10 or newer (Homebrew's 3.12). Homebrew puts only `python3.12` in its main `bin` directory (its `python3` is in `python@3.12/libexec/bin`), and macOS's own `python3` is older, so the `PY312` lines put Homebrew's `python3` first on your PATH, now and in every new Terminal window.
 - Put your own name and email in the two `git config` lines. Delivered jobs commit with them. Skip them if `git config user.email` already prints the right address.
 - `gh auth login` signs GitHub CLI in to your account. Follow its prompts and choose to log in with a web browser.
 
@@ -91,7 +96,7 @@ Install [Rancher Desktop](https://rancherdesktop.io/) and change these settings 
 
 ### 3. Limit processes per pod
 
-Run this once, after Rancher Desktop has started at least once. It adds a startup script that sets the kubelet's `pod-max-pids` to 4096. If you already have an `override.yaml`, add the `provision` entry to it instead of replacing the file.
+Run this once, after Rancher Desktop has started at least once. It adds a startup script that sets the kubelet's `pod-max-pids` to 4096. If you already have an `override.yaml`, add the `provision` entry to it instead of replacing the file. The script writes `/etc/rancher/k3s/config.yaml` inside Rancher Desktop's VM: if you already keep your own settings in that file, don't run this script: add `pod-max-pids=4096` to that file's `kubelet-arg` list instead (add the two `kubelet-arg` lines only if the file has no `kubelet-arg` key yet).
 
 ```bash
 mkdir -p ~/Library/Application\ Support/rancher-desktop/lima/_config
@@ -184,7 +189,7 @@ On Windows, install [Rancher Desktop](https://rancherdesktop.io/) and change the
 
 ### 4. Limit processes per pod
 
-Run this once, after Rancher Desktop has started at least once. It adds a startup script to Rancher Desktop's provisioning folder that sets the kubelet's `pod-max-pids` to 4096. Writing it from Ubuntu keeps the Unix line endings Rancher Desktop needs.
+Run this once, after Rancher Desktop has started at least once. It adds a startup script to Rancher Desktop's provisioning folder that sets the kubelet's `pod-max-pids` to 4096. Writing it from Ubuntu keeps the Unix line endings Rancher Desktop needs. The script writes `/etc/rancher/k3s/config.yaml` inside Rancher Desktop's VM: if you already keep your own settings in that file, don't run this script: add `pod-max-pids=4096` to that file's `kubelet-arg` list instead (add the two `kubelet-arg` lines only if the file has no `kubelet-arg` key yet).
 
 ```bash
 RDP="$(wslpath "$(wslvar LOCALAPPDATA | tr -d '\r')")/rancher-desktop/provisioning"
@@ -243,11 +248,11 @@ Keep your repositories inside Ubuntu, for example under `~/code`, not under `/mn
 
 Open an issue on this repository with what you saw for any of these:
 
-- **WSL version.** `wsl -l -v` should show VERSION 2 for Ubuntu-24.04. Did the install need a restart, admin rights, or virtualization turned on in the BIOS/UEFI?
+- **WSL version.** `wsl -l -v` (in PowerShell) should show VERSION 2 for Ubuntu-24.04. Did the install need a restart, admin rights, or virtualization turned on in the BIOS/UEFI?
 - **Pod process limit.** Did `wslvar LOCALAPPDATA` find your folder, and did the `wicked-pids.start` script take effect (the limit check printed `4096` after the restart)?
 - **WSL integration.** After you turned it on, did `command -v kubectl docker` find both in Ubuntu? Did `~/.kube/config` have a context named `rancher-desktop`? (By default crew looks only for `rancher-desktop` or `docker-desktop`, never the current context.)
 - **Copied kubeconfig.** If you had to copy it, did `kubectl get nodes` work right after the copy?
-- **Browser to `localhost:7701`.** Did Studio load from Windows? If not, did `http://127.0.0.1:7701` work, or a change to `localhostForwarding` (or mirrored networking) in `.wslconfig` followed by `wsl --shutdown`?
+- **Browser to `localhost:7701`.** Did Studio load from Windows? If not, did `http://127.0.0.1:7701` work, or a change to `localhostForwarding` (or mirrored networking) in `.wslconfig` followed by `wsl --shutdown` in PowerShell?
 - **Sign-in links.** Could you finish the Claude Code and Codex sign-ins from Studio in your Windows browser?
 - **systemd.** Does `systemctl --user status` work without changes? Does WSL shut Ubuntu down when idle and take the daemon with it?
 - **Security software.** Did Smart App Control or Defender block or slow the Rancher Desktop installer, `wsl.exe`, or downloads?
