@@ -27,6 +27,8 @@ npx wicked-installer
 
 Interactive TUI — pick a bundle or select products individually. Detects which AI coding CLIs you have installed and guides you from there. When it asks **"Add the tools to which coding agents?"**, selecting none skips per-agent setup: the command-line tools install once for the machine, and Wicked Garden goes to Claude Code if it is installed.
 
+Step-by-step setup for Wicked Crew on macOS and Windows (WSL2), including the local Kubernetes cluster it needs: [Install guide](https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md).
+
 ---
 
 ## CLI

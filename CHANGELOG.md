@@ -5,6 +5,12 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Install guide (`docs/INSTALL.md`).** Step-by-step setup for Wicked Crew on macOS and Windows (WSL2): prerequisites,
+  the Rancher Desktop cluster with the pod process limit the installer checks, starting the installer and the daemon,
+  keeping the daemon running, upgrading, and troubleshooting. Linked from the README's Quick start.
+
 ## [0.10.1] - 2026-11-12
 
 The cluster install's refusal and fix command are usable as printed (#65). Patch: no readiness need changes. Pairs
