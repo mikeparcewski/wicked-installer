@@ -1,6 +1,6 @@
 # Install Wicked Crew on macOS or Windows (WSL2)
 
-This guide was checked against wicked-installer 0.10.1 and wicked-crew 0.18.15.
+This guide was checked against wicked-installer 0.10.1 and wicked-crew 0.18.16.
 
 Wicked Crew is provided as-is. There's no committed support, SLA or production-readiness claim.
 
@@ -57,6 +57,7 @@ You need these on macOS, or inside the WSL2 Ubuntu on Windows, plus Rancher Desk
 | GitHub CLI (`gh`) | any recent, signed in | delivering a job opens a pull request |
 | Claude Code CLI (`claude`) | current | governed seat; you sign in from Studio |
 | Codex CLI (`codex`) | current | governed seat; you sign in from Studio |
+| whisper.cpp | optional | needed only for voice. macOS: `brew install whisper-cpp` (it provides `whisper-cli`). Ubuntu (WSL2): from the package manager or a build from github.com/ggml-org/whisper.cpp, so `whisper-cli` is on PATH, or set `WICKED_CREW_WHISPER_BIN`. Studio asks before it downloads the 142 MiB speech model. |
 | bubblewrap (`bwrap`) | Linux/WSL2 only | not needed on the main path; only for the local fallback on Windows (see [Troubleshooting](#fallbacks-when-the-containers-wont-work)) |
 
 You also need a Claude account and an OpenAI/ChatGPT account for the two agents. Sign-in happens in a browser.
@@ -126,9 +127,11 @@ One node should show `Ready`, and the second command should print `4096`.
 
 ```bash
 npx -y wicked-installer@latest install wicked-crew wicked-interactive
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-It installs crew and sets up crew's part of the cluster. Its readiness list should show local Kubernetes ready, and it should end by telling you how to start Studio. If it ends with "Installed, but Wicked Crew can't run jobs yet", fix the pending lines it lists (see [Troubleshooting](#troubleshooting)) and run it again.
+The installer puts `wicked-estate` and `wicked-estate-mcp` (and `uv`, when it installs it) in `~/.local/bin`, which is not on macOS's default PATH; the last two lines add it so `wicked-estate` works in your shell. It installs crew and sets up crew's part of the cluster. Its readiness list should show local Kubernetes ready, and it should end by telling you how to start Studio. If it ends with "Installed, but Wicked Crew can't run jobs yet", fix the pending lines it lists (see [Troubleshooting](#troubleshooting)) and run it again.
 
 ### 5. Start the daemon and sign in
 
@@ -233,6 +236,8 @@ One node should show `Ready`, and the second command should print `4096`.
 npx -y wicked-installer@latest install wicked-crew wicked-interactive
 wicked-crew serve
 ```
+
+Ubuntu's own `~/.profile` adds `~/.local/bin` to PATH once it exists, so open a new Ubuntu terminal after the installer (or run `export PATH="$HOME/.local/bin:$PATH"`).
 
 The installer sets up crew's part of the cluster. Its readiness list should show local Kubernetes ready. If it says "no kubeconfig defines a local context (rancher-desktop or docker-desktop)", go back to step 5 until `kubectl --context rancher-desktop get nodes` shows `Ready`, then run the installer again. Don't set the fallback variables from [Troubleshooting](#fallbacks-when-the-containers-wont-work) unless the main path fails.
 

@@ -11,6 +11,12 @@ All notable changes to wicked-installer are documented here. The format follows
   the Rancher Desktop cluster with the pod process limit the installer checks, starting the installer and the daemon,
   keeping the daemon running, upgrading, and troubleshooting. Linked from the README's Quick start.
 
+### Docs
+
+- **Install guide fixes from the wicked-crew 0.18.16 walk-through (J7).** The guide is now checked against wicked-crew
+  0.18.16; macOS step 4 and WSL2 step 6 say how to put `~/.local/bin` on PATH (DOC8); the prerequisites table lists the
+  optional whisper.cpp for voice (DOC9, wicked-crew#1568).
+
 ## [0.10.1] - 2026-11-12
 
 The cluster install's refusal and fix command are usable as printed (#65). Patch: no readiness need changes. Pairs
