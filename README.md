@@ -159,13 +159,36 @@ containerd; it never changes the setting.
 
 ### Uninstall
 
-There is no central `uninstall` yet (issue #49). `npx wicked-installer uninstall` says so and
-changes nothing (it used to open the install picker). On Claude Code,
-`claude plugin uninstall wicked-garden@wicked-garden` removes the plugin and
-`node <installer>/dist/install-claude.js uninstall --all` removes what that script wrote. The
-Codex, OpenCode, Pi and Antigravity scripts refuse `uninstall` (and `status`) with exit 1 and
-change nothing; each host's `<home>/wicked-installer/<cli>-install.json` lists what was
-installed there.
+Remove a product's integrations from every bundled host, or select hosts with `--cli`:
+
+```sh
+npx wicked-installer uninstall wicked-garden
+npx wicked-installer uninstall --all --cli codex,pi --dry-run
+npx wicked-installer uninstall --all --json
+```
+
+`--all` selects every product recorded in each host's install marker. Home overrides are
+`--claude-home <dir>` (repeatable), `--codex-home <dir>`, `--opencode-home <dir>`,
+`--pi-home <dir>` and `--gemini-home <dir>` (alias `--antigravity-home`). Each script also
+supports `node <installer>/dist/install-<cli>.js uninstall <ids...> | --all` with
+`--dry-run`, `--json` and its home flag. A script with no marker exits 2; the central command
+reports that host as not installed. A removal failure exits 1 and keeps the failed marker entry.
+
+Removal checks recorded skill names and their `SKILL.md` signatures, leaving symlinks and
+changed skills in place. Old markers without skill names use the product prefix and the same
+signature check. OpenCode and Pi hook adapters are removed when recorded. OpenCode MCP entries
+are removed only when they run the product binary directly; other commands need manual removal.
+Removing an OpenCode MCP entry rewrites its config as JSON and drops JSONC comments, as the
+install-time `skills.paths` write does; the removal report states when this happens.
+Codex removes recorded plugins and removes a marketplace only when the installer added it and
+no remaining marker entry uses it. Claude plugins are unregistered through `claude plugin uninstall`
+with the config dir pinned; the Claude marketplace stays, with its removal command reported.
+OpenCode `skills.paths` stays because its addition was not recorded.
+
+Shared, machine-scoped binaries stay installed. `--dry-run` reports planned removals and writes
+nothing. The four Codex, OpenCode, Pi and Antigravity scripts still refuse `status`; use
+`npx wicked-installer status` for host status. Legacy copies reported during install can be
+removed with `npx wicked-installer cleanup-legacy` after its registration and ownership checks.
 
 ### Codex — wicked-garden as a plugin
 
@@ -298,11 +321,10 @@ marketplace instead of GitHub. `--dry-run` prints the same probes (`probe:` line
 the commands a live run would execute (`dry-run:` lines); the only thing it spawns is
 `claude --version`.
 
-**Legacy copies are left in place.** A bare `~/.claude/plugins/wicked-garden/` (from
-`npx wicked-garden install`) or a skills/hooks copy an earlier `install-claude.js` recorded
-in its marker is detected and reported — *legacy wicked-garden copy detected at <path> — left
-in place; removal will ship separately* — never removed by this version. Their removal is
-tracked in [issue #20](https://github.com/mikeparcewski/wicked-installer/issues/20).
+**Install leaves legacy copies in place and reports them.** A bare
+`~/.claude/plugins/wicked-garden/` (from `npx wicked-garden install`) or a skills/hooks copy
+an earlier `install-claude.js` recorded in its marker is detected and reported.
+`wicked-installer cleanup-legacy` removes those copies after its registration and ownership checks.
 
 State is read from `plugins/known_marketplaces.json` / `plugins/installed_plugins.json`
 (what `claude plugin marketplace list --json` / `claude plugin list --json` print) rather
@@ -318,8 +340,9 @@ a copy Claude Code never loads is not an install of what you selected. A Claude 
 present but fails `claude --version` is
 an **error**, never a fallback. Per-product results stay independent — a garden failure never
 uninstalls estate or bus, and the run exits non-zero if any product failed; with several config
-dirs a failure in a later dir leaves earlier dirs registered (reported, not undone). Legacy copies
-are never removed by this version (see issue #20). `--source-root` never falls back either:
+dirs a failure in a later dir leaves earlier dirs registered (reported, not undone). Install leaves
+legacy copies in place and reports them; `wicked-installer cleanup-legacy` removes them after its
+registration and ownership checks. `--source-root` never falls back either:
 the bare copy would install the published package, not your checkout. `install-claude.js`
 itself never installs a plugin (handed one directly, it reports a manual step and writes
 nothing) and imports nothing outside `node:` builtins.

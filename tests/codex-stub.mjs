@@ -144,6 +144,11 @@ if (a0 === "plugin" && a1 === "marketplace" && a2 === "list") {
   maybeFailPluginList();
   // Like codex 0.163: a plugin whose marketplace was removed is no longer listed.
   out({ installed: Object.entries(state.plugins).filter(([id]) => state.marketplaces[id.split("@")[1]]).map(([id, p]) => ({ pluginId: id, name: id.split("@")[0], marketplaceName: id.split("@")[1], version: p.version, installed: true, enabled: p.enabled !== false })), available: [] });
+} else if (a0 === "plugin" && a1 === "remove") {
+  if (process.env.CODEX_STUB_FAIL === "plugin-remove") fail("stub: plugin remove failed");
+  delete state.plugins[a2];
+  save();
+  out(`Removed plugin ${a2}.\n`);
 } else if (a0 === "plugin" && a1 === "add") {
   if (process.env.CODEX_STUB_FAIL === "plugin-add") fail("stub: plugin add failed");
   const [plugin, mkt] = a2.split("@");

@@ -102,6 +102,8 @@ verb := install | status | uninstall        (v1.1; default: install)
 
 v1 scripts implement only the implicit `install` verb. That is conforming.
 
+The codex, opencode, pi and antigravity scripts also implement marker-driven `uninstall` using the v1 marker; they still refuse `status`.
+
 The `mcp` verb (§12.5) has its own grammar — `install-<cli> mcp upsert|remove <key> ...` — and is routed before verb detection, so it never collides with a product id.
 
 ### 3.2 Flags (shared, argv-compatible with install-codex)

@@ -379,7 +379,7 @@ function printHelp(): void {
     "  install-claude --products wicked-bus,wicked-estate",
     "  install-claude --all",
     "  install-claude status --all",
-    "  install-claude uninstall wicked-bus",
+    "  install-claude uninstall <ids...> | --all [--dry-run] [--json] [--claude-home <dir>]...",
     "  install-claude mcp upsert|remove <key> ...   (one ad-hoc MCP server; `mcp --help`)",
     "",
     "Verbs (default: install):",
@@ -638,7 +638,7 @@ function mcpFileFor(dir: string): string {
 
 function makeTarget(dir: string, origin: Target["origin"]): Target {
   const resolved = resolve(dir);
-  return { dir: resolved, mcpFile: mcpFileFor(resolved), origin };
+  return { dir: resolved, mcpFile: origin === "env" ? join(resolved, ".claude.json") : mcpFileFor(resolved), origin };
 }
 
 function resolveTargets(options: Options): Resolution {

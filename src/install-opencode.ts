@@ -5,6 +5,7 @@ import {
   constants as fsConstants,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -128,11 +129,6 @@ function winQuote(arg: string): string {
   return `${out}"`;
 }
 
-function stripAnsi(value: string): string {
-  // OpenCode's `mcp list` colorizes output; strip SGR escapes before parsing.
-  return value.replace(/\[[0-9;]*m/g, "");
-}
-
 function existingDirs(paths: string[]): string[] {
   return [...new Set(paths.filter((dir) => existsSync(dir)))];
 }
@@ -240,6 +236,7 @@ function printHelp(): void {
     "wicked-installer OpenCode install piece",
     "",
     "Usage:",
+    "  install-opencode.js uninstall <ids...> | --all [--dry-run] [--json] [--opencode-home <dir>]",
     "  install-opencode <product ids...>",
     "  install-opencode --products wicked-bus,wicked-estate",
     "  install-opencode --all",
@@ -485,44 +482,6 @@ function installGithubBinary(product: Product, options: Options): void {
   }
 }
 
-// OpenCode resolves its global config to $XDG_CONFIG_HOME/opencode (falling back to
-// ~/.config/opencode); OPENCODE_CONFIG only points the CLI at a config FILE to *read*
-// and does not steer where `opencode mcp add` *writes*. To make MCP registration land
-// in options.opencodeHome we set XDG_CONFIG_HOME to its parent — which only maps cleanly
-// when the home's basename is literally "opencode" (the standard layout). For a
-// non-standard home we cannot direct the CLI and skip registration with a note.
-function opencodeConfigEnv(options: Options): NodeJS.ProcessEnv | undefined {
-  if (basename(options.opencodeHome) !== "opencode") return undefined;
-  return { ...process.env, XDG_CONFIG_HOME: dirname(options.opencodeHome) };
-}
-
-// Returns whether the OpenCode MCP server is absent, already points at the expected
-// binary ("matches"), or exists but references a different/stale command ("drifted").
-// A name-only check would report a drifted registration as "already registered" and
-// never repair it, leaving the machine inconsistent.
-function opencodeMcpServerState(
-  serverName: string,
-  expectedPath: string,
-  env: NodeJS.ProcessEnv,
-): "absent" | "matches" | "drifted" {
-  if (!commandExists("opencode")) return "absent";
-  const list = spawnSync("opencode", ["mcp", "list"], {
-    env,
-    encoding: "utf8",
-    stdio: "pipe",
-    timeout: 15000,
-  });
-  if (list.status !== 0 || !list.stdout) return "absent";
-  const clean = stripAnsi(list.stdout);
-  // `mcp list` renders one line per server ("●  ✗ <name> failed ...") with the launch
-  // command on an indented follow-up line; tokenize to find the server name exactly.
-  const exists = clean.split("\n").some((line) => line.split(/\s+/).includes(serverName));
-  if (!exists) return "absent";
-  // Server is registered — confirm it points at the expected binary (shown inline in the
-  // list output). If the expected path is absent, the registration has drifted.
-  return clean.includes(expectedPath) ? "matches" : "drifted";
-}
-
 function registerOpencodeMcp(product: Product, options: Options): string[] {
   const notes: string[] = [];
   if (product.type !== "mcp-binary") return notes;
@@ -544,36 +503,9 @@ function registerOpencodeMcp(product: Product, options: Options): string[] {
     throw new Error(`MCP binary ${binaryName} not found on PATH, in ~/.local/bin or in ~/.cargo/bin — run \`npx wicked-installer install ${product.id}\` first`);
   }
 
-  const env = opencodeConfigEnv(options);
-  if (!env) {
-    notes.push(
-      `skipped OpenCode MCP registration: config root ${options.opencodeHome} is non-standard ` +
-      `(basename must be "opencode" to direct 'opencode mcp add'); register manually with: ` +
-      `opencode mcp add ${product.id} -- ${binaryPath}`,
-    );
-    return notes;
-  }
-
-  if (options.dryRun) {
-    notes.push(`would register OpenCode MCP server ${product.id} -> ${binaryPath}`);
-    return notes;
-  }
-
-  const state = opencodeMcpServerState(product.id, binaryPath, env);
-  if (state === "matches") {
-    notes.push(`OpenCode MCP server ${product.id} already registered -> ${binaryPath}`);
-    return notes;
-  }
-
-  // OpenCode has no `mcp remove` subcommand; `opencode mcp add` is read-modify-write and
-  // overwrites an existing server of the same name, so re-adding both registers a new
-  // server and repairs a drifted one.
-  run("opencode", ["mcp", "add", product.id, "--", binaryPath], options, undefined, false, env);
-  notes.push(
-    state === "drifted"
-      ? `repaired drifted OpenCode MCP server ${product.id} -> ${binaryPath}`
-      : `registered OpenCode MCP server ${product.id} -> ${binaryPath}`,
-  );
+  const result = opencodeMcpEntry({ sub: "upsert", key: product.id, command: binaryPath, args: [], homes: [options.opencodeHome], dryRun: options.dryRun, json: false, force: false });
+  if (result.result === "failed") throw new Error(result.detail);
+  notes.push(`OpenCode MCP server ${product.id}: ${result.detail}`);
   return notes;
 }
 
@@ -1349,6 +1281,138 @@ function runMcp(argv: string[]): number {
   return e.result === "failed" ? 1 : 0;
 }
 
+interface UninstallReport {
+  productId: string;
+  success: boolean;
+  skipped: boolean;
+  message: string;
+  removed: string[];
+  notes: string[];
+  heuristic?: boolean;
+}
+
+function runUninstall(options: Options): number {
+  const home = options.opencodeHome;
+  const file = join(home, "wicked-installer", "opencode-install.json");
+  const reports: UninstallReport[] = [];
+  const emit = (): void => {
+    if (options.json) console.log(JSON.stringify({ verb: "uninstall", opencodeHome: home, reports }, null, 2));
+    else if (!reports.length) console.log("not installed on OpenCode");
+    else for (const r of reports) {
+      console.log(`[${r.success ? "ok" : "failed"}] ${r.message}`);
+      for (const path of r.removed) console.log(`  removed ${path}`);
+      for (const note of r.notes) console.log(`  ${note}`);
+    }
+  };
+  const registry = loadRegistry(options.registryPath);
+  const ids = options.productIds.filter((id) => id !== "uninstall");
+  const unknown = ids.filter((id) => !registry.products.some((p) => p.id === id));
+  if (unknown.length || (!ids.length && !options.all)) {
+    console.error(`install-opencode.js: ${unknown.length ? `unknown product or unsupported command: ${unknown.join(", ")}` : "uninstall requires <ids...> or --all"}`);
+    return 1;
+  }
+  if (!existsSync(home) || !existsSync(file)) { emit(); return 2; }
+  let body: Record<string, unknown> & { products: Array<Record<string, unknown> & { id: string }> };
+  try {
+    body = JSON.parse(readFileSync(file, "utf8")) as typeof body;
+    if (!body || !Array.isArray(body.products)) throw new Error("products is not an array");
+    if (body.products.some((p) => !p || typeof p.id !== "string")) throw new Error("invalid product entry");
+  } catch (err) {
+    console.error(`cannot read ${file}: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+  const selected = options.all ? body.products.map((p) => p.id) : [...new Set(ids)];
+  const persist = (): void => {
+    if (options.dryRun) return;
+    if (!body.products.length) {
+      rmSync(file);
+      if (!readdirSync(dirname(file)).length) rmSync(dirname(file), { recursive: true });
+    } else {
+      const tmp = `${file}.wicked-tmp-${process.pid}`;
+      writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`);
+      renameSync(tmp, file);
+    }
+  };
+  for (const id of selected) {
+    const entry = body.products.find((p) => p.id === id);
+    const report: UninstallReport = { productId: id, success: true, skipped: !entry, message: entry ? `${id}: uninstalled from OpenCode` : `${id}: not installed on OpenCode`, removed: [], notes: [] };
+    reports.push(report);
+    if (!entry) continue;
+    const remove = (path: string, directory: boolean): void => {
+      let stat;
+      try { stat = lstatSync(path); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
+      if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())) {
+        report.notes.push(`${path}: not a ${directory ? "plain directory" : "regular file"}; left in place`);
+        return;
+      }
+      if (options.dryRun) report.notes.push(`would remove ${path}`);
+      else { rmSync(path, { recursive: directory }); report.removed.push(path); }
+    };
+    try {
+      const skillsDir = join(home, "skills");
+      const assets = entry.assets as { skills?: number; hooks?: number } | undefined;
+      const heuristic = !Array.isArray(entry.skills) && (assets?.skills ?? 0) > 0;
+      if (heuristic) report.heuristic = true;
+      const names: unknown[] = Array.isArray(entry.skills) ? entry.skills : heuristic && existsSync(skillsDir) ? readdirSync(skillsDir).filter((n) => n.startsWith(`${id}-`)) : [];
+      for (const name of names) {
+        if (typeof name !== "string" || !name || name.startsWith(".") || /[\\/]/.test(name) || dirname(resolve(skillsDir, name)) !== resolve(skillsDir)) {
+          report.notes.push(`invalid recorded skill name ${JSON.stringify(name)}; left in place`);
+          continue;
+        }
+        const path = join(skillsDir, name);
+        let stat;
+        try { stat = lstatSync(path); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") continue; throw err; }
+        if (!stat.isDirectory() || stat.isSymbolicLink()) { report.notes.push(`${path}: not a plain directory; left in place`); continue; }
+        const skillFile = join(path, "SKILL.md");
+        if (!existsSync(skillFile) || !lstatSync(skillFile).isFile() || sanitizePathPart(readSkillName(path) ?? "") !== name) { report.notes.push(`${path}: changed by hand; left in place`); continue; }
+        remove(path, true);
+      }
+      if ((assets?.hooks ?? 0) > 0 && /^[a-z][a-z0-9-]*$/.test(id)) {
+        remove(join(home, "plugins", `${id}.ts`), false);
+        remove(join(home, "plugins", `${id}-hooks`), true);
+      }
+      const product = registry.products.find((p) => p.id === id);
+      if (product?.type === "mcp-binary") {
+        const configFile = opencodeMcpFile(home);
+        const a: McpArgs = { sub: "remove", key: id, args: [], homes: [home], dryRun: options.dryRun, json: false, force: false };
+        const state = opencodeMcpRead(configFile, a);
+        if (state.state === "error") throw new Error(state.detail);
+        if (state.found.length) {
+          const cfg = JSON.parse(stripJsonc(readFileSync(configFile, "utf8"))) as Record<string, unknown>;
+          const mcp = asObject(cfg.mcp)!;
+          const binary = product.install.crate ?? product.install.package ?? id;
+          let changed = false;
+          for (const found of state.found) {
+            const map = found.shape === "servers" ? asObject(mcp.servers)! : mcp;
+            const command = asObject(map[id])?.command;
+            if (Array.isArray(command) && typeof command[0] === "string" && basename(command[0]).replace(/\.exe$/i, "") === binary) {
+              if (options.dryRun) report.notes.push(`would remove ${id} from ${configFile}`);
+              else { delete map[id]; changed = true; report.removed.push(`${configFile}:mcp.${found.shape === "servers" ? "servers." : ""}${id}`); }
+            } else report.notes.push(`manual: ${id} in ${configFile} does not run ${binary} directly; left in place`);
+          }
+          if (changed) {
+            writeJsonAtomic(configFile, cfg);
+            report.message += "; config rewritten as JSON; JSONC comments dropped";
+          }
+        }
+      }
+      report.notes.push("Binaries are machine-scoped and shared across CLIs; left in place.");
+      body.products = body.products.filter((p) => p !== entry);
+      if (!body.products.length) report.notes.push("OpenCode skills.paths is left in place; its addition was not recorded.");
+      persist();
+      if (options.dryRun) report.message = `${id}: would uninstall from OpenCode`;
+    } catch (err) {
+      report.success = false;
+      report.message = `${id}: ${err instanceof Error ? err.message : String(err)}`;
+      if (!body.products.includes(entry)) body.products.push(entry);
+      entry.lastFailure = { at: new Date().toISOString(), message: report.message };
+      try { persist(); } catch (writeErr) { report.notes.push(`cannot write ${file}: ${String(writeErr)}`); }
+    }
+  }
+  emit();
+  return reports.some((r) => !r.success) ? 1 : 0;
+}
+
 async function main(): Promise<void> {
   // `mcp` is its own grammar (§12.5), routed before the product parser.
   if (process.argv[2] === "mcp") {
@@ -1357,20 +1421,15 @@ async function main(): Promise<void> {
     return;
   }
   const options = parseArgs(process.argv.slice(2));
-  // The v1.1 verbs (INTERFACE.md §12.2/§12.3) are not implemented here. Refuse them before
-  // anything is resolved: `uninstall --all` used to drop the verb and plan an install of EVERY
-  // product (wicked-installer#49). An uninstall must never install.
-  const verb = options.productIds.find((id) => id === "uninstall" || id === "status");
-  if (verb) {
-    const marker = join(options.opencodeHome, "wicked-installer", "opencode-install.json");
-    console.error(
-      `install-opencode.js: \`${verb}\` is not supported by this script yet (wicked-installer#49) — nothing was installed, removed or changed.` +
-      (verb === "uninstall"
-        ? ` What earlier installs put into OpenCode is recorded in ${marker}; remove those skill directories by hand, then delete the marker.`
-        : ` Run \`npx wicked-installer status\` for what is installed.`),
-    );
-    if (options.json) console.log(JSON.stringify({ verb, supported: false, reports: [] }));
-    process.exit(1);
+  if (options.productIds[0] === "uninstall") {
+    process.exitCode = runUninstall(options);
+    return;
+  }
+  if (options.productIds.includes("status")) {
+    console.error("install-opencode.js: `status` is not supported by this script yet; run `wicked-installer status`.");
+    if (options.json) console.log(JSON.stringify({ verb: "status", supported: false, reports: [] }));
+    process.exitCode = 1;
+    return;
   }
   const registry = loadRegistry(options.registryPath);
   // Every positional must be a product id — also with --all, which would otherwise ignore an

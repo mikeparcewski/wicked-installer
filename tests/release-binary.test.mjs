@@ -34,6 +34,12 @@ const REGISTRY = {
   bundles: [],
 };
 
+function testEnv(w, extra = {}) {
+  const env = { ...process.env, HOME: w.home, USERPROFILE: w.home, PATH: `${w.bin}:/usr/bin:/bin` };
+  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]) delete env[k];
+  return { ...env, ...extra };
+}
+
 /** A temp world: HOME, a registry, a release archive for `triple`, and a bin dir for PATH. */
 function world({ triple = TRIPLE, badSum = false, withCargo = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wicked-release-"));
@@ -52,7 +58,7 @@ function world({ triple = TRIPLE, badSum = false, withCargo = false } = {}) {
   }
   const asset = `fake-estate-9.9.9-${triple}.tar.gz`;
   const archive = join(root, asset);
-  assert.equal(spawnSync("tar", ["-czf", archive, "-C", join(root, "stage"), `fake-estate-9.9.9-${triple}`]).status, 0);
+  assert.equal(spawnSync("tar", ["-czf", archive, "-C", join(root, "stage"), `fake-estate-9.9.9-${triple}`], { env: testEnv({ home, bin }) }).status, 0);
   const bytes = readFileSync(archive);
   const sum = badSum ? "0".repeat(64) : createHash("sha256").update(bytes).digest("hex");
   if (withCargo) {
@@ -93,8 +99,7 @@ async function serve(w) {
 /** Run a script ASYNCHRONOUSLY so the in-process server can answer. */
 function runAsync(args, w, base, extraEnv = {}) {
   return new Promise((resolve) => {
-    const env = { ...process.env, HOME: w.home, USERPROFILE: w.home, PATH: `${w.bin}:/usr/bin:/bin`, WICKED_RELEASE_API_BASE: base, ...extraEnv };
-    delete env.CLAUDE_CONFIG_DIR;
+    const env = testEnv(w, { WICKED_RELEASE_API_BASE: base, ...extraEnv });
     const child = spawn(process.execPath, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (d) => { out += d; });
@@ -114,7 +119,7 @@ test("release: installs both binaries from the sha256-verified archive into ~/.l
     for (const b of ["fake-estate", "fake-estate-mcp"]) {
       const p = join(w.home, ".local", "bin", b);
       assert.ok(existsSync(p), `${b} installed`);
-      assert.match(spawnSync(p, [], { encoding: "utf8" }).stdout, /9\.9\.9/);
+      assert.match(spawnSync(p, [], { encoding: "utf8", env: testEnv(w) }).stdout, /9\.9\.9/);
     }
     assert.match(r.out, /sha256 [0-9a-f]{12}… verified against the release's SHA256SUMS/);
     assert.ok(!existsSync(w.cargoLog), "cargo never ran");
@@ -194,10 +199,10 @@ test("release: the central `install` path uses the release too (the readiness fi
   // index.js reads ../registry.json: run a copy of dist next to the fake registry.
   const app = join(w.root, "app");
   mkdirSync(app);
-  spawnSync("cp", ["-R", join(ROOT, "dist"), join(app, "dist")]);
+  spawnSync("cp", ["-R", join(ROOT, "dist"), join(app, "dist")], { env: testEnv(w) });
   writeFileSync(join(app, "registry.json"), JSON.stringify(REGISTRY));
   writeFileSync(join(app, "package.json"), readFileSync(join(ROOT, "package.json")));
-  spawnSync("ln", ["-s", join(ROOT, "node_modules"), join(app, "node_modules")]);
+  spawnSync("ln", ["-s", join(ROOT, "node_modules"), join(app, "node_modules")], { env: testEnv(w) });
   try {
     const r = await runAsync([join(app, "dist", "index.js"), "install", "fake-estate", "--offline"], w, srv.base);
     assert.equal(r.status, 0, r.out);
@@ -223,19 +228,68 @@ function preinstalled() {
   return { ...w, local };
 }
 
-function runSync(args, w) {
-  const env = { ...process.env, HOME: w.home, USERPROFILE: w.home, PATH: `${w.bin}:/usr/bin:/bin` };
-  delete env.CLAUDE_CONFIG_DIR;
+function runSync(args, w, extraEnv = {}) {
+  const env = testEnv(w, extraEnv);
   const r = spawnSync(process.execPath, args, { encoding: "utf8", env, timeout: 60_000 });
   r.out = `${r.stdout}${r.stderr}`;
   return r;
 }
 
+function opencodeStub(w, log, v2) {
+  writeFileSync(join(w.bin, "opencode"), `#!${process.execPath}
+import fs from "node:fs";
+import path from "node:path";
+const a = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, a.join(" ") + "\\n");
+if (a.includes("--help")) { console.log(${JSON.stringify(v2 ? "mcp add --global" : "mcp add <name>")}); process.exit(0); }
+if (a[0] !== "mcp" || a[1] !== "add") process.exit(0);
+const global = a.includes("--global");
+const dir = ${v2} && !global ? process.cwd() : path.join(process.env.XDG_CONFIG_HOME, "opencode");
+const file = path.join(dir, ${JSON.stringify(v2 ? "opencode.json" : "opencode.jsonc")});
+const cfg = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+const mcp = cfg.mcp ??= {};
+const entries = ${v2} ? (mcp.servers ??= {}) : mcp;
+entries[a[global ? 3 : 2]] = { type: "local", command: a.slice(a.indexOf("--") + 1) };
+fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, JSON.stringify(cfg));
+`);
+  chmodSync(join(w.bin, "opencode"), 0o755);
+}
+
+test("release: OpenCode install never lists servers and registers 2.x globally without a cwd config", { skip }, () => {
+  const w = preinstalled();
+  try {
+    const log = join(w.root, "opencode.log"); opencodeStub(w, log, true);
+    const env = testEnv(w);
+    const r = spawnSync(process.execPath, [join(ROOT, "dist/install-opencode.js"), "fake-estate", "--registry", w.reg, "--skip-binaries"], { env, cwd: w.root, encoding: "utf8" });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    const calls = readFileSync(log, "utf8");
+    assert.doesNotMatch(calls, /mcp list/);
+    assert.ok(calls.includes(`mcp add --global fake-estate -- ${join(w.local, "fake-estate-mcp")}`), calls);
+    assert.ok(!existsSync(join(w.root, "opencode.json")));
+    assert.ok(existsSync(join(w.home, ".config/opencode/opencode.json")));
+  } finally { rmSync(w.root, { recursive: true, force: true }); }
+});
+
+test("release: explicit CLAUDE_CONFIG_DIR at ~/.claude writes its local state; unset uses ~/.claude.json", { skip }, () => {
+  for (const explicit of [true, false]) {
+    const w = preinstalled();
+    try {
+      const cfg = join(w.home, ".claude");
+      const r = runSync([join(ROOT, "dist/install-claude.js"), "fake-estate", "--registry", w.reg, "--skip-binaries"], w, explicit ? { CLAUDE_CONFIG_DIR: cfg } : {});
+      assert.equal(r.status, 0, r.out);
+      const file = explicit ? join(cfg, ".claude.json") : join(w.home, ".claude.json");
+      assert.ok(existsSync(file), file);
+      assert.equal(JSON.parse(readFileSync(file, "utf8")).mcpServers["fake-estate"].command, join(w.local, "fake-estate-mcp"));
+      assert.ok(!existsSync(explicit ? join(w.home, ".claude.json") : join(cfg, ".claude.json")));
+    } finally { rmSync(w.root, { recursive: true, force: true }); }
+  }
+});
+
 test("release: OpenCode registers the MCP binary where it actually is (~/.local/bin), not only ~/.cargo/bin", { skip }, () => {
   const w = preinstalled();
   try {
     const log = join(w.root, "opencode.log");
-    writeFileSync(join(w.bin, "opencode"), `#!/bin/sh\necho "$@" >> "${log}"\nexit 0\n`);
+    opencodeStub(w, log, false);
     chmodSync(join(w.bin, "opencode"), 0o755);
     const r = runSync([join(ROOT, "dist", "install-opencode.js"), "fake-estate", "--registry", w.reg, "--opencode-home", join(w.home, ".config", "opencode"), "--skip-binaries"], w);
     assert.equal(r.status, 0, r.out);
@@ -285,7 +339,7 @@ test("release: 'already current' needs every binary to hash as installed — a c
     assert.equal(again.status, 0, again.out);
     assert.doesNotMatch(again.out, /already installed/);
     assert.ok(srv.hits.slice(before).some((h) => h.startsWith("/dl/fake-estate-9.9.9")), "downloaded and verified again");
-    assert.match(spawnSync(mcp, [], { encoding: "utf8" }).stdout, /9\.9\.9/, "repaired");
+    assert.match(spawnSync(mcp, [], { encoding: "utf8", env: testEnv(w) }).stdout, /9\.9\.9/, "repaired");
   } finally {
     await srv.close();
     rmSync(w.root, { recursive: true, force: true });
@@ -375,7 +429,7 @@ test("release: a file this installer did not put in ~/.local/bin is kept (rename
     const again = await runAsync(piArgs(w), w, srv.base);
     assert.equal(again.status, 0, again.out);
     assert.doesNotMatch(again.out, /already installed/);
-    assert.equal(spawnSync(join(local, "fake-estate-mcp"), [], { encoding: "utf8" }).status, 0, "runnable again");
+    assert.equal(spawnSync(join(local, "fake-estate-mcp"), [], { encoding: "utf8", env: testEnv(w) }).status, 0, "runnable again");
   } finally {
     await srv.close();
     rmSync(w.root, { recursive: true, force: true });

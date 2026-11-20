@@ -1021,3 +1021,52 @@ export function registerClaudePlugin(spec: ClaudePluginSpec, opts: RegisterOptio
   }
   return { claudeDetected: true, version: probe.version, versions, ran };
 }
+
+export interface ClaudePluginUninstallReport {
+  productId: string;
+  configDir: string;
+  success: boolean;
+  skipped: boolean;
+  message: string;
+  removed: string[];
+  notes: string[];
+}
+
+export function unregisterClaudePlugin(
+  spec: ClaudePluginSpec,
+  opts: { configDirs: ClaudeConfigDirs; dryRun: boolean; env?: NodeJS.ProcessEnv; spawner?: ClaudeSpawner },
+): ClaudePluginUninstallReport[] {
+  return opts.configDirs.dirs.map((dir) => {
+    const report: ClaudePluginUninstallReport = { productId: spec.productId, configDir: dir, success: true, skipped: true, message: `${spec.productId}: not installed on Claude Code (${dir})`, removed: [], notes: [] };
+    try {
+      const reg = readRegistration(dir, spec);
+      if (reg.errors.length) throw new Error(reg.errors.join("; "));
+      if (!reg.installed.length) return report;
+      const args = ["plugin", "uninstall", spec.pluginId];
+      const command = `claude ${args.join(" ")}`;
+      report.notes.push(`Marketplace left in place; remove manually with: claude plugin marketplace remove ${spec.marketplaceName}`);
+      const bin = claudeBinary(opts.env);
+      if (!bin) {
+        report.message = `${spec.productId}: manual removal on Claude Code (${dir})`;
+        report.notes.push(`CLAUDE_CONFIG_DIR=${shellQuote(dir)} ${command}`);
+      } else if (opts.dryRun) {
+        report.skipped = false;
+        report.message = `${spec.productId}: would uninstall from Claude Code (${dir})`;
+        report.notes.push(`would remove via ${command}`);
+      } else {
+        const result = (opts.spawner ?? spawnClaude)(bin, args, dir, "capture");
+        if (result.status !== 0) throw new Error(`${command} failed: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+        const after = readRegistration(dir, spec);
+        if (after.errors.length) throw new Error(after.errors.join("; "));
+        if (after.installed.length) throw new Error(`${spec.pluginId} is still installed in ${dir}`);
+        report.skipped = false;
+        report.message = `${spec.productId}: uninstalled from Claude Code (${dir})`;
+        report.removed.push(spec.pluginId);
+      }
+    } catch (err) {
+      report.success = false;
+      report.message = `${spec.productId}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    return report;
+  });
+}

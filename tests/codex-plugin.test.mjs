@@ -60,6 +60,7 @@ function sandbox({ withManifest = true } = {}) {
   };
   mkdirSync(sb.home, { recursive: true });
   mkdirSync(sb.bin, { recursive: true });
+  symlinkSync(process.execPath, join(sb.bin, "node"));
   cpSync(stubSrc, join(sb.bin, "codex"));
   chmodSync(join(sb.bin, "codex"), 0o755);
   // npm stub: `root -g` answers the sandbox's global root; installs are recorded, never run.
@@ -86,7 +87,7 @@ function sandbox({ withManifest = true } = {}) {
 function run(sb, args = [], env = {}) {
   const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json", ...args], {
     encoding: "utf8",
-    env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log, ...env },
+    env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log, ...env },
     timeout: 60000,
   });
   const tail = res.stdout.slice(res.stdout.lastIndexOf('\n{\n  "codexHome"') + 1);
@@ -369,7 +370,7 @@ test("an npm-run product the registry does not mark as a Codex plugin is never i
     writeFileSync(sb.registry, JSON.stringify(reg));
     garden(join(sb.tmp, "global", "wicked-garden"), "2.0.0");
     const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     // (The copy path then tries `npm pack`, which this npm stub does not emulate — the exit code is not the point.)
     const npmLog = existsSync(join(sb.tmp, "npm.log")) ? readFileSync(join(sb.tmp, "npm.log"), "utf8") : "";
@@ -386,7 +387,7 @@ test("without --skip-binaries the marked package is installed globally first", {
     rmSync(join(sb.src, "wicked-garden"), { recursive: true });
     garden(join(sb.tmp, "global", "wicked-garden"), "2.0.0");
     const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stderr);
     assert.match(readFileSync(join(sb.tmp, "npm.log"), "utf8"), /^install -g wicked-garden$/m);
@@ -494,7 +495,7 @@ test("a --source-root checkout without .codex-plugin is copied from, never swapp
   const sb = sandbox({ withManifest: false });
   try {
     const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stderr);
     const npmLog = existsSync(join(sb.tmp, "npm.log")) ? readFileSync(join(sb.tmp, "npm.log"), "utf8") : "";
@@ -546,7 +547,7 @@ test("another mcp-binary product registers its own binary, not wicked-estate-mcp
     writeFileSync(sb.registry, JSON.stringify(reg));
     mkdirSync(sb.codexHome, { recursive: true });
     const res = spawnSync(process.execPath, [script, "acme", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(configToml(sb), /\[mcp_servers\.acme\]\ncommand = "[^"]+\/acme-mcp"/);
@@ -578,7 +579,7 @@ test("estate + garden in one run: no direct-binary entry shadows the plugin's la
     reg.products.reverse(); // registry.json order: wicked-estate before wicked-garden
     writeFileSync(sb.registry, JSON.stringify(reg));
     const res = spawnSync(process.execPath, [script, "wicked-estate", "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.doesNotMatch(configToml(sb), /mcp_servers/);
@@ -599,7 +600,7 @@ test("another mcp-binary product ignores WICKED_ESTATE_MCP_BIN", { skip }, () =>
     writeFileSync(sb.registry, JSON.stringify(reg));
     mkdirSync(sb.codexHome, { recursive: true });
     const res = spawnSync(process.execPath, [script, "acme", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log, WICKED_ESTATE_MCP_BIN: join(sb.home, ".cargo", "bin", "wicked-estate-mcp") }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log, WICKED_ESTATE_MCP_BIN: join(sb.home, ".cargo", "bin", "wicked-estate-mcp") }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(configToml(sb), /\[mcp_servers\.acme\]\ncommand = "[^"]+\/acme-mcp"/);
@@ -649,7 +650,7 @@ test("a vanished root of a DISABLED plugin's marketplace is not recovered (that 
     mkdirSync(first, { recursive: true });
     cpSync(join(sb.src, "wicked-garden"), join(first, "wicked-garden"), { recursive: true });
     const firstRun = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", first, "--skip-binaries", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(firstRun.status, 0, firstRun.stderr);
     setDisabled(sb);
@@ -713,7 +714,7 @@ test("--dry-run that plans the npm install still previews the loose-skill and es
     skill(join(sb.codexHome, "skills", "wicked-garden-old"), "wicked-garden-old");
     write(join(sb.codexHome, "wicked-installer", "codex-install.json"), JSON.stringify({ products: [{ id: "wicked-garden", success: true, assets: { skills: 1 }, skills: ["wicked-garden-old"] }] }));
     const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--dry-run", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     const g = JSON.parse(res.stdout.slice(res.stdout.indexOf("{"))).reports.find((x) => x.productId === "wicked-garden");
     assert.equal(g.delivery, "planned");
@@ -761,10 +762,11 @@ test("estate: a renamed WICKED_ESTATE_MCP_BIN download still repairs a direct-bi
 test("estate: a relative PATH entry never becomes a relative MCP command", { skip }, () => {
   const sb = sandbox();
   try {
+    cpSync(sb.bin, join(sb.tmp, "rel-tools"), { recursive: true });
     fakeEstate(join(sb.tmp, "rel-tools"), "0.30.0");
     seedConfig(sb, '[mcp_servers.wicked-estate]\ncommand = "/opt/old/wicked-estate-mcp"\n');
     const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-      cwd: sb.tmp, encoding: "utf8", env: { PATH: `rel-tools:${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      cwd: sb.tmp, encoding: "utf8", env: { PATH: "rel-tools:/usr/bin:/bin", HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stderr);
     assert.match(configToml(sb), new RegExp(`command = ${JSON.stringify(join(realpathSync(sb.tmp), "rel-tools", "wicked-estate-mcp")).replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
@@ -782,7 +784,7 @@ test("a disabled garden plugin: no estate check, and the estate product does not
     st.plugins["wicked-garden@wicked-garden"].enabled = false;
     writeFileSync(join(sb.codexHome, "stub-state.json"), JSON.stringify(st));
     const res = spawnSync(process.execPath, [script, "wicked-garden", "wicked-estate", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.doesNotMatch(configToml(sb), /mcp_servers/);
@@ -813,7 +815,7 @@ test("--dry-run of estate + garden plans no direct-binary estate entry when gard
     fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
     mkdirSync(sb.codexHome, { recursive: true });
     const res = spawnSync(process.execPath, [script, "wicked-estate", "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--dry-run", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(res.stdout, /would be served by the garden plugin's launcher planned in this run/);
@@ -825,7 +827,7 @@ test("--dry-run of estate + garden plans no direct-binary estate entry when gard
 
 function estateOnly(sb, extraEnv = {}) {
   return spawnSync(process.execPath, [script, "wicked-estate", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-    encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log, ...extraEnv }, timeout: 60000,
+    encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log, ...extraEnv }, timeout: 60000,
   });
 }
 
@@ -927,8 +929,9 @@ test("estate: a stale config entry gets only its command line replaced (every ot
       "",
     ].join("\n");
     seedConfig(sb, before);
+    cpSync(sb.bin, cargo, { recursive: true });
     const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-      encoding: "utf8", env: { PATH: `${cargo}:${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${cargo}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stderr);
     assert.ok(configToml(sb).startsWith(before.replace('"/opt/old/wicked-estate-mcp"', JSON.stringify(join(local, "wicked-estate-mcp")))), configToml(sb));
@@ -1173,7 +1176,7 @@ test("--dry-run without the global package plans the plugin path instead of the 
   try {
     rmSync(join(sb.src, "wicked-garden"), { recursive: true });
     const res = spawnSync(process.execPath, [script, "wicked-garden", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--dry-run", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stderr);
     const g = JSON.parse(res.stdout.slice(res.stdout.indexOf("{"))).reports.find((x) => x.productId === "wicked-garden");
@@ -1190,7 +1193,7 @@ test("estate product leaves a plugin-served (launcher) server alone — no direc
     fakeEstate(join(sb.home, ".local", "bin"), "0.30.0"); // the plugin's launcher finds it
     assert.equal(run(sb).status, 0);
     const res = spawnSync(process.execPath, [script, "wicked-estate", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.doesNotMatch(configToml(sb), /mcp_servers/);
@@ -1207,7 +1210,7 @@ test("estate product registers its resolved binary when nothing serves the name"
     fakeEstate(join(sb.home, ".cargo", "bin"), "0.30.0");
     mkdirSync(sb.codexHome, { recursive: true });
     const res = spawnSync(process.execPath, [script, "wicked-estate", "--codex-home", sb.codexHome, "--registry", sb.registry, "--source-root", sb.src, "--skip-binaries", "--json"], {
-      encoding: "utf8", env: { PATH: `${sb.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
+      encoding: "utf8", env: { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CODEX_STUB_LOG: sb.log }, timeout: 60000,
     });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(configToml(sb), /\[mcp_servers\.wicked-estate\]\ncommand = "[^"]+\.cargo\/bin\/wicked-estate-mcp"/);
