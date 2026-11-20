@@ -6,7 +6,7 @@ import fs from "node:fs";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 const { RANCHER_CONTAINERD_WARNING, checkKubernetes, ensureClusterForCrew, findKubectl, pickContext, isLocalServer, publicDiagnostic, shellWord, installCommand, findWickedCore, PODS_PIDS_MAX, pidsFix } = await import("../dist/kubernetes.js");
 
@@ -341,6 +341,45 @@ test("on-PATH docker context creation uses the resolved executable and a quoted 
   const { r } = runtimeRefusal(sb, { dockerContexts: ["default"] });
   assert.ok(r.message.includes('\nRun: `~/docker context create rancher-desktop --docker "host=unix://$HOME/.rd/docker.sock" && ~/docker context use rancher-desktop`, then run the installer again.'), r.message);
 });
+
+test("Rancher Desktop socket beside a PATH CLI in another home gets a context-create remedy (#67)", { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core");
+  sb.env.HOME = join(sb.tmp, "bare"); mkdirSync(sb.env.HOME);
+  sb.env.KUBECONFIG = join(sb.tmp, ".kube", "config");
+  const rd = join(sb.tmp, "other", ".rd");
+  const docker = sb.exe("docker", join(rd, "bin"));
+  const socket = join(rd, "docker.sock"); writeFileSync(socket, "");
+  sb.env.PATH = [join(rd, "bin"), sb.env.PATH].join(delimiter);
+  const { r, calls } = runtimeRefusal(sb, { dockerContexts: ["default"], dockerContext: "default" });
+  assert.equal(r.action, "failed");
+  assert.match(r.message, /Rancher Desktop's Kubernetes answers/);
+  assert.ok(r.message.includes(`\nRun: \`${docker} context create rancher-desktop --docker host=unix://${socket} && ${docker} context use rancher-desktop\`, then run the installer again.`), r.message);
+  assert.doesNotMatch(r.message, /Start the runtime|\nRun: `[^\n]*wicked-core cluster install/);
+  const probes = calls.filter((c) => c.argv[0] === "docker");
+  assert.equal(probes.length, 3);
+  assert.ok(probes.every((c) => c.bin === docker && c.argv[1] === "context" && ["show", "inspect", "ls"].includes(c.argv[2])));
+});
+
+for (const [platform, layout] of [["win32", ["other", ".rd"]], ["darwin", []]]) {
+  test(`CLI-sibling socket is ignored on ${platform} with ${layout.length ? ".rd/bin" : "bin"} layout (#67)`, { skip }, (t) => {
+    const sb = sandbox(t); const kubectl = sb.exe("kubectl"); sb.exe("wicked-core");
+    sb.env.HOME = join(sb.tmp, "bare"); mkdirSync(sb.env.HOME);
+    sb.env.KUBECONFIG = join(sb.tmp, ".kube", "config");
+    const root = join(sb.tmp, ...layout);
+    const docker = sb.exe("docker", join(root, "bin"));
+    writeFileSync(join(root, "docker.sock"), "");
+    sb.env.PATH = [join(root, "bin"), sb.env.PATH].join(delimiter);
+    if (platform === "win32") {
+      sb.env.WICKED_KUBECTL = kubectl; sb.env.WICKED_CONTAINER_RUNTIME = docker;
+    }
+    const { r, calls } = runtimeRefusal(sb, { dockerContexts: ["default"], dockerContext: "default" }, platform);
+    assert.equal(r.action, "failed");
+    assert.ok(calls.some((c) => c.bin === docker && c.argv[1] === "context"));
+    assert.match(r.message, /Start the runtime/);
+    assert.match(r.message, /\nRun: `[^\n]*wicked-core cluster install/);
+    assert.doesNotMatch(r.message, /context create|--docker host=unix:/);
+  });
+}
 
 for (const runtime of ["podman", "/home/alice/bin/podman"]) test(`chosen non-docker runtime ${runtime} skips Docker diagnosis (review 1)`, { skip }, (t) => {
   const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core"); sb.exe("docker");
