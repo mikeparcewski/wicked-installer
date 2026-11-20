@@ -63,10 +63,15 @@ export interface Target {
 }
 
 const NEED = "local Kubernetes (governed seats run in pods)";
-const START = "start Rancher Desktop (Preferences → Kubernetes → Enable) or Docker Desktop (Settings → Kubernetes → Enable)";
-const PIDS_FIX =
-  `set the kubelet's pod-max-pids to ${PODS_PIDS_MAX}: on Rancher Desktop add \`kubelet-arg: ["pod-max-pids=${PODS_PIDS_MAX}"]\` to /etc/rancher/k3s/config.yaml in the VM ` +
-  "(persist it with a provision script in ~/Library/Application Support/rancher-desktop/lima/_config/override.yaml) and restart Kubernetes";
+const START = "start Rancher Desktop (Preferences → Kubernetes → Enable)";
+
+/** The pod process limit fix for the platform the installer runs on (WSL2: Linux with WSL_DISTRO_NAME set). */
+export function pidsFix(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
+  const script = platform === "win32" || (platform === "linux" && (env.WSL_DISTRO_NAME ?? "") !== "")
+    ? "create a wicked-pids.start script in %LOCALAPPDATA%\\rancher-desktop\\provisioning from the WSL shell with Unix line endings"
+    : `add a provision script entry (mode: system) in ${platform === "darwin" ? "~/Library/Application Support" : "~/.local/share"}/rancher-desktop/lima/_config/override.yaml`;
+  return `set the kubelet's pod-max-pids to ${PODS_PIDS_MAX}: ${script} to write /etc/rancher/k3s/config.yaml with \`kubelet-arg: ["pod-max-pids=${PODS_PIDS_MAX}"]\`; then quit and restart Rancher Desktop. For full commands, see "Limit processes per pod" in the install guide: https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md`;
+}
 
 export function defaultSpawn(baseEnv: NodeJS.ProcessEnv): Spawn {
   return (bin, args, opts = {}) => {
@@ -220,11 +225,11 @@ export function resolveTarget(ctx: KubeCtx): { target: Target } | { need: KubeNe
   const { env, platform } = ctx;
   const say = (state: KubeState, detail: string, remedy?: string): { need: KubeNeed } => ({ need: { need: NEED, met: false, state, detail, ...(remedy ? { remedy } : {}) } });
   const kubectl = findKubectl(env, platform);
-  if (kubectl === null) return say("no_kubectl", "kubectl is not installed, so there is no local Kubernetes for crew's seats", `install Rancher Desktop or Docker Desktop, then ${START}`);
+  if (kubectl === null) return say("no_kubectl", "kubectl is not installed, so there is no local Kubernetes for crew's seats", `install Rancher Desktop, then ${START}. Docker Desktop's Kubernetes can't set the pod process limit crew needs`);
   // The engine runs kubectl without KUBECONFIG and is handed the admin kubeconfig explicitly, so pin one FILE.
   const candidates = (env.KUBECONFIG ?? "").split(delimiter).filter(Boolean);
   // A merged KUBECONFIG list has no single file to hand the engine; the desktop apps write one file.
-  if (candidates.length > 1) return say("config_unreadable", "KUBECONFIG lists more than one file; the engine is handed one admin kubeconfig", "point KUBECONFIG at the one file that holds your local cluster (Rancher Desktop and Docker Desktop write ~/.kube/config), then run the installer again");
+  if (candidates.length > 1) return say("config_unreadable", "KUBECONFIG lists more than one file; the engine is handed one admin kubeconfig", "point KUBECONFIG at the one file that holds your local cluster (Rancher Desktop writes ~/.kube/config), then run the installer again");
   if (candidates.length === 0) candidates.push(join(homeOf(env, platform), ".kube", "config"));
   let lastError = "";
   for (const kubeconfig of candidates) {
@@ -300,7 +305,7 @@ export function checkKubernetes(ctx: KubeCtx): Checked {
   if (ctx.probeOnly) {
     const kubectl = findKubectl(env, platform);
     return kubectl === null
-      ? { need: NEED, met: false, state: "no_kubectl", detail: "kubectl is not installed, so there is no local Kubernetes for crew's seats", remedy: `install Rancher Desktop or Docker Desktop, then ${START}` }
+      ? { need: NEED, met: false, state: "no_kubectl", detail: "kubectl is not installed, so there is no local Kubernetes for crew's seats", remedy: `install Rancher Desktop, then ${START}. Docker Desktop's Kubernetes can't set the pod process limit crew needs` }
       : { need: NEED, met: true, verified: false, state: "unchecked", detail: `kubectl found at ${publicPath(kubectl, env, platform)}; the cluster was not checked (--dry-run)` };
   }
   const resolved = resolveTarget(ctx);
@@ -311,9 +316,9 @@ export function checkKubernetes(ctx: KubeCtx): Checked {
   const version = ctx.spawn(t.kubectl, ["--kubeconfig", t.kubeconfig, "--context", t.context, "version", "-o", "json", "--request-timeout=10s"]);
   if (version.status !== 0) return fail("unreachable", `the ${shownCtx} cluster does not answer (${publicDiagnostic(version.stderr || version.error || "no answer", env, platform)})`, START);
   const node = readNode(t, ctx);
-  if ("state" in node) return fail(node.state, `the ${shownCtx} cluster answers, but ${node.detail}`, node.state === "topology" ? "use Rancher Desktop's or Docker Desktop's single-node cluster" : `check it, or ${PIDS_FIX}`);
+  if ("state" in node) return fail(node.state, `the ${shownCtx} cluster answers, but ${node.detail}`, node.state === "topology" ? "use Rancher Desktop's single-node cluster" : `check it, or ${pidsFix(ctx.env, ctx.platform)}`);
   if (node.pids <= 0 || node.pids > PODS_PIDS_MAX) {
-    return fail("pids_unlimited", `the ${shownCtx} kubelet sets no pod process limit of ${PODS_PIDS_MAX} or less (podPidsLimit ${node.pids}), so the engine refuses every seat (pids_unlimited)`, PIDS_FIX);
+    return fail("pids_unlimited", `the ${shownCtx} kubelet sets no pod process limit of ${PODS_PIDS_MAX} or less (podPidsLimit ${node.pids}), so the engine refuses every seat (pids_unlimited)`, pidsFix(ctx.env, ctx.platform));
   }
   const core = findWickedCore(env, platform);
   if (core === null) return fail("no_engine", `the ${shownCtx} cluster answers (pod process limit ${node.pids}), but the wicked-core binary that installs crew's part of it was not found`, "npm i -g wicked-crew (it carries wicked-core), then run the installer again");
@@ -406,7 +411,7 @@ export function ensureClusterForCrew(input: { productIds: string[]; dryRun: bool
   if (!input.productIds.includes("wicked-crew")) return { action: "not-needed", message: "" };
   const env = input.env ?? process.env;
   const platform = input.platform ?? process.platform;
-  if (findKubectl(env, platform) === null) return { action: "skipped", message: `No local Kubernetes yet: crew's governed seats run in pods. Install Rancher Desktop or Docker Desktop and ${START}, then run the installer again.` };
+  if (findKubectl(env, platform) === null) return { action: "skipped", message: `No local Kubernetes yet: crew's governed seats run in pods. Install Rancher Desktop and ${START}, then run the installer again. Docker Desktop's Kubernetes can't set the pod process limit crew needs.` };
   if (input.dryRun) return { action: "skipped", message: "Would install crew's part of the local Kubernetes cluster (wicked-core cluster install) [dry-run]." };
   const spawn = input.spawn ?? defaultSpawn(env);
   const check = checkKubernetes({ env, platform, probeOnly: false, spawn });

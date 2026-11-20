@@ -8,7 +8,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { RANCHER_CONTAINERD_WARNING, checkKubernetes, ensureClusterForCrew, findKubectl, pickContext, isLocalServer, publicDiagnostic, shellWord, installCommand, findWickedCore, PODS_PIDS_MAX } = await import("../dist/kubernetes.js");
+const { RANCHER_CONTAINERD_WARNING, checkKubernetes, ensureClusterForCrew, findKubectl, pickContext, isLocalServer, publicDiagnostic, shellWord, installCommand, findWickedCore, PODS_PIDS_MAX, pidsFix } = await import("../dist/kubernetes.js");
 
 const skip = process.platform === "win32" ? "fake executables are POSIX files" : false;
 
@@ -41,7 +41,7 @@ function fakeSpawn(world) {
       if (a.includes(" version ")) return world.down ? no("The connection to the server 127.0.0.1:6443 was refused") : ok("{}");
       if (a.includes("containerRuntimeVersion")) return world.runtimeUnread ? no("forbidden") : ok(world.runtime ?? "docker://29.5.3");
       if (a.includes("get nodes")) return ok((world.nodes ?? ["lima-rancher-desktop"]).join(" "));
-      if (a.includes("/proxy/configz")) return ok(JSON.stringify({ kubeletconfig: world.pids === undefined ? {} : { podPidsLimit: world.pids } }));
+      if (a.includes("/proxy/configz")) return world.pidsUnreadable ? no("forbidden") : ok(JSON.stringify({ kubeletconfig: world.pids === undefined ? {} : { podPidsLimit: world.pids } }));
     }
     if (bin.endsWith("wicked-core")) {
       if (args[0] === "cluster" && args[1] === "status") {
@@ -57,11 +57,80 @@ function fakeSpawn(world) {
 
 const ctxOf = (sb, world, probeOnly = false) => ({ env: sb.env, platform: "linux", probeOnly, ...fakeSpawn({ home: sb.tmp, ...world }) });
 
-test("no kubectl: unmet, with the desktop apps as the fix", { skip }, (t) => {
+for (const probeOnly of [false, true]) test(`no kubectl: recommend Rancher Desktop (probeOnly=${probeOnly}) (#68)`, { skip }, (t) => {
   const sb = sandbox(t);
-  const r = checkKubernetes(ctxOf(sb, {}));
+  sb.env.WICKED_KUBECTL = join(sb.tmp, "missing-kubectl");
+  const c = ctxOf(sb, {}, probeOnly);
+  const r = checkKubernetes(c);
   assert.equal(r.met, false); assert.equal(r.state, "no_kubectl");
   assert.match(r.remedy, /Rancher Desktop/);
+  assert.doesNotMatch(r.remedy, /Docker Desktop (Settings|with Kubernetes)|or Docker Desktop|Docker Desktop's single/);
+  assert.match(r.remedy, /Docker Desktop's Kubernetes can't set the pod process limit crew needs/);
+  assert.equal(c.calls.length, 0);
+});
+
+test("ensureClusterForCrew without kubectl recommends Rancher Desktop (#68)", { skip }, (t) => {
+  const sb = sandbox(t);
+  sb.env.WICKED_KUBECTL = join(sb.tmp, "missing-kubectl");
+  const r = ensureClusterForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", spawn: () => { throw new Error("must not spawn"); } });
+  assert.equal(r.action, "skipped");
+  assert.match(r.message, /Rancher Desktop/);
+  assert.doesNotMatch(r.message, /Docker Desktop (Settings|with Kubernetes)|or Docker Desktop|Docker Desktop's single/);
+  assert.match(r.message, /Docker Desktop's Kubernetes can't set the pod process limit crew needs/);
+});
+
+for (const [state, world] of [
+  ["unreachable", { down: true }],
+  ["topology", { nodes: ["a", "b"], pids: 4096 }],
+]) test(`${state} remedy recommends Rancher Desktop (#68)`, { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl");
+  const r = checkKubernetes(ctxOf(sb, world));
+  assert.equal(r.state, state);
+  assert.match(r.remedy, /Rancher Desktop/);
+  assert.doesNotMatch(r.remedy, /Docker Desktop (Settings|with Kubernetes)|or Docker Desktop|Docker Desktop's single/);
+});
+
+function assertPidsRecipe(text) {
+  assert.equal(typeof text, "string");
+  assert.doesNotMatch(text, /[\r\n]/);
+  assert.ok(text.includes('kubelet-arg: ["pod-max-pids=4096"]'), text);
+  assert.ok(text.includes("/etc/rancher/k3s/config.yaml"), text);
+  assert.match(text, /quit and restart Rancher Desktop/);
+  assert.match(text, /Limit processes per pod/);
+  assert.ok(text.includes("https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md"), text);
+}
+
+for (const [name, platform, env, path, excluded] of [
+  ["macOS", "darwin", {}, "~/Library/Application Support/rancher-desktop/lima/_config/override.yaml", /wicked-pids\.start/],
+  ["Linux", "linux", {}, "~/.local/share/rancher-desktop/lima/_config/override.yaml", /Library|wicked-pids\.start/],
+  ["Linux with empty WSL_DISTRO_NAME", "linux", { WSL_DISTRO_NAME: "" }, "~/.local/share/rancher-desktop/lima/_config/override.yaml", /Library|wicked-pids\.start/],
+  ["WSL2", "linux", { WSL_DISTRO_NAME: "Ubuntu" }, "%LOCALAPPDATA%\\rancher-desktop\\provisioning", /override\.yaml/],
+]) for (const state of ["pids_unlimited", "pids_unreadable"]) test(`${state} remedy uses the ${name} provisioning recipe (#68)`, { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl");
+  const c = ctxOf(sb, { pids: -1, pidsUnreadable: state === "pids_unreadable" });
+  const r = checkKubernetes({ ...c, platform, env: { ...sb.env, ...env } });
+  assert.equal(r.state, state);
+  assertPidsRecipe(r.remedy);
+  assert.ok(r.remedy.includes(path), r.remedy);
+  assert.doesNotMatch(r.remedy, excluded);
+  if (name === "WSL2") {
+    assert.match(r.remedy, /wicked-pids\.start/);
+    assert.match(r.remedy, /Unix line endings/);
+    assert.match(r.remedy, /WSL shell/);
+  } else {
+    assert.match(r.remedy, /provision/);
+    assert.match(r.remedy, /mode: system/);
+  }
+});
+
+test("win32 process-limit recipe uses the Windows provisioning folder (#68)", () => {
+  const text = pidsFix({}, "win32");
+  assertPidsRecipe(text);
+  assert.ok(text.includes("%LOCALAPPDATA%\\rancher-desktop\\provisioning"), text);
+  assert.match(text, /wicked-pids\.start/);
+  assert.match(text, /Unix line endings/);
+  assert.match(text, /WSL shell/);
+  assert.doesNotMatch(text, /override\.yaml/);
 });
 
 test("--dry-run spawns nothing: kubectl found reads met but unverified, home spelled ~", { skip }, (t) => {
@@ -413,7 +482,10 @@ test("codex r2 folds: a remote proxy, a merged KUBECONFIG, an exit that contradi
   const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core");
   assert.equal(checkKubernetes(ctxOf(sb, { proxy: "http://proxy.corp:3128", pids: 4096 })).state, "not_local");
   const two = { ...sb.env, KUBECONFIG: [join(sb.tmp, "a"), join(sb.tmp, "b")].join(":") };
-  assert.equal(checkKubernetes({ ...ctxOf(sb, { pids: 4096 }), env: two }).state, "config_unreadable");
+  const merged = checkKubernetes({ ...ctxOf(sb, { pids: 4096 }), env: two });
+  assert.equal(merged.state, "config_unreadable");
+  assert.match(merged.remedy, /Rancher Desktop/);
+  assert.doesNotMatch(merged.remedy, /Docker Desktop/);
   // "not configured" printed with exit 0, or "installed" printed by a failed process: never trusted.
   assert.equal(checkKubernetes(ctxOf(sb, { pids: 4096, status: JSON.stringify({ configured: false, reachable: false }), statusExit: 0 })).state, "engine_unanswered");
   assert.equal(checkKubernetes(ctxOf(sb, { pids: 4096, status: JSON.stringify({ configured: true, reachable: true, controller: { ready: true } }), statusExit: 1 })).state, "engine_unanswered");

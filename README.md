@@ -144,9 +144,9 @@ while `uv`, wicked-estate or wicked-garden is still missing.
 
 ### wicked-crew: local Kubernetes
 
-Crew's governed seats run as pods on a local Kubernetes cluster (Rancher Desktop, or Docker Desktop with
-Kubernetes on). The readiness check's `kubernetes` need reads kubectl, a local context (`rancher-desktop`, then
-`docker-desktop`, or `WICKED_K8S_ADMIN_CONTEXT`; never the current context), the kubelet's pod process limit
+Crew's governed seats run as pods on a local Kubernetes cluster: Rancher Desktop. Docker Desktop's Kubernetes
+can't set the pod process limit crew needs. The readiness check's `kubernetes` need reads kubectl, a local context
+(`rancher-desktop`, then `docker-desktop`, or `WICKED_K8S_ADMIN_CONTEXT`; never the current context), the kubelet's pod process limit
 (4096 or less) and whether crew's part of the cluster is installed. After install, when the cluster can hold
 seats, the installer runs `wicked-core cluster install --admin-context <ctx> --home ~/.wicked-crew` with the
 engine crew carries; the engine proves the pod process limit and NetworkPolicy enforcement and refuses a cluster
