@@ -389,8 +389,12 @@ function dockerRuntimeDiagnostic(core: string, t: Target, ctx: KubeCtx): string 
   const shown = `docker CLI at \`${publicPath(docker, env, platform)}\``;
   const context = current ? `current context \`${publicDiagnostic(current, env, platform)}\`${endpoint ? ` (${publicDiagnostic(endpoint, env, platform)})` : ""}` : "";
   if (t.context === "rancher-desktop" && current && (current !== "rancher-desktop" || unset !== "") && contexts !== null) {
+    const bin = dirname(docker);
+    const rdSocket = join(dirname(bin), "docker.sock");
+    const host = existsSync(join(homeOf(env, platform), ".rd", "docker.sock")) ? '"host=unix://$HOME/.rd/docker.sock"'
+      : platform !== "win32" && basename(bin) === "bin" && basename(dirname(bin)) === ".rd" && existsSync(rdSocket) ? shellWord(`host=unix://${rdSocket}`, platform) : null;
     const remedy = lines(contexts).includes("rancher-desktop") ? `${command} context use rancher-desktop`
-      : existsSync(join(homeOf(env, platform), ".rd", "docker.sock")) ? `${command} context create rancher-desktop --docker "host=unix://$HOME/.rd/docker.sock" && ${command} context use rancher-desktop` : null;
+      : host !== null ? `${command} context create rancher-desktop --docker ${host} && ${command} context use rancher-desktop` : null;
     if (remedy !== null) return `Rancher Desktop's Kubernetes answers, but wicked-core could not reach its engine to build crew's images. The ${shown} reports ${context}.${overrides}\nRun: \`${unset}${remedy}\`, then run the installer again${unset !== "" ? " in the same shell" : ""}.`;
   }
   return `The ${shown}${context ? ` with ${context}` : ""} was tried, but its engine did not answer.${overrides}\nStart the runtime, then run the installer again.\nRun: \`${installCommand(core, t, env, platform)}\`.`;
