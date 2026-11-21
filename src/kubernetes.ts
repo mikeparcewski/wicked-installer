@@ -70,7 +70,7 @@ export function pidsFix(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): stri
   const script = platform === "win32" || (platform === "linux" && (env.WSL_DISTRO_NAME ?? "") !== "")
     ? "create a wicked-pids.start script in %LOCALAPPDATA%\\rancher-desktop\\provisioning from the WSL shell with Unix line endings"
     : `add a provision script entry (mode: system) in ${platform === "darwin" ? "~/Library/Application Support" : "~/.local/share"}/rancher-desktop/lima/_config/override.yaml`;
-  return `set the kubelet's pod-max-pids to ${PODS_PIDS_MAX}: ${script} to write /etc/rancher/k3s/config.yaml with \`kubelet-arg: ["pod-max-pids=${PODS_PIDS_MAX}"]\`; then quit and restart Rancher Desktop. For full commands, see "Limit processes per pod" in the install guide: https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md`;
+  return `set the kubelet's pod-max-pids to ${PODS_PIDS_MAX}: ${script} to write /etc/rancher/k3s/config.yaml.d/wicked-pids.yaml with \`kubelet-arg+: ["pod-max-pids=${PODS_PIDS_MAX}"]\`; then quit and restart Rancher Desktop. For full commands, see "Limit processes per pod" in the install guide: https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md`;
 }
 
 export function defaultSpawn(baseEnv: NodeJS.ProcessEnv): Spawn {

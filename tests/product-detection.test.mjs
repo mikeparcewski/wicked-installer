@@ -265,3 +265,19 @@ test("detectClis: a --version probe that times out is reported as such, never si
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("#64: status detects Antigravity from the picker's agy and Gemini signals", { skip: process.platform === "win32" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wi-antigravity-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  mkdirSync(join(home, ".gemini"));
+  writeFileSync(join(home, ".gemini", "settings.json"), "{}");
+  writeFileSync(join(bin, "agy"), "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+  const script = `import { detectCli, detectClis } from "./dist/detector.js"; console.log(JSON.stringify({ picker: detectCli("antigravity"), status: detectClis() }));`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: root, env: { HOME: home, USERPROFILE: home, PATH: bin }, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const got = JSON.parse(r.stdout);
+  assert.equal(got.picker.detected, true);
+  assert.ok(got.status.some((cli) => cli.id === "antigravity"));
+});

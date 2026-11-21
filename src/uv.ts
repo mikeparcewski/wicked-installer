@@ -60,6 +60,15 @@ export function uvInstallCommand(platform: NodeJS.Platform = process.platform, e
 
 type SpawnLike = (cmd: string, args: string[] | undefined, options: SpawnSyncOptions) => { status: number | null; error?: Error };
 
+/** Inside garden's supported Python range (>=3.10,<3.15). */
+export const UV_PYTHON = "3.12";
+
+/** Explicitly confirmed default-interpreter change; argv and inherited output stay behind a seam. */
+export function runUvPythonInstaller(uv: string, env: NodeJS.ProcessEnv, spawn: (cmd: string, args: string[], opts: SpawnSyncOptions) => { status: number | null; error?: Error } = spawnSync): { status: number | null; error?: string } {
+  const result = spawn(uv, ["python", "install", UV_PYTHON, "--default", "--preview"], { env, stdio: "inherit" });
+  return { status: result.status, error: result.error?.message };
+}
+
 /**
  * Run astral's documented command so the user sees its output. On Windows PowerShell receives the
  * script as one argument (no cmd.exe quoting); on POSIX the documented pipe runs through sh.

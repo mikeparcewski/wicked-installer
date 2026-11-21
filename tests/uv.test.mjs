@@ -225,3 +225,15 @@ test("dispatch returns 1 before launching any per-CLI script when uv is absent o
   assert.doesNotMatch(result.stderr, /must-not-run|MODULE_NOT_FOUND/);
   assert.doesNotMatch(result.stdout, /Installing into/);
 });
+
+test("#64: Python installer passes the exact argv with inherited stdio through a seam", async () => {
+  const { runUvPythonInstaller } = await import("../dist/uv.js");
+  const calls = [];
+  const env = { PATH: "isolated" };
+  const result = runUvPythonInstaller("/uv path/uv", env, (cmd, args, options) => {
+    calls.push({ cmd, args, options });
+    return { status: 0 };
+  });
+  assert.equal(result.status, 0);
+  assert.deepEqual(calls, [{ cmd: "/uv path/uv", args: ["python", "install", "3.12", "--default", "--preview"], options: { env, stdio: "inherit" } }]);
+});

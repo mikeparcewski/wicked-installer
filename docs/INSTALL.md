@@ -21,6 +21,8 @@ You're responsible for your environment and your AI usage. You choose where it r
 
 One installer command installs Wicked Crew: the daemon, the bundled Studio UI and the tools it uses. You then start the daemon with `wicked-crew serve` and open Studio in your browser at http://127.0.0.1:7701.
 
+The installer also prints "Run /wicked-garden-core setup in Claude Code to complete configuration". That step is for using Wicked Garden in your own Claude Code sessions; Wicked Crew doesn't need it.
+
 | | |
 |---|---|
 | Installer | `wicked-installer` |
@@ -72,7 +74,7 @@ About 20 minutes on a Mac with Homebrew.
 brew install node@22 python@3.12 uv git gh
 brew link --overwrite node@22
 PY312="$(brew --prefix python@3.12)/libexec/bin"
-echo "export PATH=\"$PY312:\$PATH\"" >> ~/.zprofile
+grep -qsF "export PATH=\"$PY312:\$PATH\"" ~/.zprofile || echo "export PATH=\"$PY312:\$PATH\"" >> ~/.zprofile
 export PATH="$PY312:$PATH"
 python3 --version
 npm install -g @anthropic-ai/claude-code @openai/codex
@@ -81,7 +83,8 @@ git config --global user.email "you@example.com"
 gh auth login
 ```
 
-- `python3 --version` must print 3.10 or newer (Homebrew's 3.12). Homebrew puts only `python3.12` in its main `bin` directory (its `python3` is in `python@3.12/libexec/bin`), and macOS's own `python3` is older, so the `PY312` lines put Homebrew's `python3` first on your PATH, now and in every new Terminal window.
+- `python3 --version` must print 3.10 or newer (Homebrew's 3.12). Homebrew puts only `python3.12` in its main `bin` directory (its `python3` is in `python@3.12/libexec/bin`), and macOS's own `python3` is older, so the `PY312` lines put Homebrew's `python3` first on your PATH, now and in new Terminal windows. Running the lines again doesn't add the line twice.
+- `~/.zprofile` is read by zsh, macOS's default shell, when it starts as a login shell, which is how Terminal opens new windows. A terminal app that starts a non-login zsh reads only `~/.zshrc`. If `python3 --version` prints the old version there, add the same `export PATH=…` line to `~/.zshrc`.
 - Put your own name and email in the two `git config` lines. Delivered jobs commit with them. Skip them if `git config user.email` already prints the right address.
 - `gh auth login` signs GitHub CLI in to your account. Follow its prompts and choose to log in with a web browser.
 
@@ -97,7 +100,7 @@ Install [Rancher Desktop](https://rancherdesktop.io/) and change these settings 
 
 ### 3. Limit processes per pod
 
-Run this once, after Rancher Desktop has started at least once. It adds a startup script that sets the kubelet's `pod-max-pids` to 4096. If you already have an `override.yaml`, add the `provision` entry to it instead of replacing the file. The script writes `/etc/rancher/k3s/config.yaml` inside Rancher Desktop's VM: if you already keep your own settings in that file, don't run this script: add `pod-max-pids=4096` to that file's `kubelet-arg` list instead (add the two `kubelet-arg` lines only if the file has no `kubelet-arg` key yet).
+Run this once, after Rancher Desktop has started at least once. It adds a startup script that sets the kubelet's `pod-max-pids` to 4096. If you already have an `override.yaml`, add the `provision` entry to it instead of replacing the file. The script writes `/etc/rancher/k3s/config.yaml.d/wicked-pids.yaml` inside Rancher Desktop's VM. k3s merges that file with `config.yaml` and adds its `kubelet-arg` entry to any you already have there, so your own settings stay.
 
 ```bash
 mkdir -p ~/Library/Application\ Support/rancher-desktop/lima/_config
@@ -106,9 +109,9 @@ provision:
 - mode: system
   script: |
     #!/bin/sh
-    mkdir -p /etc/rancher/k3s
-    cat > /etc/rancher/k3s/config.yaml <<'K3S'
-    kubelet-arg:
+    mkdir -p /etc/rancher/k3s/config.yaml.d
+    cat > /etc/rancher/k3s/config.yaml.d/wicked-pids.yaml <<'K3S'
+    kubelet-arg+:
       - "pod-max-pids=4096"
     K3S
 EOF
@@ -127,7 +130,7 @@ One node should show `Ready`, and the second command should print `4096`.
 
 ```bash
 npx -y wicked-installer@latest install wicked-crew wicked-interactive
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
+grep -qsF 'export PATH="$HOME/.local/bin:$PATH"' ~/.zprofile || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -192,16 +195,16 @@ On Windows, install [Rancher Desktop](https://rancherdesktop.io/) and change the
 
 ### 4. Limit processes per pod
 
-Run this once, after Rancher Desktop has started at least once. It adds a startup script to Rancher Desktop's provisioning folder that sets the kubelet's `pod-max-pids` to 4096. Writing it from Ubuntu keeps the Unix line endings Rancher Desktop needs. The script writes `/etc/rancher/k3s/config.yaml` inside Rancher Desktop's VM: if you already keep your own settings in that file, don't run this script: add `pod-max-pids=4096` to that file's `kubelet-arg` list instead (add the two `kubelet-arg` lines only if the file has no `kubelet-arg` key yet).
+Run this once, after Rancher Desktop has started at least once. It adds a startup script to Rancher Desktop's provisioning folder that sets the kubelet's `pod-max-pids` to 4096. Writing it from Ubuntu keeps the Unix line endings Rancher Desktop needs. The script writes `/etc/rancher/k3s/config.yaml.d/wicked-pids.yaml` inside Rancher Desktop's VM. k3s merges that file with `config.yaml` and adds its `kubelet-arg` entry to any you already have there, so your own settings stay.
 
 ```bash
 RDP="$(wslpath "$(wslvar LOCALAPPDATA | tr -d '\r')")/rancher-desktop/provisioning"
 mkdir -p "$RDP"
 cat > "$RDP/wicked-pids.start" <<'EOF'
 #!/bin/sh
-mkdir -p /etc/rancher/k3s
-cat > /etc/rancher/k3s/config.yaml <<'K3S'
-kubelet-arg:
+mkdir -p /etc/rancher/k3s/config.yaml.d
+cat > /etc/rancher/k3s/config.yaml.d/wicked-pids.yaml <<'K3S'
+kubelet-arg+:
   - "pod-max-pids=4096"
 K3S
 EOF
@@ -232,12 +235,13 @@ One node should show `Ready`, and the second command should print `4096`.
 
 ### 6. Install and start
 
+The installer puts `wicked-estate` (and other tools) in `~/.local/bin`. Ubuntu's own `~/.profile` adds that folder to PATH in every new Ubuntu terminal once it exists; the `export` line below adds it to this one. `wicked-crew serve` keeps running in this window.
+
 ```bash
 npx -y wicked-installer@latest install wicked-crew wicked-interactive
+export PATH="$HOME/.local/bin:$PATH"
 wicked-crew serve
 ```
-
-Ubuntu's own `~/.profile` adds `~/.local/bin` to PATH once it exists, so open a new Ubuntu terminal after the installer (or run `export PATH="$HOME/.local/bin:$PATH"`).
 
 The installer sets up crew's part of the cluster. Its readiness list should show local Kubernetes ready. If it says "no kubeconfig defines a local context (rancher-desktop or docker-desktop)", go back to step 5 until `kubectl --context rancher-desktop get nodes` shows `Ready`, then run the installer again. Don't set the fallback variables from [Troubleshooting](#fallbacks-when-the-containers-wont-work) unless the main path fails.
 

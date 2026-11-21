@@ -19,7 +19,7 @@ import { prepareClaudeSpawn, probeOnPath } from "./claude-plugin.js";
 import type { Capability, CapabilityNeed, Product } from "./types.js";
 import { dirname } from "node:path";
 import { findInstalledBinary, pathFix } from "./release-binary.js";
-import { findUv, uvInstallCommand } from "./uv.js";
+import { findUv, uvInstallCommand, UV_PYTHON } from "./uv.js";
 import { checkKubernetes, defaultSpawn as kubeDefaultSpawn, type Spawn as KubeSpawn } from "./kubernetes.js";
 import { CREW_FINDS_INSTALLER_LOCATIONS, crewEnv, crewKnowsInstallerLocations, findGardenForCrew, homeOf, isCrewGardenHit } from "./crew-garden.js";
 
@@ -215,24 +215,37 @@ function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): Nee
     : { need: label, met: false, detail: `not on PATH, and the \`npx ${need.npx}\` fallback cannot resolve it: ${npx.detail}`, remedy: `${install} once online` };
 }
 
-function checkPython(need: Extract<CapabilityNeed, { kind: "python" }>, ctx: Ctx): NeedResult {
-  const label = `python >= ${need.min}`;
+/** The same PATH interpreter check serves readiness and the interactive Python offer. */
+export function probePython(min: string, opts: Pick<PreflightOptions, "env" | "platform" | "probeOnly" | "spawn"> = {}): NeedResult & { versions: Record<string, string> } {
+  const env = opts.env ?? process.env;
+  const platform = opts.platform ?? process.platform;
+  const spawn = opts.spawn ?? defaultSpawn(env, platform);
+  const label = `python >= ${min}`;
   // The launcher's own ladder after .venv/uv: python3 → python → py -3 (Windows only).
   const candidates: Array<[string, string[]]> = [["python3", []], ["python", []]];
-  if (ctx.platform === "win32") candidates.push(["py", ["-3"]]);
+  if (platform === "win32") candidates.push(["py", ["-3"]]);
   const seen: string[] = [];
+  const versions: Record<string, string> = {};
   for (const [name, pre] of candidates) {
-    const probe = probeOnPath(name, ctx.env, ctx.platform);
+    const probe = probeOnPath(name, env, platform);
     if (probe.state !== "found") continue;
-    if (ctx.probeOnly) return { need: label, met: true, verified: false, detail: `${name} on PATH (${probe.path}); version not checked under --dry-run` };
-    const res = ctx.spawn(probe.path, [...pre, "--version"]);
+    if (opts.probeOnly) return { need: label, met: true, verified: false, detail: `${name} on PATH (${probe.path}); version not checked under --dry-run`, versions };
+    const res = spawn(probe.path, [...pre, "--version"]);
     const version = firstLine(`${res.stdout}\n${res.stderr}`.trim());
-    if (res.status === 0 && versionAtLeast(version, need.min)) {
-      return { need: label, met: true, detail: `${name}${pre.length ? ` ${pre.join(" ")}` : ""}: ${version}` };
+    versions[name] = res.status === 0 ? version || "no version" : res.error ?? `exit ${res.status ?? "?"}`;
+    if (res.status === 0 && versionAtLeast(version, min)) {
+      return { need: label, met: true, detail: `${name}${pre.length ? ` ${pre.join(" ")}` : ""}: ${version}`, versions };
     }
-    seen.push(`${name}: ${res.status === 0 ? version || "no version" : res.error ?? `exit ${res.status ?? "?"}`}`);
+    seen.push(`${name}: ${versions[name]}`);
   }
-  const none = seen.length > 0 ? `no interpreter at or above ${need.min} (${seen.join("; ")})` : "no python3 / python on PATH";
+  return { need: label, met: false, detail: seen.length > 0 ? `no interpreter at or above ${min} (${seen.join("; ")})` : "no python3 / python on PATH", versions };
+}
+
+function checkPython(need: Extract<CapabilityNeed, { kind: "python" }>, ctx: Ctx): NeedResult {
+  const { versions, ...python } = probePython(need.min, ctx);
+  if (python.met) return python;
+  const label = python.need;
+  const none = python.detail;
   // first-run-2 N2: name a real command. uv is the one mechanism: garden's launcher runs scripts
   // with a uv-managed Python when uv is on PATH; a host that calls python3 itself (Claude Code's
   // hooks) gets a uv-managed python3 installed as the default.
@@ -240,11 +253,11 @@ function checkPython(need: Extract<CapabilityNeed, { kind: "python" }>, ctx: Ctx
   if (need.launcher && uv?.onPath) {
     // The launcher's rung is `uv run --project <root> --frozen --no-dev python`: it needs a uv that answers and
     // knows those flags (uv >= UV_MIN); garden's npm package and plugin copies ship the uv.lock that rung reads.
-    if (ctx.probeOnly) return { need: label, met: true, verified: false, detail: `${none}; uv at ${uv.path} is on PATH (version not checked under --dry-run)` };
+    if (ctx.probeOnly) return { need: label, met: true, verified: false, detail: `uv-managed Python ${need.min}+ for garden's scripts: uv at ${uv.path} is on PATH; garden's launcher uses it (versions not checked under --dry-run; uv downloads Python at first use)` };
     const res = ctx.spawn(uv.path, ["--version"]);
     const version = firstLine(`${res.stdout}\n${res.stderr}`.trim());
     if (res.status === 0 && versionAtLeast(version, UV_MIN)) {
-      return { need: label, met: true, detail: `${none}; ${version} at ${uv.path} is on PATH, so garden's launcher runs scripts with a uv-managed Python ${need.min}+ (uv downloads it at first use)` };
+      return { need: label, met: true, detail: `uv-managed Python ${need.min}+ for garden's scripts: ${version} at ${uv.path} is on PATH and garden's launcher runs scripts with it (uv downloads it at first use); python3 on PATH is ${versions.python3 ?? "absent"}` };
     }
     return { need: label, met: false, detail: `${none}; uv at ${uv.path} ${res.status === 0 ? `is ${version || "of an unknown version"}, older than ${UV_MIN}` : "did not answer --version"}`, remedy: "run `uv self update` (or reinstall uv)" };
   }
@@ -266,8 +279,6 @@ function checkPython(need: Extract<CapabilityNeed, { kind: "python" }>, ctx: Ctx
   return { need: label, met: false, detail: none, remedy };
 }
 
-/** The Python a remedy asks uv for: inside garden's `requires-python` (>=3.10,<3.15). */
-const UV_PYTHON = "3.12";
 /** The oldest uv whose `uv run` takes `--frozen --no-dev` and downloads a managed Python on demand. */
 const UV_MIN = "0.5.0";
 
