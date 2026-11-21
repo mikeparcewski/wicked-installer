@@ -965,6 +965,7 @@ function printHelp(): void {
     "  wicked-installer pack <verb>     Third-party skill packs (add/remove/list/check)",
     "  wicked-installer mcp upsert|remove <key>  Write/remove one MCP server in your CLIs' MCP configs (`mcp --help`)",
     "  wicked-installer cleanup-legacy  Remove legacy unregistered wicked-garden copies whose ownership is proven",
+    "  wicked-installer uninstall <ids...> | --all  Remove host integrations (--cli, --dry-run, --json, --<cli>-home)",
     "  wicked-installer status          Show detected CLIs, installed products, readiness, and where wicked-garden is installed (per host)",
     "  wicked-installer --version       Show version",
     "",
@@ -1033,6 +1034,10 @@ async function main(): Promise<void> {
     const { runMcpVerb } = await import("./mcp-verb.js");
     process.exit(await runMcpVerb(argv.slice(1)));
   }
+  if (argv[0] === "uninstall") {
+    const { runUninstallVerb } = await import("./uninstall-verb.js");
+    process.exit(await runUninstallVerb(argv.slice(1)));
+  }
   if (argv[0] === "cleanup-legacy") {
     const { runCleanupLegacy } = await import("./legacy-cleanup.js");
     process.exit(await runCleanupLegacy(argv.slice(1)));
@@ -1077,18 +1082,6 @@ async function main(): Promise<void> {
       process.exit(await runPack(argv.slice(packIdx + 1)));
       break;
     }
-    case "uninstall":
-      // There is no central uninstall yet (wicked-installer#49). Refuse plainly: this verb used to
-      // fall through to the interactive INSTALL picker.
-      console.error(chalk.red("wicked-installer has no central `uninstall` yet (wicked-installer#49) — nothing was installed, removed or changed."));
-      console.error([
-        "  Claude Code:  claude plugin uninstall wicked-garden@wicked-garden   (the garden plugin)",
-        `                node ${join(__dirname, "install-claude.js")} uninstall --all   (what install-claude put into the config dir)`,
-        "  Skill packs:  wicked-installer pack remove <name>",
-        "  Codex, OpenCode, Pi, Antigravity: no uninstall yet; each host's <home>/wicked-installer/<cli>-install.json lists what was installed.",
-      ].join("\n"));
-      process.exit(1);
-      break;
     case undefined:
       await runInteractive(flags);
       break;

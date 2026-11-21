@@ -44,6 +44,7 @@ function sandbox() {
   const bin = join(tmp, "bin");
   mkdirSync(home);
   mkdirSync(bin);
+  symlinkSync(process.execPath, join(bin, "node"));
   mkdirSync(join(srcRoot, "wicked-vault"), { recursive: true });
   writeFileSync(join(srcRoot, "wicked-vault", "package.json"), JSON.stringify({ name: "wicked-vault", version: "0.0.0-test" }));
   if (POSIX) {
@@ -55,7 +56,7 @@ function sandbox() {
 }
 
 function runScript(sb, args, { claude = true, env: extra = {} } = {}) {
-  const env = { PATH: dirname(process.execPath), HOME: sb.home, USERPROFILE: sb.home, CLAUDE_STUB_LOG: sb.stubLog, ...extra };
+  const env = { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CLAUDE_STUB_LOG: sb.stubLog, ...extra };
   if (claude) env.WICKED_CLAUDE_BIN = STUB;
   return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8", env, timeout: 120_000 });
 }
@@ -348,9 +349,9 @@ async function dispatch(sb, productIds, flags, { claude = true, env: extra = {} 
   const logs = [];
   const origLog = console.log;
   console.log = (...a) => logs.push(a.join(" "));
-  for (const k of ["WICKED_CLAUDE_BIN", "CLAUDE_CONFIG_DIR", "CLAUDE_STUB_FAIL"]) delete process.env[k];
+  for (const k of ["WICKED_CLAUDE_BIN", "CLAUDE_CONFIG_DIR", "CLAUDE_STUB_FAIL", "CODEX_HOME", "GEMINI_HOME", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]) delete process.env[k];
   Object.assign(process.env, {
-    PATH: `${sb.bin}:${dirname(process.execPath)}`,
+    PATH: `${sb.bin}:/usr/bin:/bin`,
     HOME: sb.home,
     USERPROFILE: sb.home,
     CLAUDE_CONFIG_DIR: sb.cfg,
@@ -1121,8 +1122,8 @@ test("dispatch: without a Claude target the Claude-specific preflight does not r
     const logs = [];
     const origLog = console.log;
     console.log = (...a) => logs.push(a.join(" "));
-    for (const k of ["WICKED_CLAUDE_BIN", "CLAUDE_STUB_FAIL"]) delete process.env[k];
-    Object.assign(process.env, { PATH: `${sb.bin}:${dirname(process.execPath)}`, HOME: sb.home, USERPROFILE: sb.home, CLAUDE_CONFIG_DIR: "", FAKE_NPM_LOG: sb.npmLog, WICKED_SOURCE_ROOT: sb.srcRoot });
+    for (const k of ["WICKED_CLAUDE_BIN", "CLAUDE_STUB_FAIL", "CODEX_HOME", "GEMINI_HOME", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]) delete process.env[k];
+    Object.assign(process.env, { PATH: `${sb.bin}:/usr/bin:/bin`, HOME: sb.home, USERPROFILE: sb.home, CLAUDE_CONFIG_DIR: "", FAKE_NPM_LOG: sb.npmLog, WICKED_SOURCE_ROOT: sb.srcRoot });
     let out;
     try {
       await indexModule.dispatchToClis([codex], ["wicked-garden"], { dryRun: false, force: false, claudeHomes: [], offline: true });

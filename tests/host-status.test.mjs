@@ -17,7 +17,7 @@ const CLI = join(ROOT, "dist", "index.js");
 
 function run(args, home, extraEnv = {}) {
   const env = { ...process.env, HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1", FORCE_COLOR: "0", ...extraEnv };
-  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG"]) if (!(k in extraEnv)) delete env[k];
+  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_HOME", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]) if (!(k in extraEnv)) delete env[k];
   const r = spawnSync(process.execPath, args, { encoding: "utf8", env, timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] });
   r.out = `${r.stdout}${r.stderr}`;
   return r;
@@ -258,15 +258,15 @@ test("status: garden on no host at all exits 1 and says so", () => {
 });
 
 for (const cli of ["codex", "opencode", "pi", "antigravity"]) {
-  test(`#49: install-${cli}.js uninstall --all refuses — it never plans or runs an install`, () => {
+  test(`#49: install-${cli}.js uninstall --all without a marker reports absent`, () => {
     const home = fresh();
     try {
       const script = join(ROOT, "dist", `install-${cli}.js`);
       const r = run([script, "uninstall", "--all", "--dry-run", "--json"], home);
-      assert.equal(r.status, 1, r.out);
-      assert.match(r.stderr, new RegExp(`install-${cli}\\.js: \`uninstall\` is not supported by this script yet .* nothing was installed, removed or changed`));
+      assert.equal(r.status, 2, r.out);
       assert.doesNotMatch(r.out, /npm install|cargo install|dry-run: /, "no install plan");
-      assert.deepEqual(JSON.parse(r.stdout.trim().split("\n").pop()), { verb: "uninstall", supported: false, reports: [] });
+      assert.equal(JSON.parse(r.stdout).verb, "uninstall");
+      assert.deepEqual(JSON.parse(r.stdout).reports, []);
       assert.deepEqual(readdirSync(home), [], "nothing written to HOME");
 
       const st = run([script, "status"], home);
@@ -278,13 +278,12 @@ for (const cli of ["codex", "opencode", "pi", "antigravity"]) {
   });
 }
 
-test("#49: the central `uninstall` and unknown commands refuse instead of opening the install picker", () => {
+test("#49: the central `uninstall` reports absent hosts and unknown commands refuse", () => {
   const home = fresh();
   try {
     const u = run([CLI, "uninstall", "--all"], home);
-    assert.equal(u.status, 1, u.out);
-    assert.match(u.stderr, /no central `uninstall` yet .* nothing was installed, removed or changed/);
-    assert.match(u.stderr, /install-claude\.js uninstall --all/);
+    assert.equal(u.status, 0, u.out);
+    assert.match(u.out, /not installed on/);
     const x = run([CLI, "install-opencode", "wicked-garden", "--dry-run"], home);
     assert.equal(x.status, 1, x.out);
     assert.match(x.stderr, /Unknown command: install-opencode/);

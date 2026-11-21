@@ -107,7 +107,7 @@ function sandbox() {
   const work = join(tmp, "work");
   mkdirSync(work);
   const env = { ...process.env, HOME: home, USERPROFILE: home, PATH: [bin, "/usr/bin", "/bin"].join(POSIX ? ":" : ";"), STUB_LOG: log };
-  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_CONFIG", "GEMINI_HOME", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME"]) delete env[k];
+  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_CONFIG", "GEMINI_HOME", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]) delete env[k];
   const claudeHome = join(tmp, "claude-home");
   return {
     tmp,
@@ -268,11 +268,11 @@ test("claude: status and uninstall --all see the synthetic mcp-server:<key> prod
   try {
     upsertClaude(sb);
     const script = join(ROOT, "dist", "install-claude.js");
-    const st = spawnSync(process.execPath, [script, "status", "--all", "--claude-home", sb.claudeHome, "--json"], { encoding: "utf8", env: { ...process.env, HOME: sb.home } });
+    const st = spawnSync(process.execPath, [script, "status", "--all", "--claude-home", sb.claudeHome, "--json"], { encoding: "utf8", env: sb.env });
     assert.equal(st.status, 0, st.stderr);
     const ids = JSON.parse(st.stdout).reports.map((r) => r.productId);
     assert.ok(ids.includes(`mcp-server:${KEY}`), ids.join(","));
-    const un = spawnSync(process.execPath, [script, "uninstall", "--all", "--claude-home", sb.claudeHome, "--json"], { encoding: "utf8", env: { ...process.env, HOME: sb.home } });
+    const un = spawnSync(process.execPath, [script, "uninstall", "--all", "--claude-home", sb.claudeHome, "--json"], { encoding: "utf8", env: sb.env });
     assert.equal(un.status, 0, un.stderr);
     assert.equal(JSON.parse(readFileSync(sb.stateFile, "utf8")).mcpServers[KEY], undefined);
   } finally { sb.cleanup(); }

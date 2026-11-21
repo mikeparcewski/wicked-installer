@@ -36,6 +36,7 @@ function sandbox() {
   const bin = join(tmp, "bin");
   mkdirSync(home);
   mkdirSync(bin);
+  symlinkSync(process.execPath, join(bin, "node"));
   for (const name of ["npm", "npx"]) {
     writeFileSync(join(bin, name), `#!/bin/sh\nprintf '%s\\n' "${name} $*" >> "$FAKE_NPM_LOG"\nexit 0\n`, { mode: 0o755 });
   }
@@ -53,7 +54,7 @@ function claudeOnPath(sb) {
  */
 function run(sb, args, { configDir, claude = "seam", env: extra = {} } = {}) {
   const env = {
-    PATH: `${sb.bin}:${dirname(process.execPath)}`,
+    PATH: `${sb.bin}:/usr/bin:/bin`,
     HOME: sb.home,
     USERPROFILE: sb.home,
     CLAUDE_STUB_LOG: sb.stubLog,

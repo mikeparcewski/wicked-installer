@@ -257,6 +257,7 @@ function printHelp(): void {
     "wicked-installer Codex install piece",
     "",
     "Usage:",
+    "  install-codex.js uninstall <ids...> | --all [--dry-run] [--json] [--codex-home <dir>]",
     "  install-codex <product ids...>",
     "  install-codex --products wicked-bus,wicked-estate",
     "  install-codex --all",
@@ -2232,6 +2233,145 @@ function runMcp(argv: string[]): number {
   return e.result === "failed" ? 1 : 0;
 }
 
+interface UninstallReport {
+  productId: string;
+  success: boolean;
+  skipped: boolean;
+  message: string;
+  removed: string[];
+  notes: string[];
+  heuristic?: boolean;
+}
+
+function runUninstall(options: Options): number {
+  const home = options.codexHome;
+  const file = join(home, "wicked-installer", "codex-install.json");
+  const reports: UninstallReport[] = [];
+  const emit = (): void => {
+    if (options.json) console.log(JSON.stringify({ verb: "uninstall", codexHome: home, reports }, null, 2));
+    else if (!reports.length) console.log("not installed on Codex");
+    else for (const r of reports) {
+      console.log(`[${r.success ? "ok" : "failed"}] ${r.message}`);
+      for (const path of r.removed) console.log(`  removed ${path}`);
+      for (const note of r.notes) console.log(`  ${note}`);
+    }
+  };
+  const registry = loadRegistry(options.registryPath);
+  const ids = options.productIds.filter((id) => id !== "uninstall");
+  const unknown = ids.filter((id) => !registry.products.some((p) => p.id === id) && !/^mcp-server:[a-z][a-z0-9-]{0,63}$/.test(id));
+  if (unknown.length || (!ids.length && !options.all)) {
+    console.error(`install-codex.js: ${unknown.length ? `unknown product or unsupported command: ${unknown.join(", ")}` : "uninstall requires <ids...> or --all"}`);
+    return 1;
+  }
+  if (!existsSync(home) || !existsSync(file)) { emit(); return 2; }
+  let body: Record<string, unknown> & { products: Array<Record<string, unknown> & { id: string }> };
+  try {
+    body = JSON.parse(readFileSync(file, "utf8")) as typeof body;
+    if (!body || !Array.isArray(body.products)) throw new Error("products is not an array");
+    if (body.products.some((p) => !p || typeof p.id !== "string")) throw new Error("invalid product entry");
+  } catch (err) {
+    console.error(`cannot read ${file}: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+  const selected = options.all ? body.products.map((p) => p.id) : [...new Set(ids)];
+  const persist = (): void => {
+    if (options.dryRun) return;
+    if (!body.products.length) {
+      rmSync(file);
+      if (!readdirSync(dirname(file)).length) rmSync(dirname(file), { recursive: true });
+    } else {
+      const tmp = `${file}.wicked-tmp-${process.pid}`;
+      writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`);
+      renameSync(tmp, file);
+    }
+  };
+  for (const id of selected) {
+    const entry = body.products.find((p) => p.id === id);
+    const report: UninstallReport = { productId: id, success: true, skipped: !entry, message: entry ? `${id}: uninstalled from Codex` : `${id}: not installed on Codex`, removed: [], notes: [] };
+    reports.push(report);
+    if (!entry) continue;
+    const remove = (path: string, directory: boolean): void => {
+      let stat;
+      try { stat = lstatSync(path); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
+      if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())) {
+        report.notes.push(`${path}: not a ${directory ? "plain directory" : "regular file"}; left in place`);
+        return;
+      }
+      if (options.dryRun) report.notes.push(`would remove ${path}`);
+      else { rmSync(path, { recursive: directory }); report.removed.push(path); }
+    };
+    try {
+      const skillsDir = join(home, "skills");
+      const assets = entry.assets as { skills?: number; hooks?: number } | undefined;
+      const heuristic = !Array.isArray(entry.skills) && (assets?.skills ?? 0) > 0;
+      if (heuristic) report.heuristic = true;
+      const names: unknown[] = Array.isArray(entry.skills) ? entry.skills : heuristic && existsSync(skillsDir) ? readdirSync(skillsDir).filter((n) => n.startsWith(`${id}-`)) : [];
+      for (const name of names) {
+        if (typeof name !== "string" || !name || name.startsWith(".") || /[\\/]/.test(name) || dirname(resolve(skillsDir, name)) !== resolve(skillsDir)) {
+          report.notes.push(`invalid recorded skill name ${JSON.stringify(name)}; left in place`);
+          continue;
+        }
+        const path = join(skillsDir, name);
+        let stat;
+        try { stat = lstatSync(path); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") continue; throw err; }
+        if (!stat.isDirectory() || stat.isSymbolicLink()) { report.notes.push(`${path}: not a plain directory; left in place`); continue; }
+        const skillFile = join(path, "SKILL.md");
+        if (!existsSync(skillFile) || !lstatSync(skillFile).isFile() || sanitizePathPart(readSkillName(path) ?? "") !== name) { report.notes.push(`${path}: changed by hand; left in place`); continue; }
+        remove(path, true);
+      }
+      const plugin = entry.codexPlugin as CodexPluginRecord | undefined;
+      const checkedCall = (args: string[]): void => {
+        if (options.dryRun) { report.notes.push(`would remove via codex ${args.join(" ")}`); return; }
+        const result = codex(args, options);
+        if (result.error || result.status !== 0) throw new Error(`codex ${args.join(" ")} failed: ${result.error ?? result.out.trim().slice(0, 300)}`);
+        report.removed.push(`codex ${args.join(" ")}`);
+      };
+      if (plugin) {
+        const list = codexJson<PluginList>(["plugin", "list", "--json"], options);
+        if (!Array.isArray(list?.installed)) throw new Error("codex plugin list --json failed");
+        if (list.installed.some((p) => p.pluginId === plugin.pluginId && p.installed !== false)) checkedCall(["plugin", "remove", plugin.pluginId]);
+        if (plugin.addedByInstaller === true && !body.products.some((p) => p !== entry && (p.codexPlugin as CodexPluginRecord | undefined)?.marketplace === plugin.marketplace)) {
+          checkedCall(["plugin", "marketplace", "remove", plugin.marketplace]);
+        }
+      }
+      if (id.startsWith("mcp-server:")) {
+        const result = codexMcpEntry({ sub: "remove", key: id.slice("mcp-server:".length), args: [], homes: [home], dryRun: options.dryRun, json: false, force: false });
+        if (result.result === "failed") throw new Error(result.detail);
+        if (result.result === "removed") report.removed.push(result.detail);
+        else report.notes.push(result.detail);
+      } else {
+        const product = registry.products.find((p) => p.id === id);
+        if (product?.type === "mcp-binary") {
+          const state = codexMcpGet(id, options);
+          if (state.state === "error") throw new Error(state.detail);
+          if (state.state === "present") {
+            const binary = product.install.crate ?? product.install.package ?? id;
+            const t = state.transport;
+            const config = join(home, "config.toml");
+            const table = findConfigServerTable(existsSync(config) ? readFileSync(config, "utf8") : "", id);
+            const configTier = typeof table === "object" && "commandLine" in table;
+            if (configTier && t.type === "stdio" && isConfigTier(t) && !isLauncherEntry(t) && basename(t.command ?? "").replace(/\.exe$/i, "") === binary) checkedCall(["mcp", "remove", id]);
+            else report.notes.push(`manual: codex MCP ${id} does not run ${binary} directly at config tier; left in place`);
+          }
+        }
+      }
+      report.notes.push("Binaries are machine-scoped and shared across CLIs; left in place.");
+      body.products = body.products.filter((p) => p !== entry);
+
+      persist();
+      if (options.dryRun) report.message = `${id}: would uninstall from Codex`;
+    } catch (err) {
+      report.success = false;
+      report.message = `${id}: ${err instanceof Error ? err.message : String(err)}`;
+      if (!body.products.includes(entry)) body.products.push(entry);
+      entry.lastFailure = { at: new Date().toISOString(), message: report.message };
+      try { persist(); } catch (writeErr) { report.notes.push(`cannot write ${file}: ${String(writeErr)}`); }
+    }
+  }
+  emit();
+  return reports.some((r) => !r.success) ? 1 : 0;
+}
+
 async function main(): Promise<void> {
   // `mcp` is its own grammar (§12.5), routed before the product parser.
   if (process.argv[2] === "mcp") {
@@ -2240,20 +2380,15 @@ async function main(): Promise<void> {
     return;
   }
   const options = parseArgs(process.argv.slice(2));
-  // The v1.1 verbs (INTERFACE.md §12.2/§12.3) are not implemented here. Refuse them before
-  // anything is resolved: `uninstall --all` used to drop the verb and plan an install of EVERY
-  // product (wicked-installer#49). An uninstall must never install.
-  const verb = options.productIds.find((id) => id === "uninstall" || id === "status");
-  if (verb) {
-    const marker = join(options.codexHome, "wicked-installer", "codex-install.json");
-    console.error(
-      `install-codex.js: \`${verb}\` is not supported by this script yet (wicked-installer#49) — nothing was installed, removed or changed.` +
-      (verb === "uninstall"
-        ? ` What earlier installs put into Codex is recorded in ${marker}; remove those skill directories by hand, then delete the marker.`
-        : ` Run \`npx wicked-installer status\` for what is installed.`),
-    );
-    if (options.json) console.log(JSON.stringify({ verb, supported: false, reports: [] }));
-    process.exit(1);
+  if (options.productIds[0] === "uninstall") {
+    process.exitCode = runUninstall(options);
+    return;
+  }
+  if (options.productIds.includes("status")) {
+    console.error("install-codex.js: `status` is not supported by this script yet; run `wicked-installer status`.");
+    if (options.json) console.log(JSON.stringify({ verb: "status", supported: false, reports: [] }));
+    process.exitCode = 1;
+    return;
   }
   const registry = loadRegistry(options.registryPath);
   // Every positional must be a product id — also with --all, which would otherwise ignore an
