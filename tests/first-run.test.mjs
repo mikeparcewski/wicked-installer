@@ -625,3 +625,68 @@ test("an explicit override whose manifest version is the string 'link' is still 
   writeFileSync(join(dir, ".claude-plugin", "plugin.json"), '{"version":"link"}');
   assert.equal(findGardenForCrew({ ...sb.env, WICKED_CREW_SKILLS_SOURCE: dir }, "linux")?.version, "link");
 });
+
+// #64: every probe, prompt and install uses a seam; fixture executables never run.
+async function pythonOffer(t, changes = {}) {
+  const sb = sandbox(t);
+  const uv = sb.exe(join(sb.home, ".local", "bin"), "uv");
+  sb.exe(sb.bin, "python3");
+  const prompts = [], runs = [], logs = [], probes = [];
+  const { prepareClaudePython } = await import("../dist/index.js");
+  const flags = { interactive: true, dryRun: false, offline: false, force: false, claudeHomes: [], ...changes.flags };
+  if (changes.noUv) rmSync(uv);
+  const products = changes.products ?? [byId["wicked-garden"]];
+  await prepareClaudePython(products, changes.hosts ?? ["claude"], flags, {
+    env: sb.env, platform: "linux",
+    spawn: (bin, args) => { probes.push({ bin, args }); return { status: 0, stdout: changes.version ?? "Python 3.9.6", stderr: "" }; },
+    confirm: async (options) => { prompts.push(options); return changes.confirmed ?? true; },
+    run: (path) => { runs.push(path); if (changes.throws) throw new Error("spawn failed"); return { status: changes.status ?? 0 }; },
+    log: (line) => logs.push(line),
+  });
+  return { uv, prompts, runs, logs, probes };
+}
+
+test("#64: interactive Claude hooks offer installs Python once after confirmation", { skip }, async (t) => {
+  const r = await pythonOffer(t);
+  assert.equal(r.prompts.length, 1);
+  assert.equal(r.prompts[0].default, true);
+  assert.match(r.prompts[0].message, /Claude Code runs wicked-garden's hooks with python3, and .*Python 3\.9\.6/);
+  assert.ok(r.prompts[0].message.includes(`${r.uv} python install 3.12 --default --preview`));
+  assert.deepEqual(r.runs, [r.uv]);
+  assert.ok(r.logs.some((line) => /Installed Python 3\.12/.test(line)));
+});
+
+for (const [name, changes] of [
+  ["Python >= 3.10", { version: "Python 3.10.0" }],
+  ["no uv", { noUv: true }],
+  ["non-interactive", { flags: { interactive: false } }],
+  ["dry-run", { flags: { dryRun: true } }],
+  ["offline", { flags: { offline: true } }],
+  ["no Claude Code", { hosts: ["codex"] }],
+  ["no selected Python capability", { products: [byId["wicked-vault"]] }],
+  ["launcher-only Python", { products: [{ id: "launcher-only", capabilities: [{ hosts: ["claude"], needs: [{ kind: "python", min: "3.10", launcher: true }] }] }] }],
+]) test(`#64: no Python offer for ${name}`, { skip }, async (t) => {
+  const r = await pythonOffer(t, changes);
+  assert.deepEqual(r.prompts, []);
+  assert.deepEqual(r.runs, []);
+  if (["non-interactive", "dry-run", "offline", "no Claude Code"].includes(name)) assert.deepEqual(r.probes, []);
+});
+
+test("#64: declining Python continues without running uv", { skip }, async (t) => {
+  const r = await pythonOffer(t, { confirmed: false });
+  assert.equal(r.prompts.length, 1);
+  assert.deepEqual(r.runs, []);
+});
+
+for (const changes of [{ status: 1 }, { throws: true }]) test(`#64: Python install failure continues and logs its outcome (${JSON.stringify(changes)})`, { skip }, async (t) => {
+  const r = await pythonOffer(t, changes);
+  assert.equal(r.runs.length, 1);
+  assert.ok(r.logs.some((line) => /failed/i.test(line)));
+});
+
+test("#64: status distinguishes installer targets from Crew helpers", { skip }, (t) => {
+  const sb = sandbox(t);
+  const r = spawnSync(process.execPath, [join(root, "dist/index.js"), "status", "--offline", "--dry-run"], { env: sb.env, encoding: "utf8" });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(strip(r.stdout), /Detected CLIs:\n[^\n]*installer adds skills and MCP servers[^\n]*Wicked Crew picks its own helpers[^\n]*Studio under Helpers/);
+});

@@ -344,7 +344,7 @@ const indexModule = await import(join(ROOT, "dist", "index.js"));
 const cliOption = { cli: "claude", displayName: "Claude Code", scriptPath: SCRIPT, detected: true, binOnPath: true, homeDetected: true };
 
 /** Run dispatchToClis in-process with the sandbox env, capturing console output. */
-async function dispatch(sb, productIds, flags, { claude = true, env: extra = {} } = {}) {
+async function dispatch(sb, productIds, flags, { claude = true, env: extra = {}, scriptPath = SCRIPT } = {}) {
   const saved = { ...process.env };
   const logs = [];
   const origLog = console.log;
@@ -362,7 +362,7 @@ async function dispatch(sb, productIds, flags, { claude = true, env: extra = {} 
   });
   if (claude) process.env.WICKED_CLAUDE_BIN = STUB;
   try {
-    const code = await indexModule.dispatchToClis([cliOption], productIds, { dryRun: false, force: false, claudeHomes: [], offline: true, ...flags });
+    const code = await indexModule.dispatchToClis([{ ...cliOption, scriptPath }], productIds, { dryRun: false, force: false, claudeHomes: [], offline: true, ...flags });
     return { code, out: logs.join("\n") };
   } finally {
     console.log = origLog;
@@ -1253,4 +1253,19 @@ test("tryRemoveEmptyDir (direct): outside/root/linked paths are NAMED failed act
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("#64: central Claude registration replaces a script's dependency placeholder in summary and notes", { skip }, async () => {
+  const sb = sandbox();
+  const scriptPath = join(sb.tmp, "placeholder.mjs");
+  writeFileSync(scriptPath, `console.log(JSON.stringify({ reports: [
+    { productId: "wicked-vault", success: true, skipped: false, delivery: "acquired" },
+    { productId: "wicked-garden", success: true, skipped: true, message: "SCRIPT_PLUGIN_PLACEHOLDER" }
+  ] }));`);
+  try {
+    const { code, out } = await dispatch(sb, ["wicked-vault", "wicked-garden"], {}, { scriptPath });
+    assert.equal(code, 0, out);
+    assert.match(out, /^  Wicked Garden +registered *$/m);
+    assert.doesNotMatch(out, /SCRIPT_PLUGIN_PLACEHOLDER/);
+  } finally { cleanup(sb); }
 });

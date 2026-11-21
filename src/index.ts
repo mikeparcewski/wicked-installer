@@ -13,14 +13,14 @@ import type { InstallOptions } from "./installer.js";
 import { promptSelectionMode, promptBundle, promptCustom, promptConfirm, promptClis } from "./ui.js";
 import type { CliOption, UserSelection } from "./ui.js";
 import { listProducts, getProduct } from "./registry.js";
-import type { InstallResult, Product } from "./types.js";
+import type { CapabilityNeed, InstallResult, Product } from "./types.js";
 import { LEGACY_CLEANUP_ISSUE, cacheRoot, claudePluginSpec, describeOrigin, describeVerdict, detectLegacyCopies, expandHome, readRegistration, registrationVerdict, resolveClaudeConfigDirs, resolveMarketplaceSource } from "./claude-plugin.js";
 import type { RegistrationState } from "./claude-plugin.js";
-import { preflight } from "./readiness.js";
+import { preflight, probePython, versionAtLeast } from "./readiness.js";
 import { NON_CLAUDE_HOSTS, hostProductStatus } from "./host-status.js";
 import type { HostProductStatus } from "./host-status.js";
-import type { CapabilityReadiness } from "./readiness.js";
-import { ensureUv } from "./uv.js";
+import type { CapabilityReadiness, PreflightOptions } from "./readiness.js";
+import { ensureUv, findUv, runUvPythonInstaller, UV_PYTHON } from "./uv.js";
 import { ensureClusterForCrew } from "./kubernetes.js";
 import { crewEnv, ensureGardenForCrew } from "./crew-garden.js";
 
@@ -63,6 +63,43 @@ async function prepareUv(productIds: string[], flags: DispatchFlags): Promise<bo
   if (!result.ok) console.error(chalk.red(result.message));
   else if (result.action !== "not-needed") console.log(chalk.dim(result.message));
   return result.ok;
+}
+
+interface PythonOfferOptions extends Pick<PreflightOptions, "env" | "platform" | "spawn"> {
+  confirm?: (options: { message: string; default: boolean }) => Promise<boolean>;
+  run?: (uv: string, env: NodeJS.ProcessEnv) => { status: number | null; error?: string };
+  log?: (line: string) => void;
+}
+
+/** Only the picker may offer to change the default Python that Claude Code's hooks invoke. */
+export async function prepareClaudePython(products: Product[], hosts: string[], flags: DispatchFlags, opts: PythonOfferOptions = {}): Promise<void> {
+  if (!flags.interactive || flags.dryRun || flags.offline || !hosts.includes("claude")) return;
+  const needs = products.flatMap((p) => (p.capabilities ?? [])
+    .filter((c) => !c.hosts || c.hosts.includes("claude"))
+    .flatMap((c) => c.needs))
+    .filter((n): n is Extract<CapabilityNeed, { kind: "python" }> => n.kind === "python" && !n.launcher);
+  if (needs.length === 0) return;
+  const min = needs.reduce((floor, n) => versionAtLeast(n.min, floor) ? n.min : floor, needs[0].min);
+  const env = opts.env ?? process.env;
+  const uv = findUv({ env, platform: opts.platform });
+  if (!uv) return;
+  const python = probePython(min, opts);
+  if (python.met) return;
+  const command = `${uv.path} python install ${UV_PYTHON} --default --preview`;
+  const ask = opts.confirm ?? confirm;
+  const log = opts.log ?? ((line: string) => console.log(chalk.dim(line)));
+  if (!await ask({ message: `Claude Code runs wicked-garden's hooks with python3, and ${python.detail}. Install Python ${UV_PYTHON} with uv now (\`${command}\`)?`, default: true })) {
+    log("Skipped Python installation; readiness will keep its remedy.");
+    return;
+  }
+  try {
+    const result = (opts.run ?? runUvPythonInstaller)(uv.path, env);
+    log(result.status === 0 && !result.error
+      ? `Installed Python ${UV_PYTHON} with uv. Readiness will check Python on PATH.`
+      : `Python installation failed (${result.error ?? `exit ${result.status ?? "?"}`}); continuing to readiness for the remedy.`);
+  } catch (err) {
+    log(`Python installation failed (${err instanceof Error ? err.message : String(err)}); continuing to readiness for the remedy.`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +318,7 @@ export async function dispatchToClis(
   }
 
   if (!await prepareUv(productIds, flags)) return 1;
+  await prepareClaudePython(productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined), clis.map((c) => c.cli), flags);
 
   for (const [index, cli] of clis.entries()) {
     // Binaries are machine-scoped: acquire once (first script), skip thereafter. A Codex-plugin
@@ -297,6 +335,7 @@ export async function dispatchToClis(
     const legacy = cli.cli === "claude" && pluginIds.length > 0 ? reportLegacyCopies(pluginIds, flags) : {};
     const result = forScript.length > 0 ? runCliScript(cli, forScript, flags, skipBinaries, pluginPackages) : presentWithoutScript(cli, flags);
     if (cli.cli === "claude") {
+      result.entries = result.entries.filter((entry) => !pluginIds.includes(entry.productId));
       for (const id of pluginIds) result.entries.push(await registerPluginViaClaude(id, flags, legacy[id] ?? []));
     }
     results.push(result);
@@ -584,6 +623,7 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
     process.exit(1);
   }
   if (!await prepareUv(all.map((p) => p.id), flags)) process.exit(1);
+  await prepareClaudePython(all, ["claude"], flags);
   console.log(chalk.bold(flags.dryRun
     ? "\nDry run (direct) — printing the plan; nothing will be installed or written.\n"
     : "\nInstalling (direct)...\n"));
@@ -871,6 +911,7 @@ async function runStatus(flags: DispatchFlags): Promise<void> {
 
   const clis = detectClis();
   console.log(chalk.bold("Detected CLIs:"));
+  console.log(chalk.dim("  The installer adds skills and MCP servers to these; Wicked Crew picks its own helpers, listed in Studio under Helpers."));
   if (clis.length === 0) {
     console.log(chalk.dim("  none detected"));
   } else {

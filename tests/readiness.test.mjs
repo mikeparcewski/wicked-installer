@@ -247,7 +247,7 @@ test("N2: python3 3.9 + uv on PATH: launcher-run skills are met by uv; Claude's 
     const rows = preflight([LAUNCHED], { hosts: ["codex", "claude"], env: sb.env, platform: "darwin", offline: true });
     const skills = pyNeed(rows, "skill-scripts");
     assert.equal(skills.met, true);
-    assert.match(skills.detail, /uv 0\.13\.7 at .*uv is on PATH, so garden's launcher runs scripts with a uv-managed Python 3\.10\+/);
+    assert.match(skills.detail, /uv 0\.13\.7 at .*uv is on PATH and garden's launcher runs scripts with it/);
     const hooks = pyNeed(rows, "plugin-scripts");
     assert.equal(hooks.met, false);
     assert.match(hooks.remedy, /^run `uv python install 3\.12 --default --preview` \(it puts python3 in uv's bin directory/);
@@ -316,4 +316,18 @@ test("N2 review: an old uv on PATH does not meet the launcher need; the remedy u
   } finally {
     sb.cleanup();
   }
+});
+
+for (const probeOnly of [false, true]) test(`#64: uv-managed Python success leads with what is met (probeOnly=${probeOnly})`, { skip }, () => {
+  const sb = sandbox();
+  try {
+    if (!probeOnly) sb.fake("python3", "Python 3.9.6");
+    sb.fake("uv", "uv 0.13.7");
+    const need = pyNeed(preflight([LAUNCHED], { hosts: ["codex"], env: sb.env, platform: "darwin", offline: true, probeOnly }), "skill-scripts");
+    assert.equal(need.met, true);
+    assert.match(need.detail, /^uv-managed Python 3\.10\+ for garden's scripts:/);
+    assert.doesNotMatch(need.detail, /no interpreter/);
+    if (probeOnly) assert.equal(need.verified, false);
+    else assert.match(need.detail, /python3 on PATH is Python 3\.9\.6/);
+  } finally { sb.cleanup(); }
 });

@@ -93,8 +93,8 @@ for (const [state, world] of [
 function assertPidsRecipe(text) {
   assert.equal(typeof text, "string");
   assert.doesNotMatch(text, /[\r\n]/);
-  assert.ok(text.includes('kubelet-arg: ["pod-max-pids=4096"]'), text);
-  assert.ok(text.includes("/etc/rancher/k3s/config.yaml"), text);
+  assert.ok(text.includes('kubelet-arg+: ["pod-max-pids=4096"]'), text);
+  assert.ok(text.includes("/etc/rancher/k3s/config.yaml.d/wicked-pids.yaml"), text);
   assert.match(text, /quit and restart Rancher Desktop/);
   assert.match(text, /Limit processes per pod/);
   assert.ok(text.includes("https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md"), text);
@@ -539,3 +539,11 @@ test("codex r2 folds: prefixed tokens, password-less userinfo, sanitized names, 
   assert.equal(findKubectl({ PATH: join(sb.tmp, "bin2"), HOME: sb.tmp, WICKED_KUBECTL: "kubectl" }, "linux"), kubectl);
   assert.equal(findKubectl({ PATH: sb.tmp, HOME: sb.tmp, WICKED_KUBECTL: "kubectl" }, "linux"), null);
 });
+
+for (const [platform, env] of [["darwin", {}], ["linux", {}], ["linux", { WSL_DISTRO_NAME: "Ubuntu" }]]) {
+  test(`#70: pidsFix uses the appending drop-in on ${platform} ${env.WSL_DISTRO_NAME ?? ""}`, () => {
+    const remedy = pidsFix(env, platform);
+    assert.ok(remedy.includes('/etc/rancher/k3s/config.yaml.d/wicked-pids.yaml'));
+    assert.ok(remedy.includes('kubelet-arg+: ["pod-max-pids=4096"]'));
+  });
+}

@@ -22,7 +22,7 @@ const CLI_SPECS: CliSpec[] = [
   { id: "kiro",        displayName: "Kiro",          command: "kiro" },
   { id: "cursor",      displayName: "Cursor",        homePath: ".cursor", marker: "mcp.json" },
   { id: "copilot",     displayName: "GitHub Copilot",homePath: ".copilot", marker: "skills" },
-  { id: "antigravity", displayName: "Antigravity",   homePath: ".gemini",  marker: "antigravity-cli" },
+  { id: "antigravity", displayName: "Antigravity" },
   { id: "pi",          displayName: "Pi",            homePath: ".pi",      marker: "agent" },
 ];
 
@@ -59,7 +59,9 @@ export function detectClis(): DetectedCli[] {
     let detected = false;
     let unverified: string | undefined;
 
-    if (spec.command) {
+    if (spec.id === "antigravity") {
+      detected = detectCli("antigravity").detected;
+    } else if (spec.command) {
       // A probe that could not check is surfaced, not dropped: silently omitting a CLI that is
       // present changes what gets installed with nothing reported (#28).
       const probe = commandProbe(spec.command);
