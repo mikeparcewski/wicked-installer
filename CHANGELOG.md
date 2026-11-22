@@ -5,17 +5,52 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-22
+
+Patch release on the train-11 cut cc7bab7a, carrying 7 PRs since 0.10.1: #69, #72, #73, #74, #75, #78, #79. Adds
+`uninstall`, fixes the Kubernetes remedies and the first-run transcript, and ships the install guide. Pairs with
+wicked-crew 0.18.20 (wicked-core-ts 0.15.48).
+
 ### Added
 
 - **Install guide (`docs/INSTALL.md`).** Step-by-step setup for Wicked Crew on macOS and Windows (WSL2): prerequisites,
   the Rancher Desktop cluster with the pod process limit the installer checks, starting the installer and the daemon,
   keeping the daemon running, upgrading, and troubleshooting. Linked from the README's Quick start.
 
+- **`wicked-installer uninstall <ids...> | --all` (#49, #75).** Removes what the installer put into Claude Code,
+  Codex, OpenCode, Pi and Antigravity. The Codex, OpenCode, Pi and Antigravity scripts gain a marker-driven
+  `uninstall` verb. Binaries stay installed.
+
+### Fixed
+
+- **Kubernetes readiness remedies name Rancher Desktop only (#68, #73).** Docker Desktop's Kubernetes cannot set the
+  pod process limit. The pod process limit fix is given for the platform the installer runs on: macOS and Linux
+  (Lima `override.yaml`), WSL2 and Windows (`wicked-pids.start` provisioning script).
+- **A Rancher Desktop docker CLI in another home gets the context remedy (#67, #74).** When the docker CLI on PATH
+  sits in another home (no `~/.rd` here), the "container runtime down" refusal prints a
+  `docker context create rancher-desktop` command pointed at the socket next to that CLI, instead of "Start the
+  runtime" and a retry that fails the same way.
+- **OpenCode install leaves no service running (#54, #75).** It no longer runs `opencode mcp list`, which left
+  `opencode serve --service` running, and it registers with `--global` on opencode 2.x instead of writing
+  `opencode.json` into the current directory.
+- **`CLAUDE_CONFIG_DIR` is honoured (#49, #75).** With it set (including to `~/.claude`), MCP entries go to
+  `$CLAUDE_CONFIG_DIR/.claude.json`, where Claude Code reads them.
+- **First run (#70, #71, #64, #79).** The pod process limit is set through a k3s drop-in
+  (`/etc/rancher/k3s/config.yaml.d/wicked-pids.yaml`, `kubelet-arg+`) instead of replacing `config.yaml`, in the
+  guide and in the installer's remedy. The guide's PATH steps are idempotent. When Claude Code is a target, a
+  capability needs Python 3.10+, none is on PATH and uv is installed, the interactive installer offers
+  `uv python install 3.12 --default --preview` (`install <ids>` never changes the default python3 unasked). A
+  readiness row met through uv now says what is met.
+
 ### Docs
 
 - **Install guide fixes from the wicked-crew 0.18.16 walk-through (J7).** The guide is now checked against wicked-crew
   0.18.16; macOS step 4 and WSL2 step 6 say how to put `~/.local/bin` on PATH (DOC8); the prerequisites table lists the
   optional whisper.cpp for voice (DOC9, wicked-crew#1568).
+
+- **The install guide is checked against wicked-crew 0.18.19 (#77, #78).** A test keeps the guide's installer version
+  equal to the package's.
+- **README: the uninstall and legacy-copy sections match the shipped `uninstall` and `cleanup-legacy` (#44, #75).**
 
 ## [0.10.1] - 2026-11-12
 
