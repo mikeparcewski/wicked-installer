@@ -5,9 +5,9 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.10.2] - 2026-11-22
+## [0.11.0] - 2026-11-22
 
-Patch release on the train-11 cut cc7bab7a, carrying 7 PRs since 0.10.1: #69, #72, #73, #74, #75, #78, #79. Adds
+Minor release on the train-11 cut cc7bab7a, carrying 7 PRs since 0.10.1: #69, #72, #73, #74, #75, #78, #79. Adds
 `uninstall`, fixes the Kubernetes remedies and the first-run transcript, and ships the install guide. Pairs with
 wicked-crew 0.18.20 (wicked-core-ts 0.15.48).
 
