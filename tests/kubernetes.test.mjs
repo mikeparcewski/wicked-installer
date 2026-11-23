@@ -8,7 +8,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
-const { RANCHER_CONTAINERD_WARNING, checkKubernetes, ensureClusterForCrew, findKubectl, pickContext, isLocalServer, publicDiagnostic, shellWord, installCommand, findWickedCore, PODS_PIDS_MAX, pidsFix } = await import("../dist/kubernetes.js");
+const { RANCHER_CONTAINERD_WARNING, checkKubernetes, ensureClusterForCrew, findKubectl, pickContext, isLocalServer, publicDiagnostic, shellWord, installCommand, findWickedCore, PODS_PIDS_MAX, pidsFix, contextCandidates } = await import("../dist/kubernetes.js");
 
 const skip = process.platform === "win32" ? "fake executables are POSIX files" : false;
 
@@ -37,7 +37,7 @@ function fakeSpawn(world) {
     }
     if (bin.endsWith("kubectl")) {
       if (a.endsWith("config get-contexts -o name")) return world.configBroken ? no("error loading config file: yaml: line 3") : ok((world.contexts ?? ["rancher-desktop"]).join("\n") + "\n");
-      if (a.includes("config view --minify")) return ok(`${world.server ?? "https://127.0.0.1:6443"} ${world.proxy ?? ""}`.trim());
+      if (a.includes("config view --minify")) return ok(`${world.servers?.[args[args.indexOf("--context") + 1]] ?? world.server ?? "https://127.0.0.1:6443"} ${world.proxy ?? ""}`.trim());
       if (a.includes(" version ")) return world.down ? no("The connection to the server 127.0.0.1:6443 was refused") : ok("{}");
       if (a.includes("containerRuntimeVersion")) return world.runtimeUnread ? no("forbidden") : ok(world.runtime ?? "docker://29.5.3");
       if (a.includes("get nodes")) return ok((world.nodes ?? ["lima-rancher-desktop"]).join(" "));
@@ -547,3 +547,152 @@ for (const [platform, env] of [["darwin", {}], ["linux", {}], ["linux", { WSL_DI
     assert.ok(remedy.includes('kubelet-arg+: ["pod-max-pids=4096"]'));
   });
 }
+
+// #76: kind and k3s on native Linux. Context names as their writers spell them: kind names a cluster's
+// context "kind-" + <cluster> (kind pkg/cluster/internal/kubeconfig: KINDClusterKey), and k3s writes
+// /etc/rancher/k3s/k3s.yaml with one context named "default", server https://127.0.0.1:6443.
+// The wire shape read here is `kubectl config get-contexts -o name`: one context name per line.
+const WSL = { WSL_DISTRO_NAME: "Ubuntu" };
+const linuxCtx = (sb, world, platform = "linux", env = {}) => ({ ...ctxOf(sb, world), platform, env: { ...sb.env, ...env } });
+
+test("#76: on native Linux, kind-* then k3s's default are picked after the desktop contexts; never on macOS or WSL2", () => {
+  assert.equal(pickContext(["prod-eks", "kind-dev", "default"], {}, "linux"), "kind-dev");
+  assert.equal(pickContext(["prod-eks", "default"], {}, "linux"), "default");
+  assert.equal(pickContext(["kind-dev", "default", "docker-desktop", "rancher-desktop"], {}, "linux"), "rancher-desktop");
+  assert.equal(pickContext(["kind-dev", "default", "docker-desktop"], {}, "linux"), "docker-desktop");
+  assert.deepEqual(contextCandidates(["default", "kind-b", "prod", "kind-a"], {}, "linux"), [
+    { context: "kind-b", guessed: true }, { context: "kind-a", guessed: true }, { context: "default", guessed: true },
+  ]);
+  // "kind-" alone is not a kind cluster's context.
+  assert.equal(pickContext(["kind-"], {}, "linux"), null);
+  for (const [platform, env] of [["darwin", {}], ["win32", {}], ["linux", WSL]]) {
+    assert.equal(pickContext(["kind-dev", "default"], env, platform), null, `${platform} ${JSON.stringify(env)}`);
+  }
+  // The operator's choice is the only one tried.
+  assert.deepEqual(contextCandidates(["kind-dev", "rancher-desktop"], { WICKED_K8S_ADMIN_CONTEXT: "kind-dev" }, "linux"), [{ context: "kind-dev", guessed: false }]);
+});
+
+test("#76: a kind cluster on native Linux is the target; the pasteable install names its context", { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core");
+  const r = checkKubernetes(linuxCtx(sb, { contexts: ["prod-eks", "kind-dev"], servers: { "prod-eks": "https://prod.eks.amazonaws.com" }, nodes: ["dev-control-plane"], pids: 4096 }));
+  assert.equal(r.state, "not_installed", r.detail);
+  assert.equal(r.target.context, "kind-dev");
+  assert.ok(r.remedy.includes("cluster install --admin-context kind-dev "), r.remedy);
+});
+
+test("#76: k3s's default context is the target when its server is this machine, and passed over when it is not", { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core");
+  const local = checkKubernetes(linuxCtx(sb, { contexts: ["default"], pids: 4096, installed: true }));
+  assert.equal(local.state, "ready", local.detail);
+  assert.equal(local.target.context, "default");
+  // Another kubeconfig's remote "default" is not this machine's k3s: no refusal, the next candidate or none.
+  const remote = checkKubernetes(linuxCtx(sb, { contexts: ["default"], servers: { default: "https://10.0.0.5:6443" }, pids: 4096 }));
+  assert.equal(remote.state, "no_local_context");
+  const skipped = checkKubernetes(linuxCtx(sb, { contexts: ["kind-far", "default"], servers: { "kind-far": "https://203.0.113.9:6443" }, pids: 4096 }));
+  assert.equal(skipped.target.context, "default");
+  // A desktop context that points elsewhere is still refused, not passed over.
+  assert.equal(checkKubernetes(linuxCtx(sb, { contexts: ["rancher-desktop", "default"], servers: { "rancher-desktop": "https://prod.example.com" }, pids: 4096 })).state, "not_local");
+});
+
+test("#76: no local context names WICKED_K8S_ADMIN_CONTEXT, and on native Linux kind and k3s", { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl");
+  const linux = checkKubernetes(linuxCtx(sb, { contexts: ["prod-eks"] }));
+  assert.equal(linux.state, "no_local_context");
+  assert.match(linux.remedy, /WICKED_K8S_ADMIN_CONTEXT=<that context>/);
+  assert.match(linux.remedy, /kind or k3s/);
+  assert.match(linux.remedy, /\/etc\/rancher\/k3s\/k3s\.yaml/);
+  assert.match(linux.detail, /kind-<cluster>/);
+  for (const [platform, env] of [["darwin", {}], ["linux", WSL]]) {
+    const r = checkKubernetes(linuxCtx(sb, { contexts: ["prod-eks", "kind-dev"] }, platform, env));
+    assert.equal(r.state, "no_local_context", platform);
+    assert.match(r.remedy, /Rancher Desktop/);
+    assert.match(r.remedy, /WICKED_K8S_ADMIN_CONTEXT=<that context>/);
+    assert.doesNotMatch(r.remedy, /kind|k3s/);
+  }
+  const named = checkKubernetes(linuxCtx(sb, { contexts: ["prod-eks"] }, "linux", { WICKED_K8S_ADMIN_CONTEXT: "kind-gone" }));
+  assert.equal(named.state, "no_local_context");
+  assert.match(named.remedy, /kubectl config get-contexts/);
+});
+
+test("#76: no kubectl on native Linux also offers kind or k3s; macOS and WSL2 stay Rancher-only", { skip }, (t) => {
+  const sb = sandbox(t);
+  sb.env.WICKED_KUBECTL = join(sb.tmp, "missing-kubectl");
+  for (const probeOnly of [false, true]) {
+    const r = checkKubernetes({ ...linuxCtx(sb, {}), probeOnly });
+    assert.equal(r.state, "no_kubectl");
+    assert.match(r.remedy, /Rancher Desktop/);
+    assert.match(r.remedy, /On Linux, a single-node kind or k3s cluster also works/);
+    assert.match(r.remedy, /Kubernetes on Linux/);
+  }
+  const skipped = ensureClusterForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", spawn: () => { throw new Error("must not spawn"); } });
+  assert.equal(skipped.action, "skipped");
+  assert.match(skipped.message, /kind or k3s/);
+  assert.match(skipped.message, /run the installer again/);
+  for (const [platform, env] of [["darwin", {}], ["linux", WSL]]) {
+    const r = checkKubernetes(linuxCtx(sb, {}, platform, env));
+    assert.doesNotMatch(r.remedy, /kind|k3s/, platform);
+    const e = ensureClusterForCrew({ productIds: ["wicked-crew"], dryRun: false, env: { ...sb.env, ...env }, platform, spawn: () => { throw new Error("must not spawn"); } });
+    assert.doesNotMatch(e.message, /kind|k3s/, platform);
+  }
+});
+
+for (const state of ["pids_unlimited", "pids_unreadable"]) test(`#76: ${state} on a kind cluster prints the KubeletConfiguration recipe`, { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl");
+  const r = checkKubernetes(linuxCtx(sb, { contexts: ["kind-dev"], nodes: ["dev-control-plane"], pids: -1, pidsUnreadable: state === "pids_unreadable" }));
+  assert.equal(r.state, state);
+  assert.doesNotMatch(r.remedy, /[\r\n]/);
+  assert.ok(r.remedy.includes("`kind: KubeletConfiguration`"), r.remedy);
+  assert.ok(r.remedy.includes("`podPidsLimit: 4096`"), r.remedy);
+  assert.ok(r.remedy.includes("kind delete cluster --name dev"), r.remedy);
+  assert.ok(r.remedy.includes("kind create cluster --name dev --config"), r.remedy);
+  assert.match(r.remedy, /NetworkPolicy/);
+  assert.match(r.remedy, /Kubernetes on Linux/);
+  assert.doesNotMatch(r.remedy, /Rancher|override\.yaml|wicked-pids\.start|pod-max-pids/);
+});
+
+for (const state of ["pids_unlimited", "pids_unreadable"]) test(`#76: ${state} on k3s prints the k3s drop-in and service restart`, { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl");
+  const r = checkKubernetes(linuxCtx(sb, { contexts: ["default"], nodes: ["build-box"], pids: -1, pidsUnreadable: state === "pids_unreadable" }));
+  assert.equal(r.state, state);
+  assert.doesNotMatch(r.remedy, /[\r\n]/);
+  assert.ok(r.remedy.includes(`echo 'kubelet-arg+: ["pod-max-pids=4096"]' | sudo tee /etc/rancher/k3s/config.yaml.d/wicked-pids.yaml`), r.remedy);
+  assert.ok(r.remedy.includes("sudo mkdir -p /etc/rancher/k3s/config.yaml.d"), r.remedy);
+  assert.ok(r.remedy.includes("sudo systemctl restart k3s"), r.remedy);
+  assert.doesNotMatch(r.remedy, /Rancher Desktop|override\.yaml|wicked-pids\.start|KubeletConfiguration/);
+});
+
+test("#76: pidsFix keeps the Rancher recipe for Rancher contexts and on macOS/WSL2, whatever the context", () => {
+  for (const [platform, env, context] of [["darwin", {}, "rancher-desktop"], ["linux", {}, "rancher-desktop"], ["linux", WSL, "rancher-desktop"], ["linux", WSL, "default"], ["darwin", {}, "default"], ["linux", {}, undefined], ["linux", {}, "my-cluster"]]) {
+    const text = pidsFix(env, platform, context);
+    assert.match(text, /quit and restart Rancher Desktop/, `${platform} ${context}`);
+    assert.ok(text.includes('kubelet-arg+: ["pod-max-pids=4096"]'), text);
+  }
+  assert.match(pidsFix({}, "darwin", "kind-dev"), /KubeletConfiguration/);
+  assert.match(pidsFix(WSL, "linux", "kind-dev"), /KubeletConfiguration/);
+});
+
+test("#76: a stopped or multi-node kind or k3s cluster gets that cluster's own fix", { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core");
+  const kindDown = checkKubernetes(linuxCtx(sb, { contexts: ["kind-dev"], down: true }));
+  assert.equal(kindDown.state, "unreachable");
+  assert.ok(kindDown.remedy.includes("docker start dev-control-plane"), kindDown.remedy);
+  assert.doesNotMatch(kindDown.remedy, /Rancher/);
+  const k3sDown = checkKubernetes(linuxCtx(sb, { contexts: ["default"], down: true }));
+  assert.ok(k3sDown.remedy.includes("sudo systemctl start k3s"), k3sDown.remedy);
+  assert.match(checkKubernetes(linuxCtx(sb, { contexts: ["kind-dev"], nodes: ["dev-control-plane", "dev-worker"], pids: 4096 })).remedy, /kind cluster with only a control-plane node/);
+  assert.match(checkKubernetes(linuxCtx(sb, { contexts: ["default"], nodes: ["a", "b"], pids: 4096 })).remedy, /single-node k3s server/);
+  const gone = checkKubernetes(linuxCtx(sb, { contexts: ["default"], pids: 4096, status: JSON.stringify({ configured: true, reachable: false }), statusExit: 1 }));
+  assert.equal(gone.state, "daemon_unreachable");
+  assert.ok(gone.remedy.includes("sudo systemctl start k3s"), gone.remedy);
+});
+
+test("#76: the containerd warning stays Rancher-only: kind and k3s are containerd by design", { skip }, (t) => {
+  const sb = sandbox(t); sb.exe("kubectl"); sb.exe("wicked-core");
+  for (const context of ["kind-dev", "default"]) {
+    const warned = [];
+    const { spawn } = fakeSpawn({ home: sb.tmp, contexts: [context], runtime: "containerd://1.7.18", pids: 4096, installed: true });
+    const r = ensureClusterForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", spawn, warn: (l) => warned.push(l) });
+    assert.equal(r.action, "already", r.message);
+    assert.deepEqual(warned, [], context);
+  }
+});
