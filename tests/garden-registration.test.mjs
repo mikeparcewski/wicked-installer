@@ -86,7 +86,7 @@ test("install wicked-garden registers the plugin in the active CLAUDE_CONFIG_DIR
     // the on-disk state called for. No `claude plugin … list` — those write .claude.json.
     assert.deepEqual(calls(sb), [
       [cfg, "--version"],
-      [cfg, "plugin marketplace add mikeparcewski/wicked-garden"],
+      [cfg, "plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json"],
       [cfg, "plugin install wicked-garden@wicked-garden"],
     ]);
     assert.match(r.stdout, /probe: .*claude-stub\.mjs --version → 9\.9\.9 \(Claude Code stub\)/);
@@ -155,7 +155,7 @@ test("a multi-path CLAUDE_CONFIG_DIR registers into every listed dir", { skip },
     assert.equal(r.status, 0, r.stdout + r.stderr);
     for (const dir of [a, b]) {
       const mine = calls(sb).filter(([d]) => d === dir).map(([, argv]) => argv);
-      assert.ok(mine.includes("plugin marketplace add mikeparcewski/wicked-garden"), `${dir}: marketplace add`);
+      assert.ok(mine.includes("plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json"), `${dir}: marketplace add`);
       assert.ok(mine.includes("plugin install wicked-garden@wicked-garden"), `${dir}: plugin install`);
       assert.ok(existsSync(cacheDir(dir)), `${dir}: cache payload`);
     }
@@ -320,7 +320,7 @@ test("a failing install after THIS run's marketplace add rolls the add back (mar
     // but the best-effort attempt is still made and recorded).
     assert.deepEqual(calls(sb).map(([, argv]) => argv), [
       "--version",
-      "plugin marketplace add mikeparcewski/wicked-garden",
+      "plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json",
       "plugin install wicked-garden@wicked-garden",
       "plugin uninstall wicked-garden@wicked-garden",
       "plugin marketplace remove wicked-garden",

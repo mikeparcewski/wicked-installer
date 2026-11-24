@@ -683,6 +683,17 @@ test("detectLegacyCopies: reports a bare copy, a v2 marker entry with files, a c
   }
 });
 
+test("garden's registry source is its published release catalog (garden#1562): a URL marketplace whose entry pins the release tag", async () => {
+  const { getProduct } = await import(join(root, "dist", "registry.js"));
+  const garden = claudePluginSpec(getProduct("wicked-garden"));
+  // garden's .claude-plugin/marketplace.json is "./" (a local add installs that checkout, --source-root);
+  // the published catalog pins {github, ref v<version>}, and a URL marketplace re-reads it on refresh.
+  assert.equal(garden.source, "https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json");
+  assert.equal(garden.pluginId, "wicked-garden@wicked-garden");
+  assert.equal(resolveMarketplaceSource(garden), garden.source, "no --source-root: the published catalog");
+  assert.equal(shellQuote(garden.source, "linux"), garden.source, "printed add command needs no quoting");
+});
+
 test("resolveMarketplaceSource / localMarketplaceUnder: explicit roots must hold a manifest; implicit ones may not", () => {
   assert.equal(resolveMarketplaceSource(spec), "mikeparcewski/wicked-garden");
   const d = tmp();

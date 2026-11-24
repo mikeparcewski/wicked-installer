@@ -353,7 +353,7 @@ test("the shipped registry: `install wicked-garden --dry-run` plans vault + regi
     assertDry(sb, r, before, { probes: true });
     assert.match(r.stdout, /Adding required dependencies: Wicked Vault/);
     assert.match(r.stdout, /dry-run: npm install -g wicked-vault/);
-    assert.match(r.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${escapeRe(sb.cfg)} claude plugin marketplace add mikeparcewski/wicked-garden`));
+    assert.match(r.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${escapeRe(sb.cfg)} claude plugin marketplace add ${escapeRe("https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json")}`));
     assert.match(r.stdout, new RegExp(`CLAUDE_CONFIG_DIR=${escapeRe(sb.cfg)} claude plugin install wicked-garden@wicked-garden`));
     assert.doesNotMatch(r.stdout, /npx wicked-garden install/, "garden's install.mjs must not be the plan when Claude Code is present");
   } finally {
