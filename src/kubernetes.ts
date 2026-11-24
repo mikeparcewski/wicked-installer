@@ -22,8 +22,11 @@ import { accessSync, constants as fsConstants, existsSync, readFileSync, realpat
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 
-/** Local contexts, in preference order. `WICKED_K8S_ADMIN_CONTEXT` names another (still local) one. */
+/** The desktop apps' local contexts, in preference order. On native Linux, kind (`kind-<cluster>`) and
+ *  k3s (`default`) contexts come after them; `WICKED_K8S_ADMIN_CONTEXT` names another (still local) one. */
 export const LOCAL_CONTEXTS = ["rancher-desktop", "docker-desktop"] as const;
+/** The context k3s writes to `/etc/rancher/k3s/k3s.yaml`. */
+export const K3S_CONTEXT = "default";
 /** The process limit the engine's seats need (wicked-core `FloorUnarmed::PidsUnlimited`). */
 export const PODS_PIDS_MAX = 4096;
 /** API server hosts that are this machine (Rancher Desktop: 127.0.0.1; Docker Desktop: kubernetes.docker.internal). */
@@ -60,17 +63,101 @@ export interface Target {
   kubectl: string;
   kubeconfig: string;
   context: string;
+  /** Picked by its name on native Linux (kind-*, k3s's default), not named by the operator or a desktop
+   *  app. A loopback API server can be a tunnel to another machine, so the installer checks a guessed
+   *  cluster but never installs into it on its own: it prints the command instead. */
+  guessed?: boolean;
 }
 
 const NEED = "local Kubernetes (governed seats run in pods)";
 const START = "start Rancher Desktop (Preferences → Kubernetes → Enable)";
+/** Where the engine documents kind and k3s (image loading, pod process limit, NetworkPolicy). */
+const LINUX_GUIDE = "\"Kubernetes on Linux\" in the wicked-core README: https://github.com/mikeparcewski/wicked-core#readme";
+const PIDS_DROP_IN = `/etc/rancher/k3s/config.yaml.d/wicked-pids.yaml with \`kubelet-arg+: ["pod-max-pids=${PODS_PIDS_MAX}"]\``;
 
-/** The pod process limit fix for the platform the installer runs on (WSL2: Linux with WSL_DISTRO_NAME set). */
-export function pidsFix(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
-  const script = platform === "win32" || (platform === "linux" && (env.WSL_DISTRO_NAME ?? "") !== "")
+/** Linux outside WSL2 (WSL2: Linux with WSL_DISTRO_NAME set), where kind and k3s are the local clusters. */
+export function isNativeLinux(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
+  return platform === "linux" && (env.WSL_DISTRO_NAME ?? "") === "";
+}
+
+/** What the single node reports about itself (`kubectl get nodes`): kind sets `spec.providerID` to
+ *  `kind://<provider>/<cluster>/<node>` (kind pkg/cluster/internal/kubeadm/config.go, `provider-id`), and a
+ *  k3s kubelet's version carries `+k3s` (e.g. `v1.36.5+k3s1`). */
+export interface NodeFacts {
+  name: string;
+  providerID: string;
+  kubeletVersion: string;
+}
+
+/** Which cluster a target is, for its remedies. Desktop contexts, and every context off native Linux, are
+ *  Rancher Desktop's (the supported desktop app). On native Linux the node decides once it is read (kind's
+ *  providerID, k3s's kubelet version), else the context's name (`kind-<cluster>`, k3s's `default`);
+ *  anything else is `other`, whose remedies name no product. */
+export type Cluster = { flavour: "rancher" } | { flavour: "k3s" } | { flavour: "other" } | { flavour: "kind"; name: string };
+
+/** A kind cluster name as kind accepts it (lowercase letters, digits, dots, hyphens): safe to print as is. */
+const KIND_NAME = /^[a-z0-9][a-z0-9.-]{0,99}$/;
+const KIND_PROVIDER = /^kind:\/\/[a-z]+\/([^/]+)\/[^/]+$/;
+
+export function clusterOf(context: string | undefined, env: NodeJS.ProcessEnv, platform: NodeJS.Platform, node?: NodeFacts): Cluster {
+  if (context === undefined || !isNativeLinux(env, platform) || (LOCAL_CONTEXTS as readonly string[]).includes(context)) return { flavour: "rancher" };
+  if (node !== undefined) {
+    const kind = KIND_PROVIDER.exec(node.providerID)?.[1];
+    if (kind !== undefined && KIND_NAME.test(kind)) return { flavour: "kind", name: kind };
+    return /\+k3s\d*$/.test(node.kubeletVersion) ? { flavour: "k3s" } : { flavour: "other" };
+  }
+  const kind = /^kind-(.+)$/.exec(context)?.[1];
+  if (kind !== undefined && KIND_NAME.test(kind)) return { flavour: "kind", name: kind };
+  return context === K3S_CONTEXT ? { flavour: "k3s" } : { flavour: "other" };
+}
+
+/** How to start the cluster (its API server does not answer). */
+function startFix(c: Cluster): string {
+  if (c.flavour === "kind") return `start the kind cluster's node container: \`docker start ${c.name}-control-plane\` (or \`podman start\` / \`nerdctl start\` if you created it with podman or nerdctl), then run the installer again`;
+  if (c.flavour === "k3s") return "start k3s: `sudo systemctl start k3s` (on OpenRC: `sudo rc-service k3s start`), then run the installer again";
+  if (c.flavour === "other") return "start the cluster, then run the installer again";
+  return START;
+}
+
+/** The single-node cluster to use instead of a multi-node one. */
+function topologyFix(c: Cluster): string {
+  return c.flavour === "kind" ? "use a kind cluster with only a control-plane node (no worker nodes)"
+    : c.flavour === "k3s" ? "use a single-node k3s server (no agents joined)"
+    : c.flavour === "other" ? `use a single-node local cluster; see ${LINUX_GUIDE}`
+    : "use Rancher Desktop's single-node cluster";
+}
+
+/** What to do when no local cluster exists yet, for the platform the installer runs on. */
+function noClusterFix(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
+  const rancher = `install Rancher Desktop, then ${START}. Docker Desktop's Kubernetes can't set the pod process limit crew needs`;
+  return isNativeLinux(env, platform) ? `${rancher}. On Linux, a single-node kind or k3s cluster also works; see ${LINUX_GUIDE}` : rancher;
+}
+
+/** The pod process limit fix for the cluster a context names (and, once it answers, its node reports),
+ *  on the platform the installer runs on. Never a command that deletes anything. */
+export function pidsFix(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, context?: string, node?: NodeFacts): string {
+  const c = clusterOf(context, env, platform, node);
+  if (c.flavour === "kind") {
+    return `set the kubelet's podPidsLimit to ${PODS_PIDS_MAX}. kind applies it only when a cluster is created, so the ${c.name} cluster has to be recreated, which deletes it and everything in it: create it again from a kind config whose control-plane node has a kubeadmConfigPatches entry \`kind: KubeletConfiguration\` with \`podPidsLimit: ${PODS_PIDS_MAX}\`, with a network plugin that enforces NetworkPolicy. The example config is in ${LINUX_GUIDE}`;
+  }
+  if (c.flavour === "k3s") {
+    // The #70 appending drop-in: k3s adds it to any kubelet-arg already set in /etc/rancher/k3s/config.yaml.
+    return `set the kubelet's pod-max-pids to ${PODS_PIDS_MAX}: run \`sudo mkdir -p /etc/rancher/k3s/config.yaml.d && echo 'kubelet-arg+: ["pod-max-pids=${PODS_PIDS_MAX}"]' | sudo tee /etc/rancher/k3s/config.yaml.d/wicked-pids.yaml\`, then \`sudo systemctl restart k3s\` (on OpenRC: \`sudo rc-service k3s restart\`). k3s adds that kubelet-arg to any you already set in /etc/rancher/k3s/config.yaml. If your k3s service uses another config file (--config or K3S_CONFIG_FILE) or passes its own --kubelet-arg=pod-max-pids, set it there instead. For more, see ${LINUX_GUIDE}`;
+  }
+  if (c.flavour === "other") return `set the kubelet's pod process limit (podPidsLimit, or the kubelet flag --pod-max-pids) to ${PODS_PIDS_MAX} in your cluster's kubelet configuration, then restart the kubelet. For kind and k3s, see ${LINUX_GUIDE}`;
+  const script = platform === "win32" || (platform === "linux" && !isNativeLinux(env, platform))
     ? "create a wicked-pids.start script in %LOCALAPPDATA%\\rancher-desktop\\provisioning from the WSL shell with Unix line endings"
     : `add a provision script entry (mode: system) in ${platform === "darwin" ? "~/Library/Application Support" : "~/.local/share"}/rancher-desktop/lima/_config/override.yaml`;
-  return `set the kubelet's pod-max-pids to ${PODS_PIDS_MAX}: ${script} to write /etc/rancher/k3s/config.yaml.d/wicked-pids.yaml with \`kubelet-arg+: ["pod-max-pids=${PODS_PIDS_MAX}"]\`; then quit and restart Rancher Desktop. For full commands, see "Limit processes per pod" in the install guide: https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md`;
+  return `set the kubelet's pod-max-pids to ${PODS_PIDS_MAX}: ${script} to write ${PIDS_DROP_IN}; then quit and restart Rancher Desktop. For full commands, see "Limit processes per pod" in the install guide: https://github.com/mikeparcewski/wicked-installer/blob/main/docs/INSTALL.md`;
+}
+
+/** The fix when the node's kubelet config could not be read. On Rancher Desktop, its recipe too (as
+ *  before); elsewhere the limit is not known to be wrong, so a read-access check with the exact read. */
+function pidsUnreadableFix(t: Target, env: NodeJS.ProcessEnv, platform: NodeJS.Platform, node?: NodeFacts): string {
+  if (clusterOf(t.context, env, platform, node).flavour === "rancher") return `check it, or ${pidsFix(env, platform, t.context, node)}`;
+  const read = node === undefined ? ["get", "nodes"] : ["get", "--raw", `/api/v1/nodes/${node.name}/proxy/configz`];
+  const command = [pastePath(t.kubectl, env, platform), "--kubeconfig", pastePath(t.kubeconfig, env, platform), `--context=${t.context}`, ...read].map((w) => shellWord(w, platform)).join(" ");
+  return `make sure your kubeconfig's account can list the cluster's nodes and read the kubelet config (\`${command}\` must work), then run the installer again`;
 }
 
 export function defaultSpawn(baseEnv: NodeJS.ProcessEnv): Spawn {
@@ -199,12 +286,23 @@ export function findWickedCore(env: NodeJS.ProcessEnv, platform: NodeJS.Platform
   return null;
 }
 
-/** The local context to use: the operator's `WICKED_K8S_ADMIN_CONTEXT`, else the first of
- *  {@link LOCAL_CONTEXTS} the kubeconfig defines. Never the current context. */
-export function pickContext(contexts: string[], env: NodeJS.ProcessEnv): string | null {
+/** The local contexts to try, in order: the operator's `WICKED_K8S_ADMIN_CONTEXT` alone, else the
+ *  {@link LOCAL_CONTEXTS} the kubeconfig defines, then (native Linux only) its `kind-<cluster>` contexts
+ *  in kubeconfig order and k3s's `default` (with no platform: the desktop contexts only). Never the current
+ *  context. A `guessed` one whose API server is not this machine, or whose cluster entry is gone (a deleted
+ *  kind cluster's), is passed over, not refused: another kubeconfig's `default` is common. */
+export function contextCandidates(contexts: string[], env: NodeJS.ProcessEnv, platform?: NodeJS.Platform): { context: string; guessed: boolean }[] {
   const named = (env.WICKED_K8S_ADMIN_CONTEXT ?? "").trim();
-  if (named !== "") return contexts.includes(named) ? named : null;
-  return LOCAL_CONTEXTS.find((c) => contexts.includes(c)) ?? null;
+  if (named !== "") return contexts.includes(named) ? [{ context: named, guessed: false }] : [];
+  const out = LOCAL_CONTEXTS.filter((c) => contexts.includes(c)).map((context) => ({ context, guessed: false }));
+  if (platform === undefined || !isNativeLinux(env, platform)) return out;
+  const linux = [...contexts.filter((c) => c !== K3S_CONTEXT && clusterOf(c, env, platform).flavour === "kind"), ...(contexts.includes(K3S_CONTEXT) ? [K3S_CONTEXT] : [])];
+  return [...out, ...linux.map((context) => ({ context, guessed: true }))];
+}
+
+/** The first context {@link contextCandidates} would try. */
+export function pickContext(contexts: string[], env: NodeJS.ProcessEnv, platform?: NodeJS.Platform): string | null {
+  return contextCandidates(contexts, env, platform)[0]?.context ?? null;
 }
 
 /** Whether an API server URL is this machine. */
@@ -225,7 +323,7 @@ export function resolveTarget(ctx: KubeCtx): { target: Target } | { need: KubeNe
   const { env, platform } = ctx;
   const say = (state: KubeState, detail: string, remedy?: string): { need: KubeNeed } => ({ need: { need: NEED, met: false, state, detail, ...(remedy ? { remedy } : {}) } });
   const kubectl = findKubectl(env, platform);
-  if (kubectl === null) return say("no_kubectl", "kubectl is not installed, so there is no local Kubernetes for crew's seats", `install Rancher Desktop, then ${START}. Docker Desktop's Kubernetes can't set the pod process limit crew needs`);
+  if (kubectl === null) return say("no_kubectl", "kubectl is not installed, so there is no local Kubernetes for crew's seats", noClusterFix(env, platform));
   // The engine runs kubectl without KUBECONFIG and is handed the admin kubeconfig explicitly, so pin one FILE.
   const candidates = (env.KUBECONFIG ?? "").split(delimiter).filter(Boolean);
   // A merged KUBECONFIG list has no single file to hand the engine; the desktop apps write one file.
@@ -236,35 +334,59 @@ export function resolveTarget(ctx: KubeCtx): { target: Target } | { need: KubeNe
     if (!existsSync(kubeconfig)) continue;
     const listed = ctx.spawn(kubectl, ["--kubeconfig", kubeconfig, "config", "get-contexts", "-o", "name"]);
     if (listed.status !== 0) { lastError = publicDiagnostic(listed.stderr || listed.error || "no answer", env, platform); continue; }
-    const context = pickContext(lines(listed.stdout), env);
-    if (context === null) continue;
-    const shown = publicDiagnostic(context, env, platform);
-    const view = ctx.spawn(kubectl, ["--kubeconfig", kubeconfig, "config", "view", "--minify", "--context", context, "-o", "jsonpath={.clusters[0].cluster.server} {.clusters[0].cluster.proxy-url}"]);
-    const [server = "", proxy = ""] = view.stdout.trim().split(/\s+/);
-    if (view.status !== 0 || server === "") return say("config_unreadable", `the ${shown} context's API server could not be read (${publicDiagnostic(view.stderr || view.error || "empty", env, platform)})`, "check the kubeconfig, then run the installer again");
-    // A local-looking server reached through a proxy is the proxy's cluster, not this machine's.
-    if (!isLocalServer(server) || proxy !== "") return say("not_local", `the ${shown} context points at ${publicDiagnostic(proxy !== "" ? `${server} through the proxy ${proxy}` : server, env, platform)}, which is not this machine; crew's seats run only on a local cluster`, `${START}, or point WICKED_K8S_ADMIN_CONTEXT at a local context`);
-    return { target: { kubectl, kubeconfig, context } };
+    for (const { context, guessed } of contextCandidates(lines(listed.stdout), env, platform)) {
+      const shown = publicDiagnostic(context, env, platform);
+      const view = ctx.spawn(kubectl, ["--kubeconfig", kubeconfig, "config", "view", "--minify", "--context", context, "-o", "jsonpath={.clusters[0].cluster.server} {.clusters[0].cluster.proxy-url}"]);
+      const [server = "", proxy = ""] = view.stdout.trim().split(/\s+/);
+      if (view.status !== 0 || server === "") {
+        // A stale guessed entry must not hide a later local cluster, or read as an unreadable kubeconfig.
+        if (guessed) continue;
+        return say("config_unreadable", `the ${shown} context's API server could not be read (${publicDiagnostic(view.stderr || view.error || "empty", env, platform)})`, "check the kubeconfig, then run the installer again");
+      }
+      // A local-looking server reached through a proxy is the proxy's cluster, not this machine's.
+      if (!isLocalServer(server) || proxy !== "") {
+        if (guessed) continue;
+        return say("not_local", `the ${shown} context points at ${publicDiagnostic(proxy !== "" ? `${server} through the proxy ${proxy}` : server, env, platform)}, which is not this machine; crew's seats run only on a local cluster`, `${START}, or point WICKED_K8S_ADMIN_CONTEXT at a local context`);
+      }
+      return { target: { kubectl, kubeconfig, context, ...(guessed ? { guessed } : {}) } };
+    }
   }
   if (lastError !== "") return say("config_unreadable", `the kubeconfig could not be read (${lastError})`, "check the kubeconfig (KUBECONFIG or ~/.kube/config), then run the installer again");
   const named = (env.WICKED_K8S_ADMIN_CONTEXT ?? "").trim();
-  return say("no_local_context", named !== "" ? `no kubeconfig defines the context WICKED_K8S_ADMIN_CONTEXT names` : `no kubeconfig defines a local context (${LOCAL_CONTEXTS.join(" or ")}); the current context is never used`, START);
+  const linux = isNativeLinux(env, platform);
+  const known = linux ? `${LOCAL_CONTEXTS.join(", ")}, a kind-<cluster> context, or k3s's ${K3S_CONTEXT} context on this machine` : LOCAL_CONTEXTS.join(" or ");
+  const setIt = "or, if your kubeconfig already has a context for a cluster on this machine, run the installer again with WICKED_K8S_ADMIN_CONTEXT set to that context's name (`kubectl config get-contexts` lists them)";
+  const create = linux ? `${START}, or create a single-node kind or k3s cluster (k3s writes its kubeconfig to /etc/rancher/k3s/k3s.yaml, readable only by root: copy it to a file you own and point KUBECONFIG at that file); see ${LINUX_GUIDE}` : START;
+  return say("no_local_context", named !== "" ? `no kubeconfig defines the context WICKED_K8S_ADMIN_CONTEXT names` : `no kubeconfig defines a local context (${known}); the current context is never used`, named !== "" ? "set WICKED_K8S_ADMIN_CONTEXT to a context `kubectl config get-contexts` lists, or unset it" : `${create}; ${setIt}`);
+}
+
+/** Each node's name, providerID and kubelet version, one tab-separated row per node. kubectl unescapes
+ *  `\t` and `\n` itself. */
+export const NODES_JSONPATH = 'jsonpath={range .items[*]}{.metadata.name}{"\\t"}{.spec.providerID}{"\\t"}{.status.nodeInfo.kubeletVersion}{"\\n"}{end}';
+
+function kube(t: Target, ctx: KubeCtx, args: string[]) {
+  return ctx.spawn(t.kubectl, ["--kubeconfig", t.kubeconfig, "--context", t.context, ...args, "--request-timeout=10s"]);
+}
+
+/** The cluster's nodes, as {@link NodeFacts}. */
+function listNodes(t: Target, ctx: KubeCtx): NodeFacts[] | { detail: string } {
+  const nodes = kube(t, ctx, ["get", "nodes", "-o", NODES_JSONPATH]);
+  if (nodes.status !== 0) return { detail: `its nodes could not be listed (${publicDiagnostic(nodes.stderr || nodes.error || "no answer", ctx.env, ctx.platform)})` };
+  return nodes.stdout.split(/\r?\n/).filter((l) => l.trim() !== "").map((row) => {
+    const [name = "", providerID = "", kubeletVersion = ""] = row.split("\t").map((f) => f.trim());
+    return { name, providerID, kubeletVersion };
+  });
 }
 
 /** The single node's kubelet `podPidsLimit` (`/api/v1/nodes/<node>/proxy/configz`). */
-function readNode(t: Target, ctx: KubeCtx): { pids: number } | { state: KubeState; detail: string } {
-  const k = (args: string[]) => ctx.spawn(t.kubectl, ["--kubeconfig", t.kubeconfig, "--context", t.context, ...args, "--request-timeout=10s"]);
-  const nodes = k(["get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"]);
-  if (nodes.status !== 0) return { state: "pids_unreadable", detail: `its nodes could not be listed (${publicDiagnostic(nodes.stderr || nodes.error || "no answer", ctx.env, ctx.platform)})` };
-  const names = nodes.stdout.trim().split(/\s+/).filter(Boolean);
-  if (names.length !== 1 || !/^[a-z0-9.-]{1,253}$/.test(names[0] as string)) return { state: "topology", detail: `it has ${names.length} nodes; the engine supports a single-node local cluster` };
-  const raw = k(["get", "--raw", `/api/v1/nodes/${names[0]}/proxy/configz`]);
-  if (raw.status !== 0) return { state: "pids_unreadable", detail: `its kubelet config could not be read (${publicDiagnostic(raw.stderr || raw.error || "no answer", ctx.env, ctx.platform)})` };
+function readPids(t: Target, node: NodeFacts, ctx: KubeCtx): { pids: number } | { detail: string } {
+  const raw = kube(t, ctx, ["get", "--raw", `/api/v1/nodes/${node.name}/proxy/configz`]);
+  if (raw.status !== 0) return { detail: `its kubelet config could not be read (${publicDiagnostic(raw.stderr || raw.error || "no answer", ctx.env, ctx.platform)})` };
   try {
     const v = (JSON.parse(raw.stdout) as { kubeletconfig?: { podPidsLimit?: unknown } }).kubeletconfig?.podPidsLimit;
     return { pids: typeof v === "number" ? v : -1 };
   } catch {
-    return { state: "pids_unreadable", detail: "its kubelet config was not JSON" };
+    return { detail: "its kubelet config was not JSON" };
   }
 }
 
@@ -305,7 +427,7 @@ export function checkKubernetes(ctx: KubeCtx): Checked {
   if (ctx.probeOnly) {
     const kubectl = findKubectl(env, platform);
     return kubectl === null
-      ? { need: NEED, met: false, state: "no_kubectl", detail: "kubectl is not installed, so there is no local Kubernetes for crew's seats", remedy: `install Rancher Desktop, then ${START}. Docker Desktop's Kubernetes can't set the pod process limit crew needs` }
+      ? { need: NEED, met: false, state: "no_kubectl", detail: "kubectl is not installed, so there is no local Kubernetes for crew's seats", remedy: noClusterFix(env, platform) }
       : { need: NEED, met: true, verified: false, state: "unchecked", detail: `kubectl found at ${publicPath(kubectl, env, platform)}; the cluster was not checked (--dry-run)` };
   }
   const resolved = resolveTarget(ctx);
@@ -314,14 +436,18 @@ export function checkKubernetes(ctx: KubeCtx): Checked {
   const shownCtx = publicDiagnostic(t.context, env, platform);
   const fail = (state: KubeState, detail: string, remedy?: string, core?: string): Checked => ({ need: NEED, met: false, state, detail, ...(remedy ? { remedy } : {}), target: t, ...(core ? { core } : {}) });
   const version = ctx.spawn(t.kubectl, ["--kubeconfig", t.kubeconfig, "--context", t.context, "version", "-o", "json", "--request-timeout=10s"]);
-  if (version.status !== 0) return fail("unreachable", `the ${shownCtx} cluster does not answer (${publicDiagnostic(version.stderr || version.error || "no answer", env, platform)})`, START);
-  const node = readNode(t, ctx);
-  if ("state" in node) return fail(node.state, `the ${shownCtx} cluster answers, but ${node.detail}`, node.state === "topology" ? "use Rancher Desktop's single-node cluster" : `check it, or ${pidsFix(ctx.env, ctx.platform)}`);
-  if (node.pids <= 0 || node.pids > PODS_PIDS_MAX) {
-    return fail("pids_unlimited", `the ${shownCtx} kubelet sets no pod process limit of ${PODS_PIDS_MAX} or less (podPidsLimit ${node.pids}), so the engine refuses every seat (pids_unlimited)`, pidsFix(ctx.env, ctx.platform));
+  if (version.status !== 0) return fail("unreachable", `the ${shownCtx} cluster does not answer (${publicDiagnostic(version.stderr || version.error || "no answer", env, platform)})`, startFix(clusterOf(t.context, env, platform)));
+  const nodes = listNodes(t, ctx);
+  if (!Array.isArray(nodes)) return fail("pids_unreadable", `the ${shownCtx} cluster answers, but ${nodes.detail}`, pidsUnreadableFix(t, env, platform));
+  const node = nodes[0];
+  if (nodes.length !== 1 || node === undefined || !/^[a-z0-9.-]{1,253}$/.test(node.name)) return fail("topology", `the ${shownCtx} cluster answers, but it has ${nodes.length} nodes; the engine supports a single-node local cluster`, topologyFix(clusterOf(t.context, env, platform, node)));
+  const limit = readPids(t, node, ctx);
+  if ("detail" in limit) return fail("pids_unreadable", `the ${shownCtx} cluster answers, but ${limit.detail}`, pidsUnreadableFix(t, env, platform, node));
+  if (limit.pids <= 0 || limit.pids > PODS_PIDS_MAX) {
+    return fail("pids_unlimited", `the ${shownCtx} kubelet sets no pod process limit of ${PODS_PIDS_MAX} or less (podPidsLimit ${limit.pids}), so the engine refuses every seat (pids_unlimited)`, pidsFix(env, platform, t.context, node));
   }
   const core = findWickedCore(env, platform);
-  if (core === null) return fail("no_engine", `the ${shownCtx} cluster answers (pod process limit ${node.pids}), but the wicked-core binary that installs crew's part of it was not found`, "npm i -g wicked-crew (it carries wicked-core), then run the installer again");
+  if (core === null) return fail("no_engine", `the ${shownCtx} cluster answers (pod process limit ${limit.pids}), but the wicked-core binary that installs crew's part of it was not found`, "npm i -g wicked-crew (it carries wicked-core), then run the installer again");
   const status = ctx.spawn(core, ["cluster", "status", "--json", "--home", crewStateHome(env, platform)], { env: engineEnv(env, t) });
   const parsed = statusDoc(status.stdout);
   // A document counts only with the exit it belongs to: 0 for an installed daemon, 1 for "not configured".
@@ -330,11 +456,12 @@ export function checkKubernetes(ctx: KubeCtx): Checked {
   if (doc === null) {
     return fail("engine_unanswered", `wicked-core cluster status gave no status (${publicDiagnostic(status.stderr || status.error || "not a status document", env, platform)}); this wicked-core may predate the Kubernetes runner`, "npm i -g wicked-crew@latest, then run the installer again", core);
   }
-  if (!doc.configured) return fail("not_installed", `the ${shownCtx} cluster answers and limits pod processes (${node.pids}), but crew's part of it is not installed; the install proves seat isolation`, `${command} (it also proves NetworkPolicy is enforced)`, core);
-  if (!doc.reachable) return fail("daemon_unreachable", "crew's part of the cluster is installed but does not answer with crew's own account", START, core);
+  if (!doc.configured) return fail("not_installed", `the ${shownCtx} cluster answers and limits pod processes (${limit.pids}), but crew's part of it is not installed; the install proves seat isolation`, `${command} (it also proves NetworkPolicy is enforced)`, core);
+  // The admin account just read the cluster, so starting it is not the fix; the install writes crew's account again.
+  if (!doc.reachable) return fail("daemon_unreachable", `crew's part of the ${shownCtx} cluster is installed, but the cluster does not answer crew's own account (for example, after the cluster was reset or recreated)`, `${command} to set crew's account up again`, core);
   if (doc.controllerReady === false) return fail("controller_not_ready", `the ${shownCtx} cluster's sandbox controller is not ready`, command, core);
   if (doc.controllerReady === null) return fail("engine_unanswered", "wicked-core cluster status could not read the sandbox controller", "run the installer again; if it persists, run `wicked-core cluster status --home ~/.wicked-crew` by hand", core);
-  return { need: NEED, met: true, state: "ready", detail: `${shownCtx}: answers, pod process limit ${node.pids}, crew's part installed and its sandbox controller ready`, target: t, core };
+  return { need: NEED, met: true, state: "ready", detail: `${shownCtx}: answers, pod process limit ${limit.pids}, crew's part installed and its sandbox controller ready`, target: t, core };
 }
 
 /** The line the installer prints when Rancher Desktop runs the containerd engine (wicked-core#1449). */
@@ -415,7 +542,10 @@ export function ensureClusterForCrew(input: { productIds: string[]; dryRun: bool
   if (!input.productIds.includes("wicked-crew")) return { action: "not-needed", message: "" };
   const env = input.env ?? process.env;
   const platform = input.platform ?? process.platform;
-  if (findKubectl(env, platform) === null) return { action: "skipped", message: `No local Kubernetes yet: crew's governed seats run in pods. Install Rancher Desktop and ${START}, then run the installer again. Docker Desktop's Kubernetes can't set the pod process limit crew needs.` };
+  if (findKubectl(env, platform) === null) {
+    const linux = isNativeLinux(env, platform) ? ` On Linux, a single-node kind or k3s cluster also works; see ${LINUX_GUIDE}` : "";
+    return { action: "skipped", message: `No local Kubernetes yet: crew's governed seats run in pods. Install Rancher Desktop and ${START}, then run the installer again. Docker Desktop's Kubernetes can't set the pod process limit crew needs.${linux}` };
+  }
   if (input.dryRun) return { action: "skipped", message: "Would install crew's part of the local Kubernetes cluster (wicked-core cluster install) [dry-run]." };
   const spawn = input.spawn ?? defaultSpawn(env);
   const check = checkKubernetes({ env, platform, probeOnly: false, spawn });
@@ -429,6 +559,10 @@ export function ensureClusterForCrew(input: { productIds: string[]; dryRun: bool
     return { action: "skipped", message: `Kubernetes for crew is not ready: ${check.detail}.${check.remedy ? ` Fix: ${check.remedy}.` : ""}` };
   }
   const t = check.target;
+  // A context picked by its name could be a tunnel to another machine's cluster: the operator decides.
+  if (t.guessed === true) {
+    return { action: "skipped", message: `Kubernetes for crew: ${check.detail}. The installer chose the ${publicDiagnostic(t.context, env, platform)} context by its name, so it does not change that cluster on its own. If it is a cluster on this machine, run \`${installCommand(check.core, t, env, platform)}\`, or run the installer again with WICKED_K8S_ADMIN_CONTEXT set to ${publicDiagnostic(t.context, env, platform)}.` };
+  }
   const run = spawn(check.core, ["cluster", "install", "--admin-context", t.context, "--admin-kubeconfig", t.kubeconfig, "--home", crewStateHome(env, platform)], { timeoutMs: INSTALL_TIMEOUT_MS, env: engineEnv(env, t) });
   const shown = publicDiagnostic(t.context, env, platform);
   if (run.status === 0) return { action: "installed", message: `Installed crew's part of the ${shown} cluster (pod process limit and NetworkPolicy enforcement proven by wicked-core).` };

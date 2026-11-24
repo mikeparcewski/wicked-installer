@@ -152,6 +152,12 @@ seats, the installer runs `wicked-core cluster install --admin-context <ctx> --h
 engine crew carries; the engine proves the pod process limit and NetworkPolicy enforcement and refuses a cluster
 that fails either. A stopped, remote or unlimited cluster is left as it is, with the fix printed.
 
+On native Linux (not WSL2), a single-node kind or k3s cluster works too: after the desktop contexts, the check
+tries `kind-<cluster>` contexts and then k3s's `default`, and prints that cluster's own fixes (see "Kubernetes on
+Linux" in the wicked-core README). A loopback API server can be a tunnel to another machine, so the installer
+never installs crew's part into a context it picked by name: it prints the `wicked-core cluster install` command
+to run, or installs when you name the context with `WICKED_K8S_ADMIN_CONTEXT`.
+
 On Rancher Desktop, choose the dockerd (moby) container engine (Preferences → Container Engine). With
 containerd, crew's floor images aren't visible to the kubelet and seats won't start (wicked-core#1449). The
 installer reads the node's engine (read-only) and prints this line before the cluster install when it finds
