@@ -5,6 +5,19 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-24
+
+Patch release on the train-13 cut c5401935, carrying 1 PR since 0.11.0: #81. Pairs with wicked-crew 0.18.21
+(wicked-core-ts 0.15.49).
+
+### Fixed
+
+- **kind and k3s on native Linux (#76, #81).** The Kubernetes check now recognises a `kind-<cluster>` context and k3s's
+  `default` context on native Linux (not WSL2), after `rancher-desktop` and `docker-desktop`. It never installs into a
+  context it picked by name: it prints the `wicked-core cluster install` command to run instead. The pod process limit,
+  stopped-cluster and no-local-context remedies now follow the cluster type (kind, k3s, or neither), and the
+  `daemon_unreachable` remedy no longer says "start Rancher Desktop" when the cluster is already answering.
+
 ## [0.11.0] - 2026-11-22
 
 Minor release on the train-11 cut cc7bab7a, carrying 7 PRs since 0.10.1: #69, #72, #73, #74, #75, #78, #79. Adds
