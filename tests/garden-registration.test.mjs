@@ -86,7 +86,7 @@ test("install wicked-garden registers the plugin in the active CLAUDE_CONFIG_DIR
     // the on-disk state called for. No `claude plugin … list` — those write .claude.json.
     assert.deepEqual(calls(sb), [
       [cfg, "--version"],
-      [cfg, "plugin marketplace add mikeparcewski/wicked-garden"],
+      [cfg, "plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json"],
       [cfg, "plugin install wicked-garden@wicked-garden"],
     ]);
     assert.match(r.stdout, /probe: .*claude-stub\.mjs --version → 9\.9\.9 \(Claude Code stub\)/);
@@ -117,7 +117,7 @@ test("a second install updates instead of re-adding the marketplace or re-instal
       [cfg, "--version"],
       [cfg, "plugin update wicked-garden@wicked-garden"],
     ], "marketplace add is idempotent; an installed plugin is updated, not re-installed");
-    assert.match(r.stdout, /probe: .*known_marketplaces\.json → marketplace wicked-garden: registered \(github:mikeparcewski\/wicked-garden\)/);
+    assert.match(r.stdout, /probe: .*known_marketplaces\.json → marketplace wicked-garden: registered \(url:https:\/\/raw\.githubusercontent\.com\/mikeparcewski\/wicked-garden\/main\/\.claude-plugin\/release-marketplace\.json\)/);
     assert.match(r.stdout, /claude plugin update wicked-garden@wicked-garden\s+\(installed 0\.0\.1-stub \(user\)\)/);
     assert.ok(existsSync(cacheDir(cfg, "0.0.2-stub")), "the update populated the new cache version");
     assert.match(r.stdout, /\(0\.0\.2-stub\)/);
@@ -155,7 +155,7 @@ test("a multi-path CLAUDE_CONFIG_DIR registers into every listed dir", { skip },
     assert.equal(r.status, 0, r.stdout + r.stderr);
     for (const dir of [a, b]) {
       const mine = calls(sb).filter(([d]) => d === dir).map(([, argv]) => argv);
-      assert.ok(mine.includes("plugin marketplace add mikeparcewski/wicked-garden"), `${dir}: marketplace add`);
+      assert.ok(mine.includes("plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json"), `${dir}: marketplace add`);
       assert.ok(mine.includes("plugin install wicked-garden@wicked-garden"), `${dir}: plugin install`);
       assert.ok(existsSync(cacheDir(dir)), `${dir}: cache payload`);
     }
@@ -320,7 +320,7 @@ test("a failing install after THIS run's marketplace add rolls the add back (mar
     // but the best-effort attempt is still made and recorded).
     assert.deepEqual(calls(sb).map(([, argv]) => argv), [
       "--version",
-      "plugin marketplace add mikeparcewski/wicked-garden",
+      "plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json",
       "plugin install wicked-garden@wicked-garden",
       "plugin uninstall wicked-garden@wicked-garden",
       "plugin marketplace remove wicked-garden",
@@ -383,7 +383,7 @@ test("status: per-dir verdict (registered / partial / copy only / not installed)
     // The version probe is display-only and bounded (3 s); on a loaded host it reports the timeout instead (#34).
     assert.match(a.stdout, /Detected CLIs:[\s\S]*Claude Code \((9\.9\.9 \(Claude Code stub\)|version unknown — --version timed out)\)/, "CLI detection sees the PATH stub");
     assert.match(a.stdout, /Claude Code plugin registration \(wicked-garden@wicked-garden\)/);
-    assert.match(a.stdout, /marketplace: wicked-garden ← github:mikeparcewski\/wicked-garden/);
+    assert.match(a.stdout, /marketplace: wicked-garden ← url:https:\/\/raw\.githubusercontent\.com\/mikeparcewski\/wicked-garden\/main\/\.claude-plugin\/release-marketplace\.json/);
     assert.match(a.stdout, /installed:\s+0\.0\.1-stub \(user\)/);
     assert.match(a.stdout, /cache:\s+0\.0\.1-stub/);
     assert.match(a.stdout, /state:\s+✓ registered/);

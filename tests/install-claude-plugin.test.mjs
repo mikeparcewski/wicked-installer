@@ -387,7 +387,7 @@ test("dispatch: the Claude script gets the products WITHOUT garden; garden is re
     assert.deepEqual(lines(sb.npmLog), ["npm install -g wicked-vault"], "vault acquired by the script once; garden's install.mjs never run");
     assert.deepEqual(stubCalls(sb), [
       [sb.cfg, "--version"],
-      [sb.cfg, "plugin marketplace add mikeparcewski/wicked-garden"],
+      [sb.cfg, "plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json"],
       [sb.cfg, "plugin install wicked-garden@wicked-garden"],
     ]);
     assert.ok(existsSync(cacheDir(sb.cfg)), "payload where Claude Code loads from");
@@ -477,7 +477,7 @@ test("dispatch: a failed install after this run's marketplace add is rolled back
     assert.equal(code, 1, out);
     // D2: uninstall is attempted before the marketplace rollback (best-effort; exits non-zero here
     // because the install never wrote a record, but the attempt is still recorded).
-    assert.deepEqual(stubCalls(sb).map(([, a]) => a), ["--version", "plugin marketplace add mikeparcewski/wicked-garden", "plugin install wicked-garden@wicked-garden", "plugin uninstall wicked-garden@wicked-garden", "plugin marketplace remove wicked-garden"]);
+    assert.deepEqual(stubCalls(sb).map(([, a]) => a), ["--version", "plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json", "plugin install wicked-garden@wicked-garden", "plugin uninstall wicked-garden@wicked-garden", "plugin marketplace remove wicked-garden"]);
     assert.match(out, /rolled back this run's marketplace add/);
     const known = JSON.parse(readFileSync(join(sb.cfg, "plugins", "known_marketplaces.json"), "utf8"));
     assert.ok(!("wicked-garden" in known));

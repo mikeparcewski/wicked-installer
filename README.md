@@ -312,8 +312,8 @@ registration state) and then runs only what that state calls for, with
 `CLAUDE_CONFIG_DIR=<target>`:
 
 ```
-claude plugin marketplace add mikeparcewski/wicked-garden   # only when the marketplace is absent
-claude plugin install wicked-garden@wicked-garden           # or `update` when a healthy install exists
+claude plugin marketplace add https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json   # only when the marketplace is absent
+claude plugin install wicked-garden@wicked-garden   # or `update` when a healthy install exists
 ```
 
 then re-derives from disk that the marketplace entry, the install record (with a real
@@ -326,6 +326,8 @@ a local checkout) is kept as-is. `--source-root <dir>` registers `<dir>/wicked-g
 marketplace instead of GitHub. `--dry-run` prints the same probes (`probe:` lines) and exactly
 the commands a live run would execute (`dry-run:` lines); the only thing it spawns is
 `claude --version`.
+
+The URL in the `marketplace add` above is garden's published catalog: its entry pins the release tag (`v<version>`), so Claude Code installs the tree npm ships under that version, and a refresh moves it to the next release. With `--source-root <dir>`, the checkout's own `.claude-plugin/marketplace.json` (`"./"`) is added instead, so the checkout itself is installed.
 
 **Install leaves legacy copies in place and reports them.** A bare
 `~/.claude/plugins/wicked-garden/` (from `npx wicked-garden install`) or a skills/hooks copy
