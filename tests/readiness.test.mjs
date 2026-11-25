@@ -145,6 +145,63 @@ test("launcher on PATH but its self-check fails, or Python below the floor: pend
   }
 });
 
+// installer#84: a readiness check must never fetch. garden's doctor runs `uv run --project <root>
+// --frozen --no-dev python --version`, which downloads a Python runtime and wheels (~28 MiB) when the
+// launcher's uv environment is not built yet. The check runs the doctor with UV_OFFLINE=1, and reads
+// the shape garden's doctorReport (wicked-garden scripts/wicked-garden.mjs, doctorReport) writes
+// when uv could not run python offline: ok true, python.kind "uv", python.version null.
+/** A fake launcher that logs UV_OFFLINE as it saw it, then prints `out`. */
+function fakeDoctor(sb, out) {
+  const log = join(sb.tmp, "doctor-env.log");
+  writeFileSync(join(sb.tmp, "bin", "wicked-garden"), `#!/bin/sh\necho "UV_OFFLINE=\${UV_OFFLINE-unset}" >> '${log}'\nprintf '%s\\n' '${out.replace(/'/g, "'\\''")}'\n`, { mode: 0o755 });
+  return () => (existsSync(log) ? readFileSync(log, "utf8") : "");
+}
+
+const UV_ARGV = ["/opt/uv/bin/uv", "run", "--project", "/g", "--frozen", "--no-dev", "python"];
+
+test("the launcher's self-check runs with UV_OFFLINE=1, so it cannot download (installer#84)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    const seen = fakeDoctor(sb, JSON.stringify({ ok: true, python: { kind: "python3", argv: ["/usr/bin/python3"], env: {}, version: "Python 3.12.1" } }));
+    sb.fake("python3", "Python 3.12.1");
+    preflight([GARDEN], { hosts: ["codex"], env: sb.env, platform: "linux" });
+    assert.equal(seen().trim(), "UV_OFFLINE=1");
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test("a uv environment that is not built yet is PENDING, not ready, and says what first use fetches (installer#84)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeDoctor(sb, JSON.stringify({ ok: true, python: { kind: "uv", argv: UV_ARGV, env: { UV_PROJECT_ENVIRONMENT: "/c/venvs/x" }, version: null } }));
+    sb.fake("python3", "Python 3.12.1");
+    const rows = preflight([GARDEN], { hosts: ["codex"], env: sb.env, platform: "linux" });
+    const skills = by(rows, "skill-scripts");
+    assert.equal(skills.state, "pending");
+    const launcher = skills.needs[0];
+    assert.equal(launcher.met, false);
+    assert.match(launcher.detail, /Python environment is not built yet/);
+    assert.match(launcher.detail, /downloads/);
+    assert.match(launcher.remedy, /`wicked-garden doctor` once while online/);
+  } finally {
+    sb.cleanup();
+  }
+});
+
+test("a built uv environment answers offline and is READY (installer#84)", { skip }, () => {
+  const sb = sandbox();
+  try {
+    fakeDoctor(sb, JSON.stringify({ ok: true, python: { kind: "uv", argv: UV_ARGV, env: { UV_PROJECT_ENVIRONMENT: "/c/venvs/x" }, version: "Python 3.14.8" } }));
+    sb.fake("python3", "Python 3.12.1");
+    const rows = preflight([GARDEN], { hosts: ["codex"], env: sb.env, platform: "linux" });
+    assert.equal(by(rows, "skill-scripts").state, "ready");
+    assert.match(by(rows, "skill-scripts").needs[0].detail, /`wicked-garden doctor` ok, python Python 3\.14\.8/);
+  } finally {
+    sb.cleanup();
+  }
+});
+
 test("a self-check that prints ok but exits nonzero is not trusted", { skip }, () => {
   const sb = sandbox();
   try {
