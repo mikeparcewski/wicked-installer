@@ -5,6 +5,13 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Claude Code installs garden's release, not main (garden#1413, garden#1562).** A new install adds garden's published catalog
+  (`.claude-plugin/release-marketplace.json` on garden main, by URL), whose entry pins the release tag. It used to add
+  `mikeparcewski/wicked-garden`, whose default-branch catalog installs main's tree under the release's version. `--source-root`
+  still adds the checkout, which installs the checkout's own tree.
+
 ## [0.11.1] - 2026-11-24
 
 Patch release on the train-13 cut c5401935, carrying 1 PR since 0.11.0: #81. Pairs with wicked-crew 0.18.21

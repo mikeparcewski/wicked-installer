@@ -123,7 +123,7 @@
         "type": "npm-run",
         "package": "wicked-garden",
         "command": "install",
-        "marketplace": "mikeparcewski/wicked-garden",
+        "marketplace": "https://raw.githubusercontent.com/mikeparcewski/wicked-garden/main/.claude-plugin/release-marketplace.json",
         "pluginId": "wicked-garden@wicked-garden",
         "codexPlugin": true,
         "mcpInstructions": "Run /wicked-garden-core setup in Claude Code to complete configuration (verifies peers; blocks only on wicked-vault, the one the evidence gate needs)."
