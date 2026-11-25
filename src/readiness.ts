@@ -9,8 +9,8 @@
  * (registry.json `capabilities`) and answers `ready` or `pending`, with the reason and the remedy.
  *
  * Read-only by construction: PATH probes are filesystem lookups, and the only things spawned are
- * `<bin> <doctor…>` self-checks, `python --version`, and `npm view <pkg> version` (a registry
- * lookup that installs nothing). An `npx` fallback is NEVER counted as ready: it resolves a
+ * `<bin> <doctor…>` self-checks (with UV_OFFLINE=1, so a uv-backed self-check never downloads),
+ * `python --version`, and `npm view <pkg> version` (a registry lookup that installs nothing). An `npx` fallback is NEVER counted as ready: it resolves a
  * package at first use, which needs the network and a registry that answers — "resolvable" is not
  * "runnable offline" — so a missing launcher with a reachable fallback is still `pending`.
  */
@@ -86,14 +86,17 @@ export interface PreflightOptions {
   platform?: NodeJS.Platform;
   /** Did the host's script install a hook adapter for the product (its report / marker `assets.hooks` > 0)? */
   hookAdapter?: (host: string, productId: string) => boolean;
-  /** Seam for tests; default spawns synchronously with a timeout. */
-  spawn?: (bin: string, args: string[]) => { status: number | null; stdout: string; stderr: string; error?: string };
+  /** Seam for tests; default spawns synchronously with a timeout. `extraEnv` is laid over the env. */
+  spawn?: (bin: string, args: string[], extraEnv?: Record<string, string>) => { status: number | null; stdout: string; stderr: string; error?: string };
 }
 
 const SPAWN_TIMEOUT_MS = 20_000;
 
+/** Laid over the env of a launcher self-check: uv's own switch for "use the cache, never the network". */
+const DOCTOR_ENV: Record<string, string> = { UV_OFFLINE: "1" };
+
 function defaultSpawn(env: NodeJS.ProcessEnv, platform: NodeJS.Platform) {
-  return (bin: string, args: string[]) => {
+  return (bin: string, args: string[], extraEnv?: Record<string, string>) => {
     let prepared;
     try {
       prepared = prepareClaudeSpawn(bin, args, platform);
@@ -101,7 +104,7 @@ function defaultSpawn(env: NodeJS.ProcessEnv, platform: NodeJS.Platform) {
       return { status: null, stdout: "", stderr: "", error: err instanceof Error ? err.message : String(err) };
     }
     const res = spawnSync(prepared.cmd, prepared.argv, {
-      env,
+      env: extraEnv ? { ...env, ...extraEnv } : env,
       encoding: "utf8",
       shell: prepared.shell,
       stdio: ["ignore", "pipe", "pipe"],
@@ -175,12 +178,24 @@ function checkBin(need: Extract<CapabilityNeed, { bin: string }>, ctx: Ctx): Nee
   if (probe.state === "found") {
     if (!need.doctor) return { need: label, met: true, detail: `on PATH (${probe.path})` };
     if (ctx.probeOnly) return { need: label, met: true, verified: false, detail: `on PATH (${probe.path}); \`${need.bin} ${need.doctor.join(" ")}\` not run under --dry-run` };
-    const res = ctx.spawn(probe.path, need.doctor);
+    // installer#84: garden's doctor runs `uv run … python --version`, and uv downloads a Python
+    // runtime and wheels (~28 MiB) when the launcher's environment is not built yet. A readiness
+    // check never fetches, so uv runs offline: a built environment still answers.
+    const res = ctx.spawn(probe.path, need.doctor, DOCTOR_ENV);
     let report: { ok?: unknown; reason?: unknown; python?: { kind?: unknown; version?: unknown; reason?: unknown } } | undefined;
     try {
       report = JSON.parse(res.stdout);
     } catch {
       report = undefined;
+    }
+    if (report && report.ok === true && res.status === 0 && !res.error && report.python?.kind === "uv" && !report.python.version) {
+      // The uv rung was picked, but uv could not run python offline: the environment is not built.
+      return {
+        need: label,
+        met: false,
+        detail: `on PATH, but its Python environment is not built yet: uv downloads a Python runtime and packages (about 28 MiB) the first time \`${need.bin}\` runs a script`,
+        remedy: `run \`${need.bin} ${need.doctor.join(" ")}\` once while online (it builds the environment under the user cache), then check again`,
+      };
     }
     if (report && report.ok === true && res.status === 0 && !res.error) {
       const py = report.python && typeof report.python.kind === "string" ? `, python ${String(report.python.version ?? report.python.kind)}` : "";
