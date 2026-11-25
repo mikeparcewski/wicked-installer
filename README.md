@@ -76,7 +76,12 @@ each delivered product's `capabilities` (registry.json) and reports every capabi
 `pending`, with the reason and the fix for each unmet need:
 
 - **launcher** — on PATH, and its read-only self-check passes (`wicked-garden doctor`). Garden
-  skills on Codex / OpenCode / Pi / Antigravity reach their scripts only through it. Only
+  skills on Codex / OpenCode / Pi / Antigravity reach their scripts only through it. The check
+  runs the self-check with `UV_OFFLINE=1`, so it never downloads: when the launcher's uv Python
+  environment is not built yet, the need is `pending` (uv fetches about 28 MiB at first use),
+  and running `wicked-garden doctor` once online builds it. uv may still write locally: it
+  leaves an empty environment under the launcher's cache dir when it cannot build one offline,
+  and it builds the full environment from uv's own cache when that already holds every package. Only
   `install-codex` on a Codex with `codex plugin` installs it (`npm install -g wicked-garden`,
   because that package is the plugin's marketplace); the others do not.
 - **python** — `python3` / `python` (`py -3` on Windows) at the floor (3.10 for garden).
