@@ -71,14 +71,19 @@ if (sub === "marketplace" && third === "add") {
   if (failing("add")) { process.stderr.write("stub: marketplace add failed\n"); process.exit(1); }
   const source = rest[0];
   const isDir = existsSync(source);
-  let name = basename(source);
+  // A URL marketplace (a catalog file over https): Claude Code downloads it and registers it under the
+  // catalog's own `name` as {source: "url", url} (seen live, 2.1.325). The stub cannot download, so it
+  // takes the name a wicked release catalog declares: its repo (raw.githubusercontent.com/<owner>/<repo>/…;
+  // garden's tests pin its release catalog's name to "wicked-garden").
+  const isUrl = /^https?:\/\//.test(source);
+  let name = isUrl ? new URL(source).pathname.split("/")[2] ?? basename(source) : basename(source);
   if (isDir) {
     const manifest = join(source, ".claude-plugin", "marketplace.json");
     if (existsSync(manifest)) name = JSON.parse(readFileSync(manifest, "utf8")).name ?? name;
   }
   const known = readJson(marketplacesFile, {});
   known[name] = {
-    source: isDir ? { source: "directory", path: resolve(source) } : { source: "github", repo: source },
+    source: isDir ? { source: "directory", path: resolve(source) } : isUrl ? { source: "url", url: source } : { source: "github", repo: source },
     installLocation: isDir ? resolve(source) : join(pluginsDir, "marketplaces", name),
     lastUpdated: now,
   };

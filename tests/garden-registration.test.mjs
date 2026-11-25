@@ -117,7 +117,7 @@ test("a second install updates instead of re-adding the marketplace or re-instal
       [cfg, "--version"],
       [cfg, "plugin update wicked-garden@wicked-garden"],
     ], "marketplace add is idempotent; an installed plugin is updated, not re-installed");
-    assert.match(r.stdout, /probe: .*known_marketplaces\.json → marketplace wicked-garden: registered \(github:mikeparcewski\/wicked-garden\)/);
+    assert.match(r.stdout, /probe: .*known_marketplaces\.json → marketplace wicked-garden: registered \(url:https:\/\/raw\.githubusercontent\.com\/mikeparcewski\/wicked-garden\/main\/\.claude-plugin\/release-marketplace\.json\)/);
     assert.match(r.stdout, /claude plugin update wicked-garden@wicked-garden\s+\(installed 0\.0\.1-stub \(user\)\)/);
     assert.ok(existsSync(cacheDir(cfg, "0.0.2-stub")), "the update populated the new cache version");
     assert.match(r.stdout, /\(0\.0\.2-stub\)/);
@@ -383,7 +383,7 @@ test("status: per-dir verdict (registered / partial / copy only / not installed)
     // The version probe is display-only and bounded (3 s); on a loaded host it reports the timeout instead (#34).
     assert.match(a.stdout, /Detected CLIs:[\s\S]*Claude Code \((9\.9\.9 \(Claude Code stub\)|version unknown — --version timed out)\)/, "CLI detection sees the PATH stub");
     assert.match(a.stdout, /Claude Code plugin registration \(wicked-garden@wicked-garden\)/);
-    assert.match(a.stdout, /marketplace: wicked-garden ← github:mikeparcewski\/wicked-garden/);
+    assert.match(a.stdout, /marketplace: wicked-garden ← url:https:\/\/raw\.githubusercontent\.com\/mikeparcewski\/wicked-garden\/main\/\.claude-plugin\/release-marketplace\.json/);
     assert.match(a.stdout, /installed:\s+0\.0\.1-stub \(user\)/);
     assert.match(a.stdout, /cache:\s+0\.0\.1-stub/);
     assert.match(a.stdout, /state:\s+✓ registered/);
