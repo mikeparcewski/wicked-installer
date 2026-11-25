@@ -5,6 +5,11 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-25
+
+Patch release on the train-14 cut 898a882a, carrying 2 PRs since 0.11.1: #83, #88. Pairs with wicked-crew 0.18.22
+(wicked-core-ts 0.15.50).
+
 ### Fixed
 
 - **`status` and the install readiness check never download (#84).** The launcher check ran `wicked-garden doctor`,
