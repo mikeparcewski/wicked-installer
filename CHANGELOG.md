@@ -11,7 +11,8 @@ All notable changes to wicked-installer are documented here. The format follows
   and on a host where the launcher's uv environment was not built yet, uv downloaded a Python runtime and wheels
   (about 28 MiB) and built a venv, from a command documented as read-only. The self-check now runs with
   `UV_OFFLINE=1`. A built environment still answers offline and stays `ready`; an unbuilt one is `pending`, says
-  what first use fetches, and names `wicked-garden doctor` (once, online) as the fix.
+  what first use fetches, and names `wicked-garden doctor` (once, online) as the fix. uv can still write under the launcher's cache dir
+  offline (an empty environment, or the full one when uv's own cache already holds every package); it never fetches.
 
 - **Claude Code installs garden's release, not main (garden#1413, garden#1562).** A new install adds garden's published catalog
   (`.claude-plugin/release-marketplace.json` on garden main, by URL), whose entry pins the release tag. It used to add
