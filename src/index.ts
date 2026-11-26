@@ -366,6 +366,54 @@ export async function dispatchToClis(
   return 0;
 }
 
+/** The detected hosts whose install script ships beside this one (the interactive path's offer rule). */
+function detectedHosts(): CliOption[] {
+  return discoverCliScripts(__dirname).map((script) => {
+    const presence = detectCli(script.cli);
+    return { cli: script.cli, displayName: presence.displayName, scriptPath: script.scriptPath, detected: presence.detected, binOnPath: presence.binOnPath, homeDetected: presence.homeDetected };
+  }).filter((o) => o.detected);
+}
+
+/**
+ * (installer#87) The direct path installs npm-global products machine-wide and runs no host script, so a product
+ * whose package ships skills for every host (registry `install.hostSkills`, wicked-bus) reached none. Each detected
+ * host's own script now delivers them (binaries already acquired), at the path that script uses for every product.
+ * Under --dry-run nothing is spawned: the plan is printed. A host that fails is a warning naming its command: the
+ * product itself works without the skills. Returns the lines printed.
+ */
+export function hostSkillsStep(
+  productIds: string[],
+  flags: Pick<DispatchFlags, "dryRun">,
+  deps: { hosts?: () => CliOption[]; run?: (cli: CliOption, ids: string[]) => CliRunResult } = {},
+): string[] {
+  const ids = productIds.filter((id) => getProduct(id)?.install.hostSkills === true);
+  if (ids.length === 0) return [];
+  const hosts = (deps.hosts ?? detectedHosts)();
+  const names = ids.map((id) => getProduct(id)?.displayName ?? id).join(", ");
+  const lines: string[] = [];
+  if (hosts.length === 0) {
+    lines.push(`${names}: no supported host detected, so no host gets its skills; install one, then run \`npx wicked-installer install ${ids.join(" ")}\``);
+  } else if (flags.dryRun) {
+    lines.push(`dry-run: would add the skills of ${names} to ${hosts.map((h) => h.displayName).join(", ")} (each host's own install script, binaries already acquired)`);
+  } else {
+    const run = deps.run ?? ((cli: CliOption, list: string[]) => runCliScript(cli, list, flags as DispatchFlags, true));
+    for (const host of hosts) {
+      const r = run(host, ids);
+      const bad = r.entries.filter((e) => ids.includes(e.productId) && !e.success);
+      const ok = r.present && r.status === 0 && r.parsed && bad.length === 0 && ids.every((id) => r.entries.some((e) => e.productId === id));
+      if (ok) {
+        lines.push(`${names} skills added to ${host.displayName}`);
+      } else {
+        const why = !r.present ? "the host is not present" : bad[0]?.message ?? (r.parsed ? `its script exited ${r.status ?? "?"}` : "its script gave no report");
+        lines.push(`warning: ${names} skills were not added to ${host.displayName} (${why}); run \`node "${host.scriptPath}" ${ids.join(" ")} --skip-binaries\``);
+      }
+    }
+  }
+  console.log("");
+  for (const line of lines) console.log(line.startsWith("warning:") ? chalk.yellow(line) : chalk.dim(line));
+  return lines;
+}
+
 /** After the products are in place, before readiness: make crew's garden visible to crew (B3). */
 function gardenForCrew(productIds: string[], flags: DispatchFlags): void {
   const r = ensureGardenForCrew({ productIds, dryRun: flags.dryRun, ...(flags.sourceRoot ? { sourceRoot: flags.sourceRoot } : {}) });
@@ -628,6 +676,7 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
     ? "\nDry run (direct) — printing the plan; nothing will be installed or written.\n"
     : "\nInstalling (direct)...\n"));
   const results = await installDirectly(all, flags);
+  hostSkillsStep(results.filter((r) => r.success && !r.skipped).map((r) => r.productId), flags);
 
   console.log(chalk.bold("\nSummary:"));
   for (const r of results) {
@@ -776,6 +825,7 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
 
   const results = await installDirectly([...added, ...selected], flags);
   const failures = results.filter((r) => !r.success && !r.skipped);
+  hostSkillsStep(results.filter((r) => r.success && !r.skipped).map((r) => r.productId), flags);
   gardenForCrew([...added, ...selected].map((p) => p.id), flags);
   const rows = readinessFor([...added, ...selected].map((p) => p.id), ["claude"], flags, undefined, directHostsFor(results));
   const pending = renderReadiness(

@@ -475,6 +475,8 @@ Required dependencies resolve automatically: wicked-garden requires **wicked-vau
 | [wicked-core](https://github.com/mikeparcewski/wicked-core) | active | The execution engine + governance hook binary behind wicked-crew. Ships inside the `wicked-core-ts` platform package wicked-crew pins (crew 0.17.0 pins core-ts >= 0.15.25); nothing to install separately. |
 | [wicked-crew](https://www.npmjs.com/package/wicked-crew) | active | The harness for the coding agents you already use: sandboxed agents, and by default a different agent reviews the work. Gates report the checks that actually ran. Runs Apps, and agents read your databases only through one read-only gate. Includes Wicked Studio. |
 
+> **Skills on every host:** wicked-bus ships skills for every agent host (registry `install.hostSkills`). Every install path delivers them to each detected host through that host's own script, including the direct `install <products>` path (installer#87). Under `--dry-run` the plan is printed and nothing is spawned. A host that fails gets a warning with the command to re-run; the bus itself works without them.
+
 > **Dependency, not a product:** `wicked-vault` (npm) is in the registry only so dependency resolution can install it — it is wicked-garden's required evidence backend, not a standalone pick.
 
 <!-- historical -->
