@@ -56,8 +56,8 @@ interface DispatchFlags {
  * garden#1600, before the first product: a garden is never paired with a crew older than its core-ts floor.
  * True when refused (printed in red); a note or a dry-run plan is printed dim.
  */
-export function pairingRefused(productIds: string[], flags: Pick<DispatchFlags, "dryRun">, check: typeof gardenPairing = gardenPairing): boolean {
-  const r = check({ productIds, dryRun: flags.dryRun });
+export function pairingRefused(productIds: string[], flags: Pick<DispatchFlags, "dryRun" | "sourceRoot">, check: typeof gardenPairing = gardenPairing): boolean {
+  const r = check({ productIds, dryRun: flags.dryRun, ...(flags.sourceRoot ? { sourceRoot: flags.sourceRoot } : {}) });
   if (r.action === "refused") console.log(chalk.red(`\n${r.message}`));
   else if (r.message) console.log(chalk.dim(`\n${r.message}`));
   return r.action === "refused";

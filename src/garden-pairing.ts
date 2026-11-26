@@ -77,7 +77,9 @@ function publishedGarden(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): { v
   if (r.status !== 0) return undefined;
   try {
     const v: unknown = JSON.parse(String(r.stdout));
-    return typeof v === "object" && v !== null ? (v as { version?: unknown; wicked?: unknown }) : undefined;
+    // npm unwraps a single present field: a garden without `wicked` prints just "12.69.0".
+    if (typeof v === "string") return { version: v };
+    return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as { version?: unknown; wicked?: unknown }) : undefined;
   } catch {
     return undefined;
   }
@@ -88,9 +90,20 @@ function publishedGarden(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): { v
  * Not judged when wicked-crew is in the same install (it becomes crew@latest), when garden is not, or when no crew
  * is installed. Under dry-run nothing is spawned: the plan says what would be checked.
  */
+/** A --source-root checkout's garden manifest (`<root>/wicked-garden/package.json`, as the host scripts stage it). */
+function localGarden(sourceRoot: string): { version?: unknown; wicked?: unknown } | undefined {
+  try {
+    return JSON.parse(readFileSync(join(sourceRoot, "wicked-garden", "package.json"), "utf8")) as { version?: unknown; wicked?: unknown };
+  } catch {
+    return undefined;
+  }
+}
+
 export function gardenPairing(opts: {
   productIds: string[];
   dryRun: boolean;
+  /** --source-root: garden comes from that checkout, so its own manifest declares the floor. */
+  sourceRoot?: string;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   published?: () => { version?: unknown; wicked?: unknown } | undefined;
@@ -100,6 +113,14 @@ export function gardenPairing(opts: {
   const platform = opts.platform ?? process.platform;
   const core = installedCoreTs(env, platform);
   if (core === undefined) return { action: "ok", message: "" };
+  if (opts.sourceRoot) {
+    const local = localGarden(opts.sourceRoot);
+    const floor = local ? gardenCoreFloor(local) : undefined;
+    if (floor !== undefined && below(core, floor)) {
+      return { action: "refused", message: `this wicked-crew runs core-ts ${core}, but the wicked-garden in ${opts.sourceRoot} needs core-ts ${floor} or newer: upgrade wicked-crew first, then install wicked-garden` };
+    }
+    return { action: "ok", message: "" };
+  }
   if (opts.dryRun) return { action: "planned", message: `dry-run: would check that wicked-garden@latest's core-ts floor is met by this wicked-crew (core-ts ${core})` };
   const manifest = (opts.published ?? (() => publishedGarden(env, platform)))();
   if (manifest === undefined) return { action: "noted", message: `could not read wicked-garden@latest's core-ts floor (npm view); this wicked-crew runs core-ts ${core}` };

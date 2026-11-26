@@ -1,7 +1,7 @@
 // garden#1600: the installer refuses to pair a garden with a crew older than the garden's core-ts floor.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -70,4 +70,28 @@ test("dry-run spawns nothing (no npm view) and says what it would check; an unre
   assert.match(dry.message, /core-ts 0\.8\.5/);
   const off = gardenPairing({ productIds: ["wicked-garden"], dryRun: false, env, platform: "linux", published: () => undefined });
   assert.equal(off.action, "noted");
+});
+
+test("the real npm seam: a fieldless garden's `npm view` prints a bare version string, and the gate still refuses", { skip }, (t) => {
+  const env = sandbox(t, "0.8.5");
+  const log = join(env.HOME, "..", "npm.log");
+  // npm unwraps a single present field: `npm view wicked-garden@latest version wicked --json` -> "12.69.0".
+  writeFileSync(join(env.PATH, "npm"), `#!/bin/sh\necho "$*" >> '${log}'\necho '"12.69.0"'\n`, { mode: 0o755 });
+  const r = gardenPairing({ productIds: ["wicked-garden"], dryRun: false, env, platform: "linux" });
+  assert.equal(r.action, "refused", r.message);
+  assert.match(r.message, /wicked-garden 12\.69\.0 needs core-ts 0\.9\.0/);
+  assert.equal(readFileSync(log, "utf8").trim(), "view wicked-garden@latest version wicked --json --fetch-retries=0");
+});
+
+test("--source-root: the checkout's own manifest decides, and npm is never asked", { skip }, (t) => {
+  const env = sandbox(t, "0.8.5");
+  const src = join(env.HOME, "..", "src");
+  mkdirSync(join(src, "wicked-garden"), { recursive: true });
+  const never = () => assert.fail("npm not asked for a local garden");
+  writeFileSync(join(src, "wicked-garden", "package.json"), JSON.stringify({ name: "wicked-garden", version: "12.68.7" }));
+  assert.equal(gardenPairing({ productIds: ["wicked-garden"], dryRun: false, sourceRoot: src, env, platform: "linux", published: never }).action, "ok", "a pre-retirement checkout pairs with an old crew");
+  writeFileSync(join(src, "wicked-garden", "package.json"), JSON.stringify({ name: "wicked-garden", version: "12.70.0", wicked: { coreTsFloor: "0.9.0" } }));
+  const r = gardenPairing({ productIds: ["wicked-garden"], dryRun: false, sourceRoot: src, env, platform: "linux", published: never });
+  assert.equal(r.action, "refused");
+  assert.match(r.message, /upgrade wicked-crew first/);
 });
