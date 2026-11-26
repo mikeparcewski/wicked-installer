@@ -23,6 +23,7 @@ import type { CapabilityReadiness, PreflightOptions } from "./readiness.js";
 import { ensureUv, findUv, runUvPythonInstaller, UV_PYTHON } from "./uv.js";
 import { ensureClusterForCrew } from "./kubernetes.js";
 import { crewEnv, ensureGardenForCrew } from "./crew-garden.js";
+import { gardenPairing } from "./garden-pairing.js";
 
 /**
  * Everything a claude-plugin product needs resolved is checked BEFORE anything is installed,
@@ -49,6 +50,17 @@ interface DispatchFlags {
   claudeHomes: string[];  // --claude-home <dir> (repeatable): explicit Claude config dir(s)
   offline?: boolean;      // --offline: the readiness check makes no network lookup (npx fallback not checked)
   interactive?: boolean;  // the picker asks before running Astral's installer; `install <ids>` already authorizes it
+}
+
+/**
+ * garden#1600, before the first product: a garden is never paired with a crew older than its core-ts floor.
+ * True when refused (printed in red); a note or a dry-run plan is printed dim.
+ */
+export function pairingRefused(productIds: string[], flags: Pick<DispatchFlags, "dryRun">, check: typeof gardenPairing = gardenPairing): boolean {
+  const r = check({ productIds, dryRun: flags.dryRun });
+  if (r.action === "refused") console.log(chalk.red(`\n${r.message}`));
+  else if (r.message) console.log(chalk.dim(`\n${r.message}`));
+  return r.action === "refused";
 }
 
 /** Gate the whole resolved set before its first product: installing deps first could leave a partial crew setup. */
@@ -317,6 +329,7 @@ export async function dispatchToClis(
     }
   }
 
+  if (pairingRefused(productIds, flags)) return 1;
   if (!await prepareUv(productIds, flags)) return 1;
   await prepareClaudePython(productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined), clis.map((c) => c.cli), flags);
 
@@ -622,6 +635,7 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
     console.error(chalk.red(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
+  if (pairingRefused(all.map((p) => p.id), flags)) process.exit(1);
   if (!await prepareUv(all.map((p) => p.id), flags)) process.exit(1);
   await prepareClaudePython(all, ["claude"], flags);
   console.log(chalk.bold(flags.dryRun
@@ -765,6 +779,7 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
     process.exit(1);
   }
 
+  if (pairingRefused([...added, ...selected].map((p) => p.id), flags)) process.exit(1);
   if (!await prepareUv([...added, ...selected].map((p) => p.id), flags)) process.exit(1);
 
   if (added.length > 0) {
