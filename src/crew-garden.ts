@@ -53,6 +53,40 @@ function atLeast(found: string, min: string): boolean {
   return true;
 }
 
+/** SemVer precedence (semver.org §11), as crew's compareSemver: <0, 0, >0; undefined when either is not SemVer. */
+export function semverCompare(a: string, b: string): number | undefined {
+  const pa = SEMVER_PARTS.exec(a);
+  const pb = SEMVER_PARTS.exec(b);
+  if (!pa || !pb) return undefined;
+  const num = (x: string, y: string): number => (x.length !== y.length ? x.length - y.length : x < y ? -1 : x > y ? 1 : 0);
+  for (let i = 1; i <= 3; i += 1) {
+    const c = num(pa[i] as string, pb[i] as string);
+    if (c !== 0) return c;
+  }
+  const ra = pa[4] === undefined ? [] : pa[4].split(".");
+  const rb = pb[4] === undefined ? [] : pb[4].split(".");
+  if (ra.length === 0 || rb.length === 0) return rb.length - ra.length; // a release outranks its prereleases
+  for (let i = 0; i < Math.max(ra.length, rb.length); i += 1) {
+    const x = ra[i];
+    const y = rb[i];
+    if (x === undefined || y === undefined) return x === undefined ? -1 : 1;
+    const dx = /^\d+$/.test(x);
+    const dy = /^\d+$/.test(y);
+    const c = dx && dy ? num(x, y) : dx ? -1 : dy ? 1 : x < y ? -1 : x > y ? 1 : 0;
+    if (c !== 0) return c;
+  }
+  return 0;
+}
+
+/** `version` ranks below `target` (a non-SemVer `version` counts as behind; a non-SemVer `target` as not). */
+function behind(version: string, target: string): boolean {
+  if (semverCompare(target, target) === undefined) return false;
+  const c = semverCompare(version, target);
+  return c === undefined || c < 0;
+}
+
+const SEMVER_PARTS = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
 /** The version of the wicked-crew on PATH (its package.json), or undefined when there is none to read. */
 export function installedCrewVersion(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | undefined {
   const pkg = launcherPackage("wicked-crew", "wicked-crew", env, platform);
@@ -222,8 +256,10 @@ const usable = (r: CrewGardenResult): r is CrewGardenHit => r !== undefined && !
  * crew's garden, by crew's rules: a hit, `{ refused }` when crew would refuse discovery outright
  * (a symlinked manifest, an override that is not a plugin), or undefined when there is none.
  */
-export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): CrewGardenResult {
+export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, floor?: string): CrewGardenResult {
   const home = homeOf(env, platform);
+  // With `floor`, a copy below it is passed over and the walk goes on, as crew's discovery does (crew#753).
+  const fits = (version: string): boolean => floor === undefined || !behind(version, floor);
   const override = env.WICKED_CREW_SKILLS_SOURCE;
   if (override) {
     // An explicit override is the only source crew reads (and crew does not judge its version floor).
@@ -237,18 +273,18 @@ export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform
   for (const root of roots) {
     const hit = cacheHit(root, ["plugins", "cache", "wicked-garden", "wicked-garden"]);
     if (hit === LINK) return linked;
-    if (hit) return { ...hit, source: "Claude Code plugin cache" };
+    if (hit && fits(hit.version)) return { ...hit, source: "Claude Code plugin cache" };
   }
   for (const root of roots) {
     const dir = linkFreeBelow(root, ["plugins", "wicked-garden"]);
     const version = dir ? manifestVersion(dir) : undefined;
     if (version === LINK) return linked;
-    if (dir && version !== undefined) return { path: dir, source: "Claude Code plugin copy", version };
+    if (dir && version !== undefined && fits(version)) return { path: dir, source: "Claude Code plugin copy", version };
   }
   // Tiers 4-5 exist from crew 0.18.0; an older crew stops at its Claude Code sources.
   if (!crewKnowsInstallerLocations(env, platform)) return undefined;
 
-  const npm = npmGardenForCrew(env, platform);
+  const npm = npmGardenForCrew(env, platform, floor);
   if (npm) return npm;
 
   // Codex: below the canonical CODEX_HOME nothing is followed, and every marketplace is judged
@@ -266,7 +302,8 @@ export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform
     if (isLink(marketplace)) continue;
     const hit = cacheHit(marketplace, ["wicked-garden"]);
     if (hit === LINK) return linked;
-    if (hit && !pick) pick = { ...hit, source: "Codex plugin cache" };
+    // crew takes the highest version across marketplaces.
+    if (hit && fits(hit.version) && (!pick || (semverCompare(hit.version, pick.version) ?? 0) > 0)) pick = { ...hit, source: "Codex plugin cache" };
   }
   return pick;
 }
@@ -274,59 +311,115 @@ export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform
 export { usable as isCrewGardenHit };
 
 /**
- * (installer#90) The npm-global wicked-garden crew's tier 4 reads: the package behind the `wicked-garden` launcher
- * on crew's PATH, else the package beside crew's own. Found whatever the higher tiers hold, because the copy a
- * daemon loads depends on ITS environment: a crew started without the installer's CLAUDE_CONFIG_DIR (a service, a
- * login item) skips that plugin cache and lands here.
+ * (installer#90) The npm-global wicked-garden crew's tier 4 reads, by crew's own walk (plugin-source.ts
+ * `npmLauncherPackageDirs`): for every `wicked-garden` launcher on crew's PATH, in order, the package it resolves to
+ * and the prefix layouts beside it; then the package beside crew's own. Only a dir whose package.json names
+ * wicked-garden counts. Found whatever the higher tiers hold: which copy a daemon loads depends on ITS environment,
+ * and a crew started without the installer's CLAUDE_CONFIG_DIR (a service, a login item) can land here.
+ * With `floor`, a copy below it is passed over, as crew does.
  */
-export function npmGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): CrewGardenResult {
+export function npmGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, floor?: string): CrewGardenResult {
   if (!crewKnowsInstallerLocations(env, platform)) return undefined;
   const linked = { refused: "a wicked-garden plugin manifest is a symlink, which crew refuses; reinstall wicked-garden" };
-  const path = crewEnv(env, platform);
-  const fromLauncher = launcherPackage("wicked-garden", "wicked-garden", path, platform);
-  const launcherVersion = fromLauncher ? manifestVersion(fromLauncher) : undefined;
-  if (launcherVersion === LINK) return linked;
-  if (fromLauncher && launcherVersion !== undefined) return { path: fromLauncher, source: "npm package (wicked-garden on PATH)", version: launcherVersion };
-  const crewPkg = launcherPackage("wicked-crew", "wicked-crew", path, platform);
-  if (crewPkg) {
-    const beside = join(dirname(crewPkg), "wicked-garden");
-    const version = manifestVersion(beside);
+  const ce = crewEnv(env, platform);
+  const win = platform === "win32";
+  const candidates: Array<{ dir: string; source: CrewGardenHit["source"] }> = [];
+  for (const bin of ((win ? ce.PATH ?? ce.Path : ce.PATH) ?? "").split(win ? ";" : ":")) {
+    if (bin === "") continue;
+    const launcher = join(bin, win ? "wicked-garden.cmd" : "wicked-garden");
+    if (!existsSync(launcher)) continue;
+    const dirs: string[] = [];
+    if (!win) {
+      try {
+        dirs.push(dirname(realpathSync(launcher)));
+      } catch {
+        continue;
+      }
+    } else {
+      dirs.push(join(bin, "node_modules", "wicked-garden"));
+    }
+    dirs.push(resolve(bin, "..", "lib", "node_modules", "wicked-garden"));
+    for (const dir of dirs) candidates.push({ dir, source: "npm package (wicked-garden on PATH)" });
+  }
+  const crewPkg = launcherPackage("wicked-crew", "wicked-crew", ce, platform);
+  if (crewPkg) candidates.push({ dir: join(dirname(crewPkg), "wicked-garden"), source: "npm package beside wicked-crew" });
+  const seen = new Set<string>();
+  for (const { dir, source } of candidates) {
+    let root: string;
+    try {
+      root = realpathSync(dir);
+    } catch {
+      continue;
+    }
+    if (seen.has(root)) continue;
+    seen.add(root);
+    if (!namesGarden(root)) continue;
+    const version = manifestVersion(root);
     if (version === LINK) return linked;
-    if (version !== undefined) return { path: beside, source: "npm package beside wicked-crew", version };
+    if (version !== undefined && (floor === undefined || !behind(version, floor))) return { path: root, source, version };
   }
   return undefined;
 }
 
-/** The published wicked-garden version (`npm view`), the train's; undefined when npm cannot say (offline). */
+/** `root`/package.json is a file naming wicked-garden (crew's npmPackageNamedGarden). */
+function namesGarden(root: string): boolean {
+  const manifest = join(root, "package.json");
+  try {
+    if (!lstatSync(manifest).isFile()) return false;
+    return (JSON.parse(readFileSync(manifest, "utf8")) as { name?: unknown }).name === "wicked-garden";
+  } catch {
+    return false;
+  }
+}
+
+/** The npm prefix owning a global package dir (`<prefix>/lib/node_modules/<pkg>`, Windows `<prefix>/node_modules/<pkg>`). */
+function npmPrefixOf(pkgDir: string, platform: NodeJS.Platform): string | undefined {
+  const nm = dirname(pkgDir);
+  if (basename(nm) !== "node_modules") return undefined;
+  const up = dirname(nm);
+  if (platform === "win32") return up;
+  return basename(up) === "lib" ? dirname(up) : undefined;
+}
+
+/** The published wicked-garden@latest (`npm view`, JSON, no retries), the train's; undefined when npm cannot say. */
 function publishedGardenVersion(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | undefined {
-  // npm is npm.cmd on Windows: a shell resolves it (fixed args, nothing user-supplied).
-  const r = spawnSync("npm", ["view", "wicked-garden", "version"], { env, encoding: "utf8", shell: platform === "win32", timeout: 60_000 });
-  const v = r.status === 0 ? String(r.stdout).trim() : "";
-  return /^\d+\.\d+\.\d+$/.test(v) ? v : undefined;
+  // npm is npm.cmd on Windows: a shell resolves it (fixed args, nothing user-supplied). crew's PATH, where npm-installed tools live.
+  const r = spawnSync("npm", ["view", "wicked-garden@latest", "version", "--json", "--fetch-retries=0"], { env: crewEnv(env, platform), encoding: "utf8", shell: platform === "win32", timeout: 20_000 });
+  if (r.status !== 0) return undefined;
+  try {
+    const v: unknown = JSON.parse(String(r.stdout));
+    return typeof v === "string" && semverCompare(v, v) !== undefined ? v : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
- * (installer#90) Which garden crew will use, in words for the install summary: the pick for this environment, and,
- * when CLAUDE_CONFIG_DIR is set here, the pick a crew started without it would make, if that is another copy.
+ * (installer#90) Which garden crew will use, for the install summary: crew's pick for this environment (its floor
+ * applied, as crew applies it), and, when CLAUDE_CONFIG_DIR is set here, the pick of a crew started without it if
+ * that differs. A view with no usable garden is a warning line naming its fix.
  */
-export function gardenReport(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
-  const here = findGardenForCrew(env, platform);
-  if (!usable(here)) return "";
-  const lines = [`crew will use wicked-garden ${here.version} (${here.source}, ${here.path})`];
+export function gardenReport(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, floor: string): string {
+  const describe = (hit: CrewGardenResult, lead: string): string => {
+    if (usable(hit)) return `${lead} wicked-garden ${hit.version} (${hit.source}, ${hit.path})`;
+    if (hit) return `warning: ${lead} no wicked-garden: crew refuses discovery (${hit.refused})`;
+    return `warning: ${lead} no wicked-garden: none at or above ${floor}; run \`npm install -g wicked-garden@latest\``;
+  };
+  const here = findGardenForCrew(env, platform, floor);
+  const lines = [describe(here, "crew will use")];
   if ((env.CLAUDE_CONFIG_DIR ?? "") !== "" && !env.WICKED_CREW_SKILLS_SOURCE) {
     const { CLAUDE_CONFIG_DIR: _set, ...without } = env;
-    const bare = findGardenForCrew(without, platform);
-    const lead = "a crew started without CLAUDE_CONFIG_DIR (a service or login item)";
-    if (!usable(bare)) lines.push(`${lead} finds no usable wicked-garden: run \`npm install -g wicked-garden\``);
-    else if (bare.path !== here.path) lines.push(`${lead} uses wicked-garden ${bare.version} (${bare.source}, ${bare.path})`);
+    const bare = findGardenForCrew(without, platform, floor);
+    const same = usable(bare) && usable(here) ? bare.path === here.path : !usable(bare) && !usable(here) && bare?.refused === here?.refused;
+    if (!same) lines.push(describe(bare, "a crew started without CLAUDE_CONFIG_DIR (a service or login item) will use"));
   }
   return lines.join("\n");
 }
 
 /**
  * (installer#90) The npm garden moves with the train: when crew is installed or upgraded and an npm-global garden
- * exists that is older than the published one, update it, whatever copy wins for the installer's own environment.
- * Undefined when there is nothing to do (no npm copy, already current, or npm cannot say what is published).
+ * exists that is behind the published one, update it in the prefix that owns it, whatever copy wins for the
+ * installer's own environment. Undefined when there is nothing to do. Under dry-run nothing is spawned.
  */
 function trainNpmGarden(
   dryRun: boolean,
@@ -334,21 +427,28 @@ function trainNpmGarden(
   platform: NodeJS.Platform,
   run: (cmd: string, args: string[]) => { status: number | null; error?: string },
   latest: () => string | undefined,
-): { action: "planned" | "updated" | "failed"; message: string } | undefined {
+  floor: string,
+): { status: "planned" | "updated" | "noted" | "failed"; message: string } | undefined {
   const npm = npmGardenForCrew(env, platform);
-  if (!usable(npm)) return undefined;
+  if (npm === undefined) return undefined;
+  if (!usable(npm)) return { status: "failed", message: `the npm-global wicked-garden crew falls back to is unusable: ${npm.refused}` };
+  const fallback = `the npm-global wicked-garden (${npm.version}, ${npm.path}), crew's fallback after the Claude Code sources`;
+  const prefix = npmPrefixOf(npm.path, platform);
+  const args = ["install", "-g", ...(prefix ? ["--prefix", prefix] : []), "wicked-garden@latest"];
+  const shown = `npm ${args.join(" ")}`;
+  if (dryRun) return { status: "planned", message: `dry-run: would compare ${fallback} with the published wicked-garden@latest and, if it is behind, run \`${shown}\`` };
   const published = latest();
-  if (published === undefined || atLeast(npm.version, published)) return undefined;
-  const fix = "npm install -g wicked-garden@latest";
-  const behind = `the npm wicked-garden crew reads (${npm.version}, ${npm.path}) is behind the published ${published}`;
-  if (dryRun) return { action: "planned", message: `dry-run: ${behind}; would run \`${fix}\`` };
-  const r = run("npm", ["install", "-g", "wicked-garden@latest"]);
+  if (published === undefined) return { status: "noted", message: `could not read the published wicked-garden version (npm view), so ${fallback} was not checked against it` };
+  // Behind the floor too (registry lag right after a publish): the floor step below does the one install.
+  if (!behind(npm.version, published) || behind(published, floor)) return undefined;
+  const r = run("npm", args);
   const after = npmGardenForCrew(env, platform);
-  if (r.status === 0 && usable(after) && atLeast(after.version, published)) {
-    return { action: "updated", message: `wicked-garden (npm, the copy crew reads at ${after.path}): ${npm.version} -> ${after.version}` };
+  if (r.status === 0 && usable(after) && after.path === npm.path && !behind(after.version, published)) {
+    return { status: "updated", message: `updated the npm-global wicked-garden (${after.path}): ${npm.version} -> ${after.version}` };
   }
+  const state = !usable(after) ? (after ? `is now unusable (${after.refused})` : "is gone") : after.path !== npm.path ? `was not replaced (crew now finds ${after.version} at ${after.path})` : `is still ${after.version}`;
   const why = r.status !== 0 ? `npm ${r.error ?? `exited ${r.status ?? "?"}`}` : "npm exited 0";
-  return { action: "failed", message: `the npm wicked-garden crew reads (${npm.path}) is still ${usable(after) ? after.version : npm.version}, behind the published ${published} (${why}); run \`${fix}\` yourself` };
+  return { status: "failed", message: `${fallback} ${state}, behind the published ${published} (${why}); run \`${shown}\` yourself (it needs write access to that prefix)` };
 }
 
 /** crew's garden floor when no crew is installed to read it from (REQUIRED_GARDEN_VERSION in crew 0.18.1). */
@@ -440,28 +540,43 @@ export function ensureGardenForCrew(opts: {
   const platform = opts.platform ?? process.platform;
   const run = opts.run ?? ((cmd: string, args: string[]) => {
     // npm is npm.cmd on Windows: a shell resolves it (fixed args, nothing user-supplied).
-    const r = spawnSync(cmd, args, { env, stdio: "inherit", shell: platform === "win32" });
+    const r = spawnSync(cmd, args, { env: crewEnv(env, platform), stdio: "inherit", shell: platform === "win32" });
     return { status: r.status, error: r.error?.message };
   });
+  const floor = crewGardenFloor(env, platform);
   // (installer#90) First the npm copy moves with the train, whatever copy wins for this environment: a daemon
-  // started without this shell's CLAUDE_CONFIG_DIR loads it. An explicit override or --source-root opts out.
-  let moved = "";
-  if (!opts.sourceRoot && !env.WICKED_CREW_SKILLS_SOURCE) {
-    const t = trainNpmGarden(opts.dryRun, env, platform, run, opts.latest ?? (() => publishedGardenVersion(env, platform)));
-    if (t?.action === "planned" || t?.action === "failed") return { action: t.action, message: t.message };
-    if (t) moved = `${t.message}\n`;
-  }
+  // started without this shell's CLAUDE_CONFIG_DIR can load it. An explicit override or --source-root opts out.
+  const train = opts.sourceRoot || env.WICKED_CREW_SKILLS_SOURCE
+    ? undefined
+    : trainNpmGarden(opts.dryRun, env, platform, run, opts.latest ?? (() => publishedGardenVersion(env, platform)), floor.version);
+  if (train?.status === "failed") return { action: "failed", message: train.message };
+  const r = floorStep(opts, env, platform, run, floor.version);
+  const action = r.action === "present" && train?.status === "updated" ? "installed"
+    : r.action === "present" && train?.status === "planned" ? "planned"
+    : r.action;
+  // The summary names the copy crew will use after this run (not under dry-run: nothing changed yet).
+  const report = action === "failed" || action === "not-needed" || opts.dryRun ? "" : gardenReport(env, platform, floor.version);
+  return { action, message: [train?.message, r.message, report].filter((x) => x).join("\n") };
+}
+
+/** crew's floor check on the copy this environment resolves (B3): present, or install/update it, or say why not. */
+function floorStep(
+  opts: { productIds: string[]; dryRun: boolean; sourceRoot?: string },
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  run: (cmd: string, args: string[]) => { status: number | null; error?: string },
+  floorVersion: string,
+): { action: "not-needed" | "present" | "planned" | "installed" | "failed"; message: string } {
   const now = findGardenForCrew(env, platform);
   if (usable(now)) {
-    if (now.source === "WICKED_CREW_SKILLS_SOURCE") return { action: "present", message: gardenReport(env, platform) };
-    const floor = crewGardenFloor(env, platform);
-    if (atLeast(now.version, floor.version)) return { action: "present", message: `${moved}${gardenReport(env, platform)}` };
-    const stale = `wicked-garden ${now.version} (${now.source}, ${now.path}) is older than the ${floor.version} this wicked-crew requires, so crew would refuse every launch with garden_required`;
+    if (now.source === "WICKED_CREW_SKILLS_SOURCE") return { action: "present", message: "" };
+    if (atLeast(now.version, floorVersion)) return { action: "present", message: "" };
+    const stale = `wicked-garden ${now.version} (${now.source}, ${now.path}) is older than the ${floorVersion} this wicked-crew requires, so crew would refuse every launch with garden_required`;
     if (!now.source.startsWith("npm package")) return { action: "failed", message: `${stale}. Left as is; update it: ${pluginUpdateSteps(now, platform)}` };
     const fix = "npm install -g wicked-garden@latest";
     if (opts.sourceRoot) return { action: "failed", message: `${stale}; with --source-root the published package is not installed in its place: update that checkout, or run \`${fix}\`` };
     if (opts.dryRun) return { action: "planned", message: `dry-run: ${stale}; would run \`${fix}\`` };
-    return npmInstallGarden(run, ["install", "-g", "wicked-garden@latest"], env, platform, floor.version, `${stale}; run \`${fix}\` yourself`);
+    return npmInstallGarden(run, ["install", "-g", "wicked-garden@latest"], env, platform, floorVersion, `${stale}; run \`${fix}\` yourself`);
   }
   if (!opts.productIds.includes("wicked-garden")) return { action: "not-needed", message: "" };
   // Another copy cannot fix a refusal (a bad override, a linked manifest), and an older crew does
@@ -470,5 +585,5 @@ export function ensureGardenForCrew(opts: {
   if (!crewKnowsInstallerLocations(env, platform)) return { action: "failed", message: `the wicked-crew on PATH is older than ${CREW_FINDS_INSTALLER_LOCATIONS} and finds wicked-garden only through Claude Code: npm i -g wicked-crew@latest, or install wicked-garden into Claude Code` };
   if (opts.sourceRoot) return { action: "failed", message: "crew finds no wicked-garden plugin, and with --source-root the published package is not installed in its place: register that checkout with Claude Code, or point WICKED_CREW_SKILLS_SOURCE at it" };
   if (opts.dryRun) return { action: "planned", message: "dry-run: after install, if crew finds no wicked-garden plugin (no Claude Code or Codex registration): npm install -g wicked-garden" };
-  return npmInstallGarden(run, ["install", "-g", "wicked-garden"], env, platform, crewGardenFloor(env, platform).version, "crew finds no wicked-garden plugin, and `npm install -g wicked-garden` did not fix it; run it yourself");
+  return npmInstallGarden(run, ["install", "-g", "wicked-garden"], env, platform, floorVersion, "crew finds no wicked-garden plugin, and `npm install -g wicked-garden` did not fix it; run it yourself");
 }
