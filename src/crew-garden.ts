@@ -55,8 +55,8 @@ function atLeast(found: string, min: string): boolean {
 
 /** SemVer precedence (semver.org §11), as crew's compareSemver: <0, 0, >0; undefined when either is not SemVer. */
 export function semverCompare(a: string, b: string): number | undefined {
-  const pa = SEMVER_PARTS.exec(a);
-  const pb = SEMVER_PARTS.exec(b);
+  const pa = SEMVER.test(a) ? SEMVER_PARTS.exec(a) : null;
+  const pb = SEMVER.test(b) ? SEMVER_PARTS.exec(b) : null;
   if (!pa || !pb) return undefined;
   const num = (x: string, y: string): number => (x.length !== y.length ? x.length - y.length : x < y ? -1 : x > y ? 1 : 0);
   for (let i = 1; i <= 3; i += 1) {
@@ -162,12 +162,15 @@ function subdirs(dir: string): string[] {
 /** SemVer 2.0.0 (semver.org): crew ignores a cache entry whose name is not one. */
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
-/** Highest X.Y.Z first (only the REPORTED version depends on this order; prereleases are not ranked). */
-function byVersionDesc(a: string, b: string): number {
-  const pa = basename(a).split(/[.+-]/).map((x) => Number.parseInt(x, 10) || 0);
-  const pb = basename(b).split(/[.+-]/).map((x) => Number.parseInt(x, 10) || 0);
-  for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return (pb[i] ?? 0) - (pa[i] ?? 0);
-  return 0;
+/** crew's cacheDirOrder: highest SemVer precedence first, then the plain name (no build metadata), then the smaller name. */
+function cacheOrder(x: string, y: string): number {
+  const a = basename(x);
+  const b = basename(y);
+  const precedence = semverCompare(b, a) ?? 0;
+  if (precedence !== 0) return precedence;
+  if (a === b) return 0;
+  if (a.includes("+") !== b.includes("+")) return a.includes("+") ? 1 : -1;
+  return a < b ? -1 : 1;
 }
 
 /** No segment below `root` is a link (crew walks below a canonical root without following links). */
@@ -188,7 +191,7 @@ function cacheHit(root: string, segments: string[]): { path: string; version: st
   const cache = linkFreeBelow(root, segments);
   if (!cache) return undefined;
   let pick: { path: string; version: string } | undefined;
-  for (const dir of subdirs(cache).sort(byVersionDesc)) {
+  for (const dir of subdirs(cache).sort(cacheOrder)) {
     if (!SEMVER.test(basename(dir)) || isLink(dir)) continue;
     const version = manifestVersion(dir);
     if (version === LINK) return LINK;
@@ -303,7 +306,7 @@ export function findGardenForCrew(env: NodeJS.ProcessEnv = process.env, platform
     const hit = cacheHit(marketplace, ["wicked-garden"]);
     if (hit === LINK) return linked;
     // crew takes the highest version across marketplaces.
-    if (hit && fits(hit.version) && (!pick || (semverCompare(hit.version, pick.version) ?? 0) > 0)) pick = { ...hit, source: "Codex plugin cache" };
+    if (hit && fits(hit.version) && (!pick || cacheOrder(hit.version, pick.version) < 0)) pick = { ...hit, source: "Codex plugin cache" };
   }
   return pick;
 }
@@ -381,6 +384,22 @@ function npmPrefixOf(pkgDir: string, platform: NodeJS.Platform): string | undefi
   return basename(up) === "lib" ? dirname(up) : undefined;
 }
 
+/** `npm install -g [--prefix <owner>] <spec>` for the npm copy at `pkgDir`: npm writes where that copy lives. */
+function npmInstallArgs(pkgDir: string | undefined, platform: NodeJS.Platform, spec: string): string[] {
+  const prefix = pkgDir === undefined ? undefined : npmPrefixOf(pkgDir, platform);
+  return ["install", "-g", ...(prefix ? ["--prefix", prefix] : []), spec];
+}
+
+/** One argument for cmd.exe (npm is npm.cmd there, run through a shell): quoted when it holds a space or a metacharacter. */
+export function winShellArg(arg: string): string {
+  return /[\s&|<>^()%!,;"]/.test(arg) ? `"${arg.replace(/"/g, '""')}"` : arg;
+}
+
+/** The command as a person would type it. */
+export function shownCommand(args: string[], platform: NodeJS.Platform): string {
+  return ["npm", ...args.map((a) => (platform === "win32" ? winShellArg(a) : /[^\w@%+=:,./-]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a))].join(" ");
+}
+
 /** The published wicked-garden@latest (`npm view`, JSON, no retries), the train's; undefined when npm cannot say. */
 function publishedGardenVersion(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | undefined {
   // npm is npm.cmd on Windows: a shell resolves it (fixed args, nothing user-supplied). crew's PATH, where npm-installed tools live.
@@ -433,9 +452,8 @@ function trainNpmGarden(
   if (npm === undefined) return undefined;
   if (!usable(npm)) return { status: "failed", message: `the npm-global wicked-garden crew falls back to is unusable: ${npm.refused}` };
   const fallback = `the npm-global wicked-garden (${npm.version}, ${npm.path}), crew's fallback after the Claude Code sources`;
-  const prefix = npmPrefixOf(npm.path, platform);
-  const args = ["install", "-g", ...(prefix ? ["--prefix", prefix] : []), "wicked-garden@latest"];
-  const shown = `npm ${args.join(" ")}`;
+  const args = npmInstallArgs(npm.path, platform, "wicked-garden@latest");
+  const shown = shownCommand(args, platform);
   if (dryRun) return { status: "planned", message: `dry-run: would compare ${fallback} with the published wicked-garden@latest and, if it is behind, run \`${shown}\`` };
   const published = latest();
   if (published === undefined) return { status: "noted", message: `could not read the published wicked-garden version (npm view), so ${fallback} was not checked against it` };
@@ -504,8 +522,9 @@ function npmInstallGarden(
   failure: string,
 ): { action: "installed" | "failed"; message: string } {
   const r = run("npm", args);
-  const found = r.status === 0 ? findGardenForCrew(env, platform) : undefined;
-  if (usable(found) && (found.source === "WICKED_CREW_SKILLS_SOURCE" || atLeast(found.version, floor))) {
+  const accepted = r.status === 0 ? findGardenForCrew(env, platform, floor) : undefined;
+  const found = r.status === 0 ? (usable(accepted) ? accepted : findGardenForCrew(env, platform)) : undefined;
+  if (usable(found) && (found.source === "WICKED_CREW_SKILLS_SOURCE" || !behind(found.version, floor))) {
     return { action: "installed", message: `the wicked-garden npm package was installed globally for crew (${found.version}, ${found.path})` };
   }
   const why = r.status !== 0 ? `npm ${r.error ?? `exited ${r.status ?? "?"}`}` : usable(found) ? `crew still finds ${found.version} at ${found.path}, below ${floor}` : "crew still finds no garden";
@@ -540,7 +559,8 @@ export function ensureGardenForCrew(opts: {
   const platform = opts.platform ?? process.platform;
   const run = opts.run ?? ((cmd: string, args: string[]) => {
     // npm is npm.cmd on Windows: a shell resolves it (fixed args, nothing user-supplied).
-    const r = spawnSync(cmd, args, { env: crewEnv(env, platform), stdio: "inherit", shell: platform === "win32" });
+    // On Windows npm is npm.cmd, run through cmd.exe: each argument is quoted for it (a prefix may hold a space or `&`).
+    const r = spawnSync(cmd, platform === "win32" ? args.map(winShellArg) : args, { env: crewEnv(env, platform), stdio: "inherit", shell: platform === "win32" });
     return { status: r.status, error: r.error?.message };
   });
   const floor = crewGardenFloor(env, platform);
@@ -551,8 +571,9 @@ export function ensureGardenForCrew(opts: {
     : trainNpmGarden(opts.dryRun, env, platform, run, opts.latest ?? (() => publishedGardenVersion(env, platform)), floor.version);
   if (train?.status === "failed") return { action: "failed", message: train.message };
   const r = floorStep(opts, env, platform, run, floor.version);
-  const action = r.action === "present" && train?.status === "updated" ? "installed"
-    : r.action === "present" && train?.status === "planned" ? "planned"
+  const quiet = r.action === "present" || r.action === "not-needed";
+  const action = quiet && train?.status === "updated" ? "installed"
+    : quiet && train?.status === "planned" ? "planned"
     : r.action;
   // The summary names the copy crew will use after this run (not under dry-run: nothing changed yet).
   const report = action === "failed" || action === "not-needed" || opts.dryRun ? "" : gardenReport(env, platform, floor.version);
@@ -567,21 +588,23 @@ function floorStep(
   run: (cmd: string, args: string[]) => { status: number | null; error?: string },
   floorVersion: string,
 ): { action: "not-needed" | "present" | "planned" | "installed" | "failed"; message: string } {
+  // A copy crew accepts anywhere in its walk (crew passes over a stale one and keeps looking) is enough.
+  if (usable(findGardenForCrew(env, platform, floorVersion))) return { action: "present", message: "" };
   const now = findGardenForCrew(env, platform);
   if (usable(now)) {
     if (now.source === "WICKED_CREW_SKILLS_SOURCE") return { action: "present", message: "" };
-    if (atLeast(now.version, floorVersion)) return { action: "present", message: "" };
     const stale = `wicked-garden ${now.version} (${now.source}, ${now.path}) is older than the ${floorVersion} this wicked-crew requires, so crew would refuse every launch with garden_required`;
     if (!now.source.startsWith("npm package")) return { action: "failed", message: `${stale}. Left as is; update it: ${pluginUpdateSteps(now, platform)}` };
-    const fix = "npm install -g wicked-garden@latest";
+    const args = npmInstallArgs(now.path, platform, "wicked-garden@latest");
+    const fix = shownCommand(args, platform);
     if (opts.sourceRoot) return { action: "failed", message: `${stale}; with --source-root the published package is not installed in its place: update that checkout, or run \`${fix}\`` };
     if (opts.dryRun) return { action: "planned", message: `dry-run: ${stale}; would run \`${fix}\`` };
-    return npmInstallGarden(run, ["install", "-g", "wicked-garden@latest"], env, platform, floorVersion, `${stale}; run \`${fix}\` yourself`);
+    return npmInstallGarden(run, args, env, platform, floorVersion, `${stale}; run \`${fix}\` yourself`);
   }
-  if (!opts.productIds.includes("wicked-garden")) return { action: "not-needed", message: "" };
   // Another copy cannot fix a refusal (a bad override, a linked manifest), and an older crew does
   // not look at npm packages: say what to do instead of installing something crew ignores.
   if (now && "refused" in now) return { action: "failed", message: `crew will not load wicked-garden here: ${now.refused}` };
+  if (!opts.productIds.includes("wicked-garden")) return { action: "not-needed", message: "" };
   if (!crewKnowsInstallerLocations(env, platform)) return { action: "failed", message: `the wicked-crew on PATH is older than ${CREW_FINDS_INSTALLER_LOCATIONS} and finds wicked-garden only through Claude Code: npm i -g wicked-crew@latest, or install wicked-garden into Claude Code` };
   if (opts.sourceRoot) return { action: "failed", message: "crew finds no wicked-garden plugin, and with --source-root the published package is not installed in its place: register that checkout with Claude Code, or point WICKED_CREW_SKILLS_SOURCE at it" };
   if (opts.dryRun) return { action: "planned", message: "dry-run: after install, if crew finds no wicked-garden plugin (no Claude Code or Codex registration): npm install -g wicked-garden" };

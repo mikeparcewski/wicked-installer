@@ -359,7 +359,7 @@ export async function dispatchToClis(
   if (hadFailure || gardenFailed) {
     console.log(chalk.red(hadFailure ? "\nOne or more installations failed. See the summary above." : "\nThe wicked-garden step for crew failed. See above."));
     // A failed host (say, Claude Code's plugin registration) need not stop Studio: say so when crew is ready.
-    if (!flags.dryRun && crew === "ready") console.log(`${chalk.green("Wicked Crew is ready all the same. Start Wicked Studio:")}\n${startStudioLines()}`);
+    if (!flags.dryRun && crew === "ready" && !gardenFailed) console.log(`${chalk.green("Wicked Crew is ready all the same. Start Wicked Studio:")}\n${startStudioLines()}`);
     return 1;
   }
   console.log(doneLine(flags, pending, crew));

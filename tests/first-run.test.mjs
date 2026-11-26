@@ -18,7 +18,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const { findGardenForCrew, ensureGardenForCrew, crewGardenFloor, npmGardenForCrew, gardenReport } = await import("../dist/crew-garden.js");
+const { findGardenForCrew, ensureGardenForCrew, crewGardenFloor, npmGardenForCrew, gardenReport, winShellArg, shownCommand, semverCompare } = await import("../dist/crew-garden.js");
 const { preflight } = await import("../dist/readiness.js");
 const { doneLine, crewStateOf, renderSummary, directHostsFor, GRID_LEGEND, STUDIO_URL, gardenStep } = await import("../dist/index.js");
 const { runUvInstaller, ensureUv } = await import("../dist/uv.js");
@@ -455,7 +455,8 @@ test("#56: an npm garden below the floor is upgraded once with npm install -g wi
     } else dir = npmGarden(sb, "12.66.0");
     const calls = [];
     const r = ensure(sb, { run: (cmd, args) => { calls.push([cmd, ...args]); setVersion(dir, "12.67.0"); return { status: 0 }; } });
-    assert.deepEqual(calls, [["npm", "install", "-g", "wicked-garden@latest"]]);
+    // installer#90 r2: the repair writes into the prefix that owns the stale copy.
+    assert.deepEqual(calls, [["npm", "install", "-g", "--prefix", realpathSync(join(sb.tmp, "prefix")), "wicked-garden@latest"]]);
     assert.equal(r.action, "installed", r.message);
   }
 });
@@ -475,7 +476,7 @@ test("#56: a failed or ineffective upgrade is failed, never present", { skip }, 
   assert.equal(bad.action, "failed");
   assert.match(bad.message, /12\.66\.0/);
   assert.match(bad.message, /12\.66\.1/);
-  assert.match(bad.message, /npm install -g wicked-garden@latest/);
+  assert.match(bad.message, /npm install -g --prefix \S+ wicked-garden@latest/, "installer#90 r2: the repair names the owning prefix");
   let n = 0;
   const same = ensure(sb, { run: () => { n += 1; return { status: 0 }; } });
   assert.equal(same.action, "failed", "exit 0 but still 12.66.0");
@@ -489,7 +490,7 @@ test("#56: dry-run plans the upgrade; --source-root never installs the published
   const never = () => assert.fail("must not run npm");
   const dry = ensure(sb, { dryRun: true, run: never });
   assert.equal(dry.action, "planned");
-  assert.match(dry.message, /npm install -g wicked-garden@latest/);
+  assert.match(dry.message, /npm install -g --prefix \S+ wicked-garden@latest/);
   const src = ensure(sb, { sourceRoot: join(sb.tmp, "src"), run: never });
   assert.equal(src.action, "failed");
   assert.match(src.message, /--source-root/);
@@ -780,7 +781,7 @@ test("installer#90: prerelease, registry lag, offline and opt-outs", { skip }, (
   const lpkg = fakeNpmGarden(lag, "12.67.0");
   const lcalls = [];
   ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: lag.env, platform: "linux", latest: () => "12.68.0", run: (c, a) => { lcalls.push([c, ...a]); lag.pluginRoot(lpkg, "12.69.0"); return { status: 0 }; } });
-  assert.equal(lcalls.length, 1, "one npm install, not two");
+  assert.deepEqual(lcalls, [trainArgs(lag)], "one npm install, not two, into the owning prefix");
   // Offline: a note, nothing run, still present.
   const off = sandbox(t);
   fakeCrewWithFloor(off, "0.19.0", "12.68.0");
@@ -872,4 +873,45 @@ test("installer#90: a failed garden step fails the run (gardenStep is true, prin
   const ok = captureLog(() => gardenStep(["wicked-crew"], { dryRun: false }, () => ({ action: "present", message: "crew will use wicked-garden 12.69.0 (x, y)\nwarning: a crew started without CLAUDE_CONFIG_DIR will use no wicked-garden" })));
   assert.equal(ok.r, false);
   assert.match(ok.out, /crew will use wicked-garden 12\.69\.0/);
+});
+
+test("installer#90 r2: a stale Claude cache crew passes over does not fail the step when a copy crew accepts exists", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  sb.pluginRoot(join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.67.0"));
+  fakeNpmGarden(sb, "12.69.0");
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", latest: () => "12.69.0", run: () => assert.fail("nothing to do") });
+  assert.equal(r.action, "present", r.message);
+  assert.match(r.message, /crew will use wicked-garden 12\.69\.0 \(npm package/);
+});
+
+test("installer#90 r2: a prerelease of crew's floor is below it, as crew compares (the only source fails, named)", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  sb.pluginRoot(join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.68.0-rc.1"));
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew", "wicked-garden"], dryRun: false, env: sb.env, platform: "linux", latest: () => undefined, run: () => assert.fail("a plugin cache is never replaced by npm") });
+  assert.equal(r.action, "failed", r.message);
+  assert.match(r.message, /12\.68\.0-rc\.1 .*older than the 12\.68\.0/);
+  assert.ok(semverCompare("12.68.0-rc.1", "12.68.0") < 0);
+  assert.equal(semverCompare("12.69.0-01", "12.68.0"), undefined, "leading zero in a numeric prerelease: not SemVer, as crew rejects it");
+});
+
+test("installer#90 r2: a refusal fails a crew install even when wicked-garden is not in the set", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  const dflt = join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.69.0");
+  mkdirSync(join(dflt, ".claude-plugin"), { recursive: true });
+  writeFileSync(join(sb.tmp, "m.json"), '{"version":"12.69.0"}');
+  symlinkSync(join(sb.tmp, "m.json"), join(dflt, ".claude-plugin", "plugin.json"));
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", latest: () => undefined, run: () => assert.fail("no install fixes a refusal") });
+  assert.equal(r.action, "failed");
+  assert.match(r.message, /symlink/);
+});
+
+test("installer#90 r2: Windows arguments are quoted for cmd.exe (a prefix with a space or `&`), and the shown command can be pasted", () => {
+  assert.equal(winShellArg("C:\\Users\\Jane Doe\\AppData\\Roaming\\npm"), '"C:\\Users\\Jane Doe\\AppData\\Roaming\\npm"');
+  assert.equal(winShellArg("C:\\a&b"), '"C:\\a&b"');
+  assert.equal(winShellArg("wicked-garden@latest"), "wicked-garden@latest");
+  assert.equal(shownCommand(["install", "-g", "--prefix", "C:\\Jane Doe", "wicked-garden@latest"], "win32"), 'npm install -g --prefix "C:\\Jane Doe" wicked-garden@latest');
+  assert.equal(shownCommand(["install", "-g", "--prefix", "/opt/my npm", "wicked-garden@latest"], "linux"), "npm install -g --prefix '/opt/my npm' wicked-garden@latest");
 });
