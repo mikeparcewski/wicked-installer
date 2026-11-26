@@ -118,7 +118,7 @@ interface ScriptReportEntry {
   /** What was delivered (EXP-01): registered | copied | acquired | manual. Absent from older scripts. */
   delivery?: string;
   /** Asset counts (`hooks` > 0 ⇒ the script installed the product's own hook adapter). */
-  assets?: { hooks?: number };
+  assets?: { hooks?: number; skills?: number };
 }
 
 interface ScriptReport {
@@ -206,13 +206,8 @@ interface CliRunResult {
   rawTail: string;
 }
 
-function runCliScript(
-  cli: CliOption,
-  productIds: string[],
-  flags: DispatchFlags,
-  skipBinaries: boolean,
-  pluginPackages = false,
-): CliRunResult {
+/** A host script's arguments (after `node`), shared by the run and the retry line a person is shown. */
+export function cliScriptArgs(cli: Pick<CliOption, "cli" | "scriptPath">, productIds: string[], flags: Pick<DispatchFlags, "dryRun" | "force" | "sourceRoot" | "claudeHomes">, skipBinaries: boolean, pluginPackages = false): string[] {
   const args = [cli.scriptPath, ...productIds, "--json"];
   if (skipBinaries) args.push("--skip-binaries");
   if (pluginPackages) args.push("--plugin-packages");
@@ -220,7 +215,18 @@ function runCliScript(
   if (flags.force) args.push("--force");
   // --source-root is part of the shared flag surface (§3.2); --claude-home is the Claude script's own.
   if (flags.sourceRoot) args.push("--source-root", flags.sourceRoot);
-  if (cli.cli === "claude") for (const home of flags.claudeHomes) args.push("--claude-home", home);
+  if (cli.cli === "claude") for (const home of flags.claudeHomes ?? []) args.push("--claude-home", home);
+  return args;
+}
+
+function runCliScript(
+  cli: CliOption,
+  productIds: string[],
+  flags: DispatchFlags,
+  skipBinaries: boolean,
+  pluginPackages = false,
+): CliRunResult {
+  const args = cliScriptArgs(cli, productIds, flags, skipBinaries, pluginPackages);
 
   // Never rely on the script's shebang (Windows): always launch via node.
   const res = spawnSync(process.execPath, args, {
@@ -383,7 +389,7 @@ function detectedHosts(): CliOption[] {
  */
 export function hostSkillsStep(
   productIds: string[],
-  flags: Pick<DispatchFlags, "dryRun">,
+  flags: DispatchFlags,
   deps: { hosts?: () => CliOption[]; run?: (cli: CliOption, ids: string[]) => CliRunResult } = {},
 ): string[] {
   const ids = productIds.filter((id) => getProduct(id)?.install.hostSkills === true);
@@ -396,16 +402,25 @@ export function hostSkillsStep(
   } else if (flags.dryRun) {
     lines.push(`dry-run: would add the skills of ${names} to ${hosts.map((h) => h.displayName).join(", ")} (each host's own install script, binaries already acquired)`);
   } else {
-    const run = deps.run ?? ((cli: CliOption, list: string[]) => runCliScript(cli, list, flags as DispatchFlags, true));
+    const run = deps.run ?? ((cli: CliOption, list: string[]) => runCliScript(cli, list, flags, true));
     for (const host of hosts) {
       const r = run(host, ids);
-      const bad = r.entries.filter((e) => ids.includes(e.productId) && !e.success);
-      const ok = r.present && r.status === 0 && r.parsed && bad.length === 0 && ids.every((id) => r.entries.some((e) => e.productId === id));
-      if (ok) {
+      const mine = r.entries.filter((e) => ids.includes(e.productId));
+      const bad = mine.filter((e) => !e.success);
+      const missing = ids.filter((id) => !mine.some((e) => e.productId === id));
+      // A script that reports its skill count must have copied some (Claude skips a foreign same-named dir and still succeeds).
+      const empty = mine.filter((e) => e.success && typeof e.assets?.skills === "number" && e.assets.skills === 0);
+      const why = !r.present ? "the host is not present"
+        : bad[0]?.message ?? (!r.parsed ? "its script gave no report"
+        : r.status !== 0 ? `its script exited ${r.status ?? "?"}`
+        : missing.length > 0 ? `its script did not report ${missing.join(", ")}`
+        : empty.length > 0 ? "its script copied no skills (a same-named skill dir it does not own is left alone)"
+        : undefined);
+      if (why === undefined) {
         lines.push(`${names} skills added to ${host.displayName}`);
       } else {
-        const why = !r.present ? "the host is not present" : bad[0]?.message ?? (r.parsed ? `its script exited ${r.status ?? "?"}` : "its script gave no report");
-        lines.push(`warning: ${names} skills were not added to ${host.displayName} (${why}); run \`node "${host.scriptPath}" ${ids.join(" ")} --skip-binaries\``);
+        const retry = cliScriptArgs(host, ids, { ...flags, dryRun: false }, true).map((a) => (/[\s"'$&|<>;()]/.test(a) ? JSON.stringify(a) : a)).join(" ");
+        lines.push(`warning: ${names} skills were not added to ${host.displayName} (${why}); run \`node ${retry}\``);
       }
     }
   }
@@ -676,7 +691,6 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
     ? "\nDry run (direct) — printing the plan; nothing will be installed or written.\n"
     : "\nInstalling (direct)...\n"));
   const results = await installDirectly(all, flags);
-  hostSkillsStep(results.filter((r) => r.success && !r.skipped).map((r) => r.productId), flags);
 
   console.log(chalk.bold("\nSummary:"));
   for (const r of results) {
