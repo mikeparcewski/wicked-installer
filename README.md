@@ -302,7 +302,8 @@ exit 0 unless a CLI failed, 2 for bad arguments. Contract: INTERFACE.md §12.5.
 
 Claude Code only loads plugins it has **registered** — a marketplace entry plus an
 install record whose payload lives in `<configDir>/plugins/cache/<marketplace>/<plugin>/<version>/`.
-That cache is also the only place wicked-crew's skills discovery reads. A bare copy
+That cache is also the first place wicked-crew's skills discovery reads (crew 0.18+ then falls back to the
+npm-global `wicked-garden` package; see below). A bare copy
 under `~/.claude/plugins/wicked-garden/` (what `npx wicked-garden install` produces,
 always into `~/.claude` whatever `CLAUDE_CONFIG_DIR` says) is loaded by nothing.
 
@@ -338,6 +339,17 @@ The URL in the `marketplace add` above is garden's published catalog: its entry 
 `~/.claude/plugins/wicked-garden/` (from `npx wicked-garden install`) or a skills/hooks copy
 an earlier `install-claude.js` recorded in its marker is detected and reported.
 `wicked-installer cleanup-legacy` removes those copies after its registration and ownership checks.
+
+**The garden crew reads moves with the train.** Which copy crew loads depends on the daemon's own
+environment: a crew started with this shell's `CLAUDE_CONFIG_DIR` reads that plugin cache, while one
+started without it (a service or login item) reads `~/.claude`, then the npm-global `wicked-garden`. So
+whenever the install set includes wicked-crew and an npm-global `wicked-garden` exists that is older than
+the published one (`npm view wicked-garden version`), the installer runs `npm install -g wicked-garden@latest`
+and checks that the copy moved. It does this even when a plugin cache already satisfies crew here; a run
+that leaves the copy behind is a failure. `WICKED_CREW_SKILLS_SOURCE` and `--source-root` opt out. The
+summary then names the copy crew will use (`crew will use wicked-garden <version> (<source>, <path>)`).
+When `CLAUDE_CONFIG_DIR` is set, it also names the copy a crew started without it would use, if that is a
+different one.
 
 State is read from `plugins/known_marketplaces.json` / `plugins/installed_plugins.json`
 (what `claude plugin marketplace list --json` / `claude plugin list --json` print) rather
