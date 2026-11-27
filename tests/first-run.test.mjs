@@ -750,6 +750,19 @@ test("installer#90: dry-run spawns nothing (no npm view either) and plans the up
   assert.ok(dry.message.includes(`npm install -g --prefix ${prefixOf(sb)} wicked-garden@latest`));
 });
 
+test("installer#95: dry-run with the npm garden below crew's floor plans the one npm install once, with the floor's reason", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  fakeNpmGarden(sb, "12.67.0");
+  const dry = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: true, env: sb.env, platform: "linux", latest: () => assert.fail("dry-run reads no registry"), run: () => assert.fail("dry-run") });
+  assert.equal(dry.action, "planned");
+  const cmd = `npm install -g --prefix ${prefixOf(sb)} wicked-garden@latest`;
+  const lines = dry.message.split("\n").filter((l) => l !== "");
+  assert.equal(lines.length, 1, `one plan line, as a real run runs npm once:\n${dry.message}`);
+  assert.equal(dry.message.split(cmd).length - 1, 1, "the command is named once");
+  assert.match(lines[0], /12\.67\.0 .*is older than the 12\.68\.0 this wicked-crew requires/);
+});
+
 test("installer#90: a failed or stuck update fails the step, names the copy and its state, and runs npm once", { skip }, (t) => {
   for (const [label, run, want] of [
     ["stuck", () => ({ status: 0 }), /is still 12\.67\.0, behind the published 12\.69\.0 \(npm exited 0\)/],
