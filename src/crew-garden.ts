@@ -576,7 +576,8 @@ export function ensureGardenForCrew(opts: {
     : quiet && train?.status === "planned" ? "planned"
     : r.action;
   // The summary names the copy crew will use after this run (not under dry-run: nothing changed yet).
-  const report = action === "failed" || action === "not-needed" || opts.dryRun ? "" : gardenReport(env, platform, floor.version);
+  // A crew installed without any garden it can use still gets the report: its warning line names the fix.
+  const report = action === "failed" || opts.dryRun ? "" : gardenReport(env, platform, floor.version);
   return { action, message: [train?.message, r.message, report].filter((x) => x).join("\n") };
 }
 

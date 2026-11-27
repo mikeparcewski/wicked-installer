@@ -915,3 +915,11 @@ test("installer#90 r2: Windows arguments are quoted for cmd.exe (a prefix with a
   assert.equal(shownCommand(["install", "-g", "--prefix", "C:\\Jane Doe", "wicked-garden@latest"], "win32"), 'npm install -g --prefix "C:\\Jane Doe" wicked-garden@latest');
   assert.equal(shownCommand(["install", "-g", "--prefix", "/opt/my npm", "wicked-garden@latest"], "linux"), "npm install -g --prefix '/opt/my npm' wicked-garden@latest");
 });
+
+test("installer#90: crew installed without any garden it can use gets the warning line (not-needed still reports)", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", latest: () => assert.fail("no npm copy"), run: () => assert.fail("garden not in the set") });
+  assert.equal(r.action, "not-needed");
+  assert.match(r.message, /^warning: crew will use no wicked-garden: none at or above 12\.68\.0; run `npm install -g wicked-garden@latest`/);
+});
