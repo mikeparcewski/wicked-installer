@@ -2657,6 +2657,8 @@ function heuristicUninstall(
     try {
       const kept = keepAside(target.dir, abs);
       actions.push({ kind: "remove", target: rel, result: "ok", detail: `moved to ${kept}: a v1 marker cannot tell the installer's copy from yours, so it is kept, not deleted` });
+      // The human output prints notes, not actions: the recovery path must be in a note too.
+      notes.push(`${rel} kept at ${kept} (a v1 marker cannot tell the installer's copy from yours)`);
     } catch (err) {
       // A refused or failed move leaves the dir where it is and keeps the marker record, so the uninstall can be re-run.
       actions.push({ kind: "remove", target: rel, result: "failed", detail: `not moved (${err instanceof Error ? err.message : String(err)}); the dir is left in place` });

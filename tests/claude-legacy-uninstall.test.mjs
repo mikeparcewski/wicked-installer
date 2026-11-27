@@ -2,7 +2,7 @@
 // same name or signature. It moves a matching skill dir to <config>/wicked-installer/kept-skills/, never deletes it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -62,6 +62,61 @@ test("Claude v1-marker uninstall under --dry-run moves nothing and says it would
     assert.deepEqual(planned.map((a) => a.result), ["planned", "planned"]);
     assert.match(planned[0].detail, /would move to wicked-installer\/kept-skills\//);
   } finally {
+    rmSync(w.home, { recursive: true, force: true });
+  }
+});
+
+test("Claude v1-marker uninstall: the human output names where each kept dir went (direct script and central uninstall)", { skip }, () => {
+  for (const central of [false, true]) {
+    const w = world();
+    try {
+      const env = { HOME: w.home, USERPROFILE: w.home, PATH: "/usr/bin:/bin", NO_COLOR: "1", FORCE_COLOR: "0" };
+      const argv = central
+        ? [join(ROOT, "dist", "index.js"), "uninstall", "wicked-bus", "--claude-home", w.cfg]
+        : [join(ROOT, "dist", "install-claude.js"), "uninstall", "wicked-bus", "--claude-home", w.cfg];
+      const r = spawnSync(process.execPath, argv, { encoding: "utf8", env, cwd: w.home, timeout: 60_000 });
+      const out = `${r.stdout}${r.stderr}`;
+      assert.equal(r.status, 0, out);
+      const kept = readdirSync(join(w.cfg, "wicked-installer", "kept-skills"));
+      assert.equal(kept.length, 2, out);
+      for (const name of kept) {
+        const at = join(w.cfg, "wicked-installer", "kept-skills", name);
+        assert.ok(out.includes(` kept at ${at} `), `${central ? "central" : "direct"} output names ${at}:\n${out}`);
+      }
+    } finally {
+      rmSync(w.home, { recursive: true, force: true });
+    }
+  }
+});
+
+// PARTIAL FAILURE: one matching dir moves, the next one cannot (a dir changing parent needs write access to itself).
+// The moved one stays kept, the other stays in place, the marker keeps the record, and a re-run finishes the job.
+test("Claude v1-marker uninstall: a move that fails after another succeeded keeps the record; a re-run finishes", { skip: skip || (process.getuid?.() === 0 ? "root ignores the mode" : false) }, () => {
+  const w = world();
+  const stuck = join(w.cfg, "skills", "wicked-bus-status");
+  const markerFile = join(w.cfg, "wicked-installer", "claude-install.json");
+  try {
+    chmodSync(stuck, 0o555);
+    let r = run(w);
+    chmodSync(stuck, 0o755);
+    assert.notEqual(r.status, 0, r.stdout);
+    let report = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus");
+    const byTarget = Object.fromEntries(report.actions.filter((a) => a.target?.startsWith("skills/")).map((a) => [a.target, a]));
+    assert.equal(byTarget["skills/wicked-bus-emit"].result, "ok");
+    assert.equal(byTarget["skills/wicked-bus-status"].result, "failed");
+    assert.match(byTarget["skills/wicked-bus-status"].detail, /^not moved \(.*\); the dir is left in place$/);
+    assert.equal(readFileSync(join(stuck, "SKILL.md"), "utf8"), "---\nname: wicked-bus-status\n---\nwicked-bus status\n", "the dir that failed to move is intact in place");
+    const keptDir = join(w.cfg, "wicked-installer", "kept-skills");
+    assert.deepEqual(readdirSync(keptDir).map((n) => n.replace(/-\d{4}-.*$/, "")), ["wicked-bus-emit"]);
+    assert.deepEqual(JSON.parse(readFileSync(markerFile, "utf8")).products.map((p) => p.id), ["wicked-bus"], "the record is kept for a re-run");
+
+    r = run(w);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.deepEqual(readdirSync(keptDir).map((n) => n.replace(/-\d{4}-.*$/, "")).sort(), ["wicked-bus-emit", "wicked-bus-status"]);
+    assert.equal(existsSync(stuck), false);
+    assert.equal(existsSync(markerFile), false, "the last record gone, the marker file goes; kept-skills stays");
+  } finally {
+    if (existsSync(stuck)) chmodSync(stuck, 0o755);
     rmSync(w.home, { recursive: true, force: true });
   }
 });
