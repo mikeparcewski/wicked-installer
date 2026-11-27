@@ -2,7 +2,7 @@
 // whose package ships them for all hosts (registry install.hostSkills: wicked-bus).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -205,8 +205,8 @@ for (const variant of ["outside", "dangling"]) {
       const src = join(home, "src");
       cpSync(join(ROOT, "tests", "fixtures", "wicked-bus-mini"), join(src, "wicked-bus"), { recursive: true });
       const claudeHome = join(home, ".claude");
-      const mine = join(claudeHome, "skills", "wicked-bus-emit");
-      const MINE = "---\nname: wicked-bus-emit\n---\nLOCAL CUSTOM CONTENT\n";
+      const mine = join(claudeHome, "skills", "wicked-bus-status");
+      const MINE = "---\nname: wicked-bus-status\n---\nLOCAL CUSTOM CONTENT\n";
       mkdirSync(mine, { recursive: true });
       writeFileSync(join(mine, "SKILL.md"), MINE);
       const outside = join(home, "outside");
@@ -221,6 +221,18 @@ for (const variant of ["outside", "dangling"]) {
       assert.equal(entry.success, false, JSON.stringify(entry));
       assert.match(entry.message, /kept-skills: is a symlink/, entry.message);
       assert.notEqual(r.status, 0);
+      // PARTIAL FAILURE / IDENTITY REUSE: skills the failed run already copied are journaled in the marker, so with the
+      // link gone a re-run recognizes them as its own and moves only the person's dir.
+      const copiedBefore = existsSync(join(claudeHome, "skills", "wicked-bus-emit"));
+      process.stdout.write(`# ${variant}: the failed run had ${copiedBefore ? "already copied" : "not yet copied"} wicked-bus-emit\n`);
+      unlinkSync(join(claudeHome, "wicked-installer", "kept-skills"));
+      const again = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "wicked-bus", "--skip-binaries", "--source-root", src, "--claude-home", claudeHome, "--json"], { encoding: "utf8", env, timeout: 60_000 });
+      assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+      const moved = JSON.parse(again.stdout).reports.find((e) => e.productId === "wicked-bus").actions.filter((a) => a.kind === "collision-moved");
+      assert.deepEqual(moved.map((a) => a.target), ["skills/wicked-bus-status"], JSON.stringify(moved));
+      const kept = readdirSync(join(claudeHome, "wicked-installer", "kept-skills"));
+      assert.equal(kept.length, 1, kept.join(", "));
+      assert.equal(readFileSync(join(claudeHome, "wicked-installer", "kept-skills", kept[0], "SKILL.md"), "utf8"), MINE);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
