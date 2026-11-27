@@ -447,14 +447,14 @@ function trainNpmGarden(
   run: (cmd: string, args: string[]) => { status: number | null; error?: string },
   latest: () => string | undefined,
   floor: string,
-): { status: "planned" | "updated" | "noted" | "failed"; message: string } | undefined {
+): { status: "planned" | "updated" | "noted" | "failed"; message: string; command?: string } | undefined {
   const npm = npmGardenForCrew(env, platform);
   if (npm === undefined) return undefined;
   if (!usable(npm)) return { status: "failed", message: `the npm-global wicked-garden crew falls back to is unusable: ${npm.refused}` };
   const fallback = `the npm-global wicked-garden (${npm.version}, ${npm.path}), crew's fallback after the Claude Code sources`;
   const args = npmInstallArgs(npm.path, platform, "wicked-garden@latest");
   const shown = shownCommand(args, platform);
-  if (dryRun) return { status: "planned", message: `dry-run: would compare ${fallback} with the published wicked-garden@latest and, if it is behind, run \`${shown}\`` };
+  if (dryRun) return { status: "planned", message: `dry-run: would compare ${fallback} with the published wicked-garden@latest and, if it is behind, run \`${shown}\``, command: shown };
   const published = latest();
   if (published === undefined) return { status: "noted", message: `could not read the published wicked-garden version (npm view), so ${fallback} was not checked against it` };
   // Behind the floor too (registry lag right after a publish): the floor step below does the one install.
@@ -571,6 +571,9 @@ export function ensureGardenForCrew(opts: {
     : trainNpmGarden(opts.dryRun, env, platform, run, opts.latest ?? (() => publishedGardenVersion(env, platform)), floor.version);
   if (train?.status === "failed") return { action: "failed", message: train.message };
   const r = floorStep(opts, env, platform, run, floor.version);
+  // (installer#95) Under dry-run both steps can plan the same install of the same copy: a real run runs it once (the
+  // train updates it, then the floor finds it present), so the plan names it once, with the floor's reason.
+  const trainLine = train?.status === "planned" && r.action === "planned" && r.command !== undefined && r.command === train.command ? undefined : train?.message;
   const quiet = r.action === "present" || r.action === "not-needed";
   const action = quiet && train?.status === "updated" ? "installed"
     : quiet && train?.status === "planned" ? "planned"
@@ -578,7 +581,7 @@ export function ensureGardenForCrew(opts: {
   // The summary names the copy crew will use after this run (not under dry-run: nothing changed yet).
   // A crew installed without any garden it can use still gets the report: its warning line names the fix.
   const report = action === "failed" || opts.dryRun ? "" : gardenReport(env, platform, floor.version);
-  return { action, message: [train?.message, r.message, report].filter((x) => x).join("\n") };
+  return { action, message: [trainLine, r.message, report].filter((x) => x).join("\n") };
 }
 
 /** crew's floor check on the copy this environment resolves (B3): present, or install/update it, or say why not. */
@@ -588,7 +591,7 @@ function floorStep(
   platform: NodeJS.Platform,
   run: (cmd: string, args: string[]) => { status: number | null; error?: string },
   floorVersion: string,
-): { action: "not-needed" | "present" | "planned" | "installed" | "failed"; message: string } {
+): { action: "not-needed" | "present" | "planned" | "installed" | "failed"; message: string; command?: string } {
   // A copy crew accepts anywhere in its walk (crew passes over a stale one and keeps looking) is enough.
   if (usable(findGardenForCrew(env, platform, floorVersion))) return { action: "present", message: "" };
   const now = findGardenForCrew(env, platform);
@@ -599,7 +602,7 @@ function floorStep(
     const args = npmInstallArgs(now.path, platform, "wicked-garden@latest");
     const fix = shownCommand(args, platform);
     if (opts.sourceRoot) return { action: "failed", message: `${stale}; with --source-root the published package is not installed in its place: update that checkout, or run \`${fix}\`` };
-    if (opts.dryRun) return { action: "planned", message: `dry-run: ${stale}; would run \`${fix}\`` };
+    if (opts.dryRun) return { action: "planned", message: `dry-run: ${stale}; would run \`${fix}\``, command: fix };
     return npmInstallGarden(run, args, env, platform, floorVersion, `${stale}; run \`${fix}\` yourself`);
   }
   // Another copy cannot fix a refusal (a bad override, a linked manifest), and an older crew does
