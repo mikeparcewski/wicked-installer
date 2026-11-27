@@ -1407,9 +1407,15 @@ function installSkills(
           detail: "foreign skill dir present; rename it and re-run",
         });
         continue;
-      } else {
-        // Ours (marker or signature): replace-on-install so upstream-deleted files don't linger.
+      } else if (owner === product.id) {
+        // Ours by the marker: replace-on-install so upstream-deleted files don't linger.
         rmSync(dest, { recursive: true, force: true });
+      } else {
+        // Ours only by its signature (no record): it may be a person's own copy. Move it aside, never delete it.
+        const kept = join(target.dir, "wicked-installer", "kept-skills", `${destName}-${Date.now()}`);
+        mkdirSync(dirname(kept), { recursive: true });
+        renameSync(dest, kept);
+        actions.push({ kind: "collision-skipped", target: markerPathRel, result: "ok", detail: `an unrecorded copy was moved to ${kept} before the install` });
       }
     }
 

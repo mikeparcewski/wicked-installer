@@ -164,3 +164,27 @@ for (const [cli, homeFlag, homeRel, skillsRel] of [
     }
   });
 }
+
+test("Claude's real script: an unrecorded same-named copy it adopts by signature is moved aside, never deleted", { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
+  const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
+  try {
+    const src = join(home, "src");
+    cpSync(join(ROOT, "tests", "fixtures", "wicked-bus-mini"), join(src, "wicked-bus"), { recursive: true });
+    const claudeHome = join(home, ".claude");
+    const mine = join(claudeHome, "skills", "wicked-bus-emit");
+    mkdirSync(mine, { recursive: true });
+    writeFileSync(join(mine, "SKILL.md"), "---\nname: wicked-bus-emit\n---\nLOCAL CUSTOM CONTENT\n");
+    const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
+    const r = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "wicked-bus", "--skip-binaries", "--source-root", src, "--claude-home", claudeHome, "--json"], { encoding: "utf8", env, timeout: 60_000 });
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const keptDir = join(claudeHome, "wicked-installer", "kept-skills");
+    const kept = readdirSync(keptDir).filter((d) => d.startsWith("wicked-bus-emit-"));
+    assert.equal(kept.length, 1);
+    assert.match(readFileSync(join(keptDir, kept[0], "SKILL.md"), "utf8"), /LOCAL CUSTOM CONTENT/);
+    assert.doesNotMatch(readFileSync(join(mine, "SKILL.md"), "utf8"), /LOCAL CUSTOM CONTENT/, "the bus skill is installed in its place");
+    const entry = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus");
+    assert.ok(entry.actions.some((a) => a.kind === "collision-skipped" && a.result === "ok" && a.detail.includes("kept-skills")), JSON.stringify(entry.actions));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
