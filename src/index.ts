@@ -425,7 +425,7 @@ export function hostSkillsStep(
         : bad[0]?.message ?? (!r.parsed ? "its script gave no report"
         : r.status !== 0 ? `its script exited ${r.status ?? "?"}`
         : missing.length > 0 ? `its script did not report ${missing.join(", ")}`
-        : empty.length > 0 ? "its script copied no skills (a same-named skill dir it does not own is left alone)"
+        : empty.length > 0 ? "its script copied no skills"
         : undefined);
       // A skill the script left alone (a same-named dir it does not own) is named even when others were copied.
       const leftAlone = mine.flatMap((e) => e.actions ?? []).filter((a) => a.kind === "collision-skipped" && a.result !== "ok");
@@ -437,6 +437,10 @@ export function hostSkillsStep(
         lines.push(`warning: ${names} skills were added to ${host.displayName}, but ${leftAlone.length} ${leftAlone.length === 1 ? "was" : "were"} left alone: ${which}; then run \`node ${retry}\``);
       } else {
         lines.push(`warning: ${names} skills were not added to ${host.displayName} (${why}); run \`node ${retry}\``);
+      }
+      // installer#87 (DES B): a same-named skill dir the installer did not write was moved aside, never lost: say where.
+      for (const a of mine.flatMap((e) => e.actions ?? []).filter((x) => x.kind === "collision-moved")) {
+        lines.push(`${host.displayName}: ${a.target ?? "?"} was not written by the installer; ${a.detail?.replace(/^a skill dir this installer did not write; /, "") ?? "moved aside"}`);
       }
     }
   }

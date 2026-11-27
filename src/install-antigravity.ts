@@ -592,21 +592,41 @@ function findSkillRootsRecursive(dir: string): string[] {
 
 
 /**
- * Skill dirs left alone this run: an existing dir this installer's marker does not record as this product's (another
- * tool or the person wrote it, whatever its SKILL.md says). Never overwritten; reported as `collision-skipped`
- * actions, as the Claude script reports them.
+ * installer#87 (DES B): an existing skill dir this installer's marker does not record is never overwritten or deleted:
+ * it is moved to `<host home>/wicked-installer/kept-skills/<name>-<stamp>` (one rename on the same volume), then the
+ * skill installs. Duplicated per script by design (INTERFACE.md §15: each host script is self-contained).
  */
-const foreignSkillDirs = new Map<string, string[]>();
-function foreignSkillDir(productId: string, dest: string, options: Options): boolean {
-  if (options.dryRun || !existsSync(dest)) return false;
-  const recorded: unknown = previousMarkerEntries(join(options.geminiHome, "wicked-installer", "antigravity-install.json")).find((e) => e.id === productId)?.skills;
-  if (Array.isArray(recorded) && recorded.includes(basename(dest))) return false;
-  foreignSkillDirs.set(productId, [...(foreignSkillDirs.get(productId) ?? []), dest]);
-  return true;
+function keepAside(home: string, dest: string, now: Date = new Date()): string {
+  const dir = join(home, "wicked-installer", "kept-skills");
+  mkdirSync(dir, { recursive: true });
+  // No ':' or '.' in the name: Windows refuses ':' in a path segment.
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  let kept = join(dir, `${basename(dest)}-${stamp}`);
+  for (let n = 1; existsSync(kept); n++) kept = join(dir, `${basename(dest)}-${stamp}-${n}`);
+  renameSync(dest, kept);
+  return kept;
 }
-function foreignSkillActions(productId: string): { actions?: Array<{ kind: string; target: string; result: string; detail: string }> } {
-  const dirs = foreignSkillDirs.get(productId) ?? [];
-  return dirs.length === 0 ? {} : { actions: dirs.map((target) => ({ kind: "collision-skipped", target, result: "skipped", detail: "a skill dir this installer did not write; rename it and re-run" })) };
+interface KeptAction { kind: "collision-moved"; target: string; result: "ok"; detail: string }
+function keptAction(target: string, kept: string): KeptAction {
+  return { kind: "collision-moved", target, result: "ok", detail: `a skill dir this installer did not write; moved to ${kept} before the install` };
+}
+
+/**
+ * installer#87 (DES B): an existing skill dir this installer's marker does not record as this product's (another tool
+ * or the person wrote it, whatever its SKILL.md says) is moved to <home>/wicked-installer/kept-skills/ before the copy,
+ * never overwritten or deleted. Each move is reported as a `collision-moved` action naming where the dir went.
+ */
+const keptSkillDirs = new Map<string, KeptAction[]>();
+function keepForeignSkillDir(productId: string, dest: string, options: Options): void {
+  if (options.dryRun || !existsSync(dest)) return;
+  const recorded: unknown = previousMarkerEntries(join(options.geminiHome, "wicked-installer", "antigravity-install.json")).find((e) => e.id === productId)?.skills;
+  if (Array.isArray(recorded) && recorded.includes(basename(dest))) return;
+  const kept = keepAside(options.geminiHome, dest);
+  keptSkillDirs.set(productId, [...(keptSkillDirs.get(productId) ?? []), keptAction(dest, kept)]);
+}
+function keptSkillActions(productId: string): { actions?: KeptAction[] } {
+  const moved = keptSkillDirs.get(productId) ?? [];
+  return moved.length === 0 ? {} : { actions: moved };
 }
 
 function copySkills(product: Product, root: string, options: Options): number {
@@ -619,7 +639,7 @@ function copySkills(product: Product, root: string, options: Options): number {
     const originalName = readSkillName(skillRoot);
     const nextName = antigravitySkillName(product.id, originalName ?? "", rel);
     const dest = join(options.geminiHome, "config", "skills", sanitizePathPart(nextName));
-    if (foreignSkillDir(product.id, dest, options)) continue;
+    keepForeignSkillDir(product.id, dest, options);
     copyTree(skillRoot, dest, options);
     rewriteCopiedSkillName(dest, originalName, nextName, options);
     recordCopiedSkill(product.id, sanitizePathPart(nextName));
@@ -740,7 +760,7 @@ async function installOne(product: Product, options: Options): Promise<InstallRe
       productId: product.id,
       displayName: product.displayName,
       success: true,
-      ...foreignSkillActions(product.id),
+      ...keptSkillActions(product.id),
       skipped,
       message: `${product.displayName}: ${skipped ? "manual step noted" : delivery} (${assetSummary})${pending.length > 0 ? " — runtime pending" : ""}`,
       delivery,

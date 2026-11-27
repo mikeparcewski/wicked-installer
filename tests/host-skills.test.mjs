@@ -106,7 +106,9 @@ test("the retry line survives a POSIX shell: a path with $, a quote or a space r
   assert.equal(shellQuote('C:\\Users\\a b\\"x"', "win32"), '"C:\\Users\\a b\\""x"""');
 });
 
-test("Claude's real script leaves a foreign same-named skill dir alone: the step names it instead of 'skills added'", { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
+// installer#87, DES B (approved 2026-11-27): one rule on all five hosts. A same-named skill dir this installer's marker
+// does not record is MOVED to <host home>/wicked-installer/kept-skills/ (content intact), then the skill installs.
+test("Claude's real script moves a foreign same-named skill dir aside, and the step says where it went", { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
   const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
   try {
     const src = join(home, "src");
@@ -121,70 +123,71 @@ test("Claude's real script leaves a foreign same-named skill dir alone: the step
       const report = JSON.parse(r.stdout);
       return { cli: cli.cli, displayName: cli.displayName, status: r.status, present: true, parsed: true, entries: report.reports, rawTail: "" };
     };
-    const lines = quiet(() => hostSkillsStep(["wicked-bus"], FLAGS, { hosts: () => [host("claude", "Claude Code")], run, platform: "linux" }));
-    assert.equal(lines.length, 1);
-    assert.match(lines[0], /^warning: Wicked Bus skills were added to Claude Code, but 1 was left alone: skills\/wicked-bus-emit \(foreign skill dir present; rename it and re-run\); then run `node /, lines[0]);
-    assert.equal(readFileSync(join(claudeHome, "skills", "wicked-bus-emit", "SKILL.md"), "utf8").includes("mine"), true, "the foreign dir is untouched");
+    const lines = quiet(() => hostSkillsStep(["wicked-bus"], FLAGS, { hosts: () => [host("claude", "Claude Code")], run, platform: "linux" })).map(strip);
+    const keptDir = join(claudeHome, "wicked-installer", "kept-skills");
+    const kept = readdirSync(keptDir).filter((d) => d.startsWith("wicked-bus-emit-"));
+    assert.equal(kept.length, 1, readdirSync(keptDir).join(", "));
+    assert.equal(readFileSync(join(keptDir, kept[0], "SKILL.md"), "utf8"), "---\nname: someone-elses\n---\nmine\n", "the person's dir is kept intact");
+    assert.deepEqual(lines, [
+      "Wicked Bus skills added to Claude Code",
+      `Claude Code: skills/wicked-bus-emit was not written by the installer; moved to ${join(keptDir, kept[0])} before the install`,
+    ]);
+    assert.doesNotMatch(readFileSync(join(claudeHome, "skills", "wicked-bus-emit", "SKILL.md"), "utf8"), /someone-elses/, "the bus skill is installed in its place");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-// codex-check on 0025669 (W20): the other host scripts overwrote a same-named skill dir they did not write.
-for (const [cli, homeFlag, homeRel, skillsRel] of [
-  ["pi", "--pi-home", join(".pi", "agent"), "skills"],
-  ["opencode", "--opencode-home", join(".config", "opencode"), "skills"],
-  ["codex", "--codex-home", ".codex", "skills"],
-  ["antigravity", "--gemini-home", ".gemini", join("config", "skills")],
+// codex-check on 0025669 and b7d57d1 (W20): a person's own same-named skill dir was overwritten (four hosts) or adopted
+// and deleted (Claude). Each host's real script, run as the direct path runs it.
+for (const [cli, homeFlag, homeRel, skillsRel, targetOf] of [
+  ["claude", "--claude-home", ".claude", "skills", () => "skills/wicked-bus-emit"],
+  ["pi", "--pi-home", join(".pi", "agent"), "skills", (abs) => abs],
+  ["opencode", "--opencode-home", join(".config", "opencode"), "skills", (abs) => abs],
+  ["codex", "--codex-home", ".codex", "skills", (abs) => abs],
+  ["antigravity", "--gemini-home", ".gemini", join("config", "skills"), (abs) => abs],
 ]) {
-  test(`install-${cli}.js leaves a foreign same-named skill dir alone and reports it, whatever its SKILL.md names; its own recorded copy is not reported`, { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
+  test(`install-${cli}.js moves an unrecorded same-named skill dir to kept-skills, content intact, then installs; its own recorded copy is replaced in place; --dry-run moves nothing`, { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
     const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
     try {
       const src = join(home, "src");
       cpSync(join(ROOT, "tests", "fixtures", "wicked-bus-mini"), join(src, "wicked-bus"), { recursive: true });
-      const skills = join(home, homeRel, skillsRel);
-      const foreign = join(skills, "wicked-bus-emit");
-      mkdirSync(foreign, { recursive: true });
+      const hostHome = join(home, homeRel);
+      const skills = join(hostHome, skillsRel);
+      const mine = join(skills, "wicked-bus-emit");
+      const MINE = "---\nname: wicked-bus-emit\n---\nLOCAL CUSTOM CONTENT\n";
+      mkdirSync(mine, { recursive: true });
       // The person's own skill under the bus's install name, even naming itself as the bus skill does: the marker decides.
-      writeFileSync(join(foreign, "SKILL.md"), "---\nname: wicked-bus-emit\n---\nmine\n");
+      writeFileSync(join(mine, "SKILL.md"), MINE);
       const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
-      const run = () => spawnSync(process.execPath, [join(ROOT, "dist", `install-${cli}.js`), "wicked-bus", "--skip-binaries", "--source-root", src, homeFlag, join(home, homeRel), "--json"], { encoding: "utf8", env, timeout: 60_000 });
+      const run = (...extra) => spawnSync(process.execPath, [join(ROOT, "dist", `install-${cli}.js`), "wicked-bus", "--skip-binaries", "--source-root", src, homeFlag, hostHome, "--json", ...extra], { encoding: "utf8", env, timeout: 60_000 });
+      const keptDir = join(hostHome, "wicked-installer", "kept-skills");
+
+      const dry = run("--dry-run");
+      assert.equal(dry.status, 0, `${dry.stdout}\n${dry.stderr}`);
+      assert.equal(readFileSync(join(mine, "SKILL.md"), "utf8"), MINE, "--dry-run leaves the dir in place");
+      assert.equal(existsSync(keptDir), false, "--dry-run moves nothing");
+
       const r = run();
       assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-      assert.equal(readFileSync(join(foreign, "SKILL.md"), "utf8"), "---\nname: wicked-bus-emit\n---\nmine\n", "the foreign dir is untouched");
+      const kept = readdirSync(keptDir).filter((d) => d.startsWith("wicked-bus-emit-"));
+      assert.equal(kept.length, 1, readdirSync(keptDir).join(", "));
+      assert.equal(readFileSync(join(keptDir, kept[0], "SKILL.md"), "utf8"), MINE, "the person's dir is kept intact");
+      assert.doesNotMatch(readFileSync(join(mine, "SKILL.md"), "utf8"), /LOCAL CUSTOM CONTENT/, "the bus skill is installed in its place");
       const entry = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus");
-      assert.deepEqual(entry.actions?.map((a) => [a.kind, a.target, a.result]), [["collision-skipped", foreign, "skipped"]]);
-      const own = readdirSync(skills).filter((d) => /status/.test(d));
-      assert.equal(own.length, 1, readdirSync(skills).join(", "));
-      // The installer's own copy (recorded in its marker) is not foreign: a second run reports only the person's dir.
-      const again = JSON.parse(run().stdout).reports.find((e) => e.productId === "wicked-bus");
-      assert.deepEqual(again.actions?.map((a) => a.target), [foreign]);
+      const moved = (entry.actions ?? []).filter((a) => a.kind === "collision-moved");
+      assert.deepEqual(moved.map((a) => [a.target, a.result]), [[targetOf(mine), "ok"]], JSON.stringify(entry.actions));
+      assert.match(moved[0].detail, new RegExp(`moved to ${join(keptDir, kept[0]).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} before the install`));
+      assert.equal(readdirSync(skills).filter((d) => /status/.test(d)).length, 1, readdirSync(skills).join(", "));
+
+      // The installer's own copy is recorded in its marker: a second run replaces it in place and moves nothing.
+      const again = run();
+      assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+      const entry2 = JSON.parse(again.stdout).reports.find((e) => e.productId === "wicked-bus");
+      assert.deepEqual((entry2.actions ?? []).filter((a) => a.kind === "collision-moved" || a.kind === "collision-skipped"), [], JSON.stringify(entry2.actions));
+      assert.equal(readdirSync(keptDir).length, 1, "nothing more was moved");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 }
-
-test("Claude's real script: an unrecorded same-named copy it adopts by signature is moved aside, never deleted", { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
-  const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
-  try {
-    const src = join(home, "src");
-    cpSync(join(ROOT, "tests", "fixtures", "wicked-bus-mini"), join(src, "wicked-bus"), { recursive: true });
-    const claudeHome = join(home, ".claude");
-    const mine = join(claudeHome, "skills", "wicked-bus-emit");
-    mkdirSync(mine, { recursive: true });
-    writeFileSync(join(mine, "SKILL.md"), "---\nname: wicked-bus-emit\n---\nLOCAL CUSTOM CONTENT\n");
-    const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
-    const r = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "wicked-bus", "--skip-binaries", "--source-root", src, "--claude-home", claudeHome, "--json"], { encoding: "utf8", env, timeout: 60_000 });
-    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    const keptDir = join(claudeHome, "wicked-installer", "kept-skills");
-    const kept = readdirSync(keptDir).filter((d) => d.startsWith("wicked-bus-emit-"));
-    assert.equal(kept.length, 1);
-    assert.match(readFileSync(join(keptDir, kept[0], "SKILL.md"), "utf8"), /LOCAL CUSTOM CONTENT/);
-    assert.doesNotMatch(readFileSync(join(mine, "SKILL.md"), "utf8"), /LOCAL CUSTOM CONTENT/, "the bus skill is installed in its place");
-    const entry = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus");
-    assert.ok(entry.actions.some((a) => a.kind === "collision-skipped" && a.result === "ok" && a.detail.includes("kept-skills")), JSON.stringify(entry.actions));
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
