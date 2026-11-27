@@ -1390,6 +1390,9 @@ function linksLeavingDir(dir: string): number {
 }
 
 function keptAction(target: string, kept: string, leaving = 0): Action {
+  // On stderr at once: a later error (a marker that cannot be written, say) can end the run before any report, and the
+  // person must still learn where their dir went. stdout stays pure for --json.
+  console.error(`kept ${target} at ${kept}`);
   const links = leaving > 0 ? `; ${leaving} relative link(s) inside point outside it and may dangle or point elsewhere now` : "";
   return { kind: "collision-moved", target, result: "ok", detail: `a skill dir this installer did not write; moved to ${kept} before the install${links}` };
 }

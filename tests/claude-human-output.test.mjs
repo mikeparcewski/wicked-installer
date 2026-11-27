@@ -73,3 +73,25 @@ test("uninstall: a refused move that a note already names is printed once", { sk
     rmSync(w.home, { recursive: true, force: true });
   }
 });
+
+// PARTIAL FAILURE on install (codex r1): the person's dir is moved, then the marker cannot be written and the run ends
+// before any report. The kept path was already on stderr.
+test("install: a marker write that fails after a move still leaves the kept path on stderr", { skip: skip || (process.getuid?.() === 0 ? "root ignores the mode" : false) }, () => {
+  const w = world();
+  const markerDir = join(w.cfg, "wicked-installer");
+  try {
+    mkdirSync(w.emit, { recursive: true });
+    writeFileSync(join(w.emit, "SKILL.md"), "---\nname: wicked-bus-emit\n---\nmine\n");
+    mkdirSync(join(markerDir, "kept-skills"), { recursive: true });
+    chmodSync(markerDir, 0o555); // kept-skills is writable, the marker beside it is not
+    const r = node(w, script("wicked-bus", "--skip-binaries", "--source-root", w.src, "--claude-home", w.cfg, "--json"));
+    chmodSync(markerDir, 0o755);
+    assert.notEqual(r.status, 0, r.out);
+    const [kept] = readdirSync(join(markerDir, "kept-skills"));
+    assert.ok(kept, "the dir was moved before the failure");
+    assert.ok(r.stderr.includes(`kept skills/wicked-bus-emit at ${join(markerDir, "kept-skills", kept)}\n`), r.out);
+  } finally {
+    try { chmodSync(markerDir, 0o755); } catch { /* absent */ }
+    rmSync(w.home, { recursive: true, force: true });
+  }
+});
