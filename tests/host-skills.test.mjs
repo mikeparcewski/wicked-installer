@@ -9,7 +9,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const { hostSkillsStep, cliScriptArgs, shellQuote } = await import("../dist/index.js");
+const { hostSkillsStep, cliScriptArgs, shellQuote, HOST_SKILLS_HOSTS } = await import("../dist/index.js");
+const HELD = /^Wicked Bus skills are not added to (.+) by this path yet: their scripts would overwrite a same-named skill dir you made \(wicked-installer#100\)$/;
 const FLAGS = { dryRun: false, force: false, interactive: false, claudeHomes: [] };
 const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const quiet = (fn) => { const o = console.log; console.log = () => {}; try { return fn(); } finally { console.log = o; } };
@@ -24,13 +25,19 @@ test("the registry marks wicked-bus (and only npm-global products) for every hos
   assert.ok(marked.every((p) => p.install.type === "npm-global"));
 });
 
-test("bus in the set: each detected host's own script runs once with just the bus, binaries skipped", () => {
+test("bus in the set: Claude's script runs once with just the bus, binaries skipped; the held hosts are named, not run (#92 narrowed, #100)", () => {
+  assert.deepEqual([...HOST_SKILLS_HOSTS], ["claude"]);
   const calls = [];
   const hosts = [host("claude", "Claude Code"), host("codex", "Codex"), host("opencode", "OpenCode"), host("pi", "Pi"), host("antigravity", "Antigravity")];
   const lines = quiet(() => hostSkillsStep(["wicked-estate", "wicked-bus", "wicked-crew"], FLAGS, { hosts: () => hosts, run: okRun(calls) }));
-  assert.deepEqual(calls, hosts.map((h) => [h.cli, "wicked-bus"]));
-  assert.equal(lines.length, 5);
-  assert.match(lines[0], /Wicked Bus skills added to Claude Code/);
+  assert.deepEqual(calls, [["claude", "wicked-bus"]]);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^Wicked Bus skills added to Claude Code$/);
+  assert.equal(lines[1].match(HELD)?.[1], "Codex, OpenCode, Pi, Antigravity", lines[1]);
+  // Only held hosts detected: nothing runs, and the line says why.
+  const only = quiet(() => hostSkillsStep(["wicked-bus"], FLAGS, { hosts: () => [host("pi", "Pi")], run: () => assert.fail("a held host is not run") }));
+  assert.equal(only.length, 1);
+  assert.equal(only[0].match(HELD)?.[1], "Pi", only[0]);
 });
 
 test("no hostSkills product in the set: nothing runs and nothing prints", () => {
@@ -39,18 +46,16 @@ test("no hostSkills product in the set: nothing runs and nothing prints", () => 
 });
 
 test("--dry-run spawns nothing and prints the plan per host", () => {
-  const lines = quiet(() => hostSkillsStep(["wicked-bus"], { ...FLAGS, dryRun: true }, { hosts: () => [host("codex", "Codex"), host("pi", "Pi")], run: () => assert.fail("dry-run") }));
-  assert.equal(lines.length, 1);
-  assert.match(lines[0], /^dry-run: would add the skills of Wicked Bus to Codex, Pi/);
+  const lines = quiet(() => hostSkillsStep(["wicked-bus"], { ...FLAGS, dryRun: true }, { hosts: () => [host("claude", "Claude Code"), host("codex", "Codex"), host("pi", "Pi")], run: () => assert.fail("dry-run") }));
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^dry-run: would add the skills of Wicked Bus to Claude Code \(/);
+  assert.equal(lines[1].match(HELD)?.[1], "Codex, Pi", lines[1]);
 });
 
-test("a host that fails is a warning naming its command; the others still get the skills; no host is named once", () => {
-  const calls = [];
-  const good = okRun(calls);
-  const run = (cli, ids) => cli.cli === "pi" ? { cli: "pi", displayName: "Pi", status: 1, present: true, parsed: true, entries: [{ productId: "wicked-bus", success: false, skipped: false, message: "EACCES on the skills dir" }], rawTail: "" } : good(cli, ids);
-  const lines = quiet(() => hostSkillsStep(["wicked-bus"], FLAGS, { hosts: () => [host("pi", "Pi"), host("codex", "Codex")], run }));
-  assert.match(lines[0], /^warning: Wicked Bus skills were not added to Pi \(EACCES on the skills dir\); run `node \/x\/install-pi\.js wicked-bus --json --skip-binaries`/);
-  assert.match(lines[1], /added to Codex/);
+test("a host that fails is a warning naming its command; no host detected is named once", () => {
+  const run = (cli) => ({ cli: cli.cli, displayName: cli.displayName, status: 1, present: true, parsed: true, entries: [{ productId: "wicked-bus", success: false, skipped: false, message: "EACCES on the skills dir" }], rawTail: "" });
+  const lines = quiet(() => hostSkillsStep(["wicked-bus"], FLAGS, { hosts: () => [host("claude", "Claude Code")], run }));
+  assert.match(lines[0], /^warning: Wicked Bus skills were not added to Claude Code \(EACCES on the skills dir\); run `node \/x\/install-claude\.js wicked-bus --json --skip-binaries`/);
   const none = quiet(() => hostSkillsStep(["wicked-bus"], FLAGS, { hosts: () => [], run: () => assert.fail("no host") }));
   assert.match(none[0], /no supported host detected/);
 });
@@ -140,12 +145,10 @@ test("Claude's real script moves a foreign same-named skill dir aside, and the s
 
 // codex-check on 0025669 and b7d57d1 (W20): a person's own same-named skill dir was overwritten (four hosts) or adopted
 // and deleted (Claude). Each host's real script, run as the direct path runs it.
+// #92 narrowed (last codex check, W12 on the other four scripts): Claude is the host the direct path runs; the other four
+// get this test when they join (wicked-installer#100).
 for (const [cli, homeFlag, homeRel, skillsRel, targetOf] of [
   ["claude", "--claude-home", ".claude", "skills", () => "skills/wicked-bus-emit"],
-  ["pi", "--pi-home", join(".pi", "agent"), "skills", (abs) => abs],
-  ["opencode", "--opencode-home", join(".config", "opencode"), "skills", (abs) => abs],
-  ["codex", "--codex-home", ".codex", "skills", (abs) => abs],
-  ["antigravity", "--gemini-home", ".gemini", join("config", "skills"), (abs) => abs],
 ]) {
   test(`install-${cli}.js moves an unrecorded same-named skill dir to kept-skills, content intact, then installs; its own recorded copy is replaced in place; --dry-run moves nothing`, { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
     const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));

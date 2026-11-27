@@ -405,6 +405,13 @@ function detectedHosts(): CliOption[] {
 }
 
 /**
+ * The hosts the direct path gives hostSkills products' skills (installer#92, narrowed by its last codex check): only
+ * Claude Code's script moves a person's own same-named skill dir to kept-skills and reports it on every outcome. The
+ * other hosts join once their scripts do (wicked-installer#100).
+ */
+export const HOST_SKILLS_HOSTS: ReadonlySet<string> = new Set(["claude"]);
+
+/**
  * (installer#87) The direct path installs npm-global products machine-wide and runs no host script, so a product
  * whose package ships skills for every host (registry `install.hostSkills`, wicked-bus) reached none. Each detected
  * host's own script now delivers them (binaries already acquired), at the path that script uses for every product.
@@ -418,13 +425,15 @@ export function hostSkillsStep(
 ): string[] {
   const ids = productIds.filter((id) => getProduct(id)?.install.hostSkills === true);
   if (ids.length === 0) return [];
-  const hosts = (deps.hosts ?? detectedHosts)();
+  const detected = (deps.hosts ?? detectedHosts)();
+  const hosts = detected.filter((h) => HOST_SKILLS_HOSTS.has(h.cli));
+  const held = detected.filter((h) => !HOST_SKILLS_HOSTS.has(h.cli));
   const names = ids.map((id) => getProduct(id)?.displayName ?? id).join(", ");
   const lines: string[] = [];
-  if (hosts.length === 0) {
+  if (detected.length === 0) {
     lines.push(`${names}: no supported host detected, so no host gets its skills; install one, then run \`npx wicked-installer install ${ids.join(" ")}\``);
   } else if (flags.dryRun) {
-    lines.push(`dry-run: would add the skills of ${names} to ${hosts.map((h) => h.displayName).join(", ")} (each host's own install script, binaries already acquired)`);
+    if (hosts.length > 0) lines.push(`dry-run: would add the skills of ${names} to ${hosts.map((h) => h.displayName).join(", ")} (each host's own install script, binaries already acquired)`);
   } else {
     const run = deps.run ?? ((cli: CliOption, list: string[]) => runCliScript(cli, list, flags, true));
     for (const host of hosts) {
@@ -456,6 +465,9 @@ export function hostSkillsStep(
         lines.push(`${host.displayName}: ${a.target ?? "?"} was not written by the installer; ${a.detail?.replace(/^a skill dir this installer did not write; /, "") ?? "moved aside"}`);
       }
     }
+  }
+  if (held.length > 0) {
+    lines.push(`${names} skills are not added to ${held.map((h) => h.displayName).join(", ")} by this path yet: their scripts would overwrite a same-named skill dir you made (wicked-installer#100)`);
   }
   console.log("");
   for (const line of lines) console.log(line.startsWith("warning:") ? chalk.yellow(line) : chalk.dim(line));
