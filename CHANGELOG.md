@@ -5,6 +5,22 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-27
+
+Patch release on the train-17 cut 35d86b17, carrying 1 PR since 0.11.2: #91. Pairs with wicked-crew 0.20.0
+(wicked-core-ts 0.16.1). The entry was written from the PR's description.
+
+### Fixed
+
+- **The npm-global wicked-garden moves with the train, and the summary names the garden crew uses (#90).** When the
+  install set includes wicked-crew and the npm-global `wicked-garden` crew falls back to is behind the published
+  `wicked-garden@latest`, the installer runs `npm install -g --prefix <the prefix that owns that copy> wicked-garden@latest`
+  and checks that the copy moved, even when a Claude Code plugin cache already satisfies crew in this shell. A run
+  that leaves it behind fails the install. `--dry-run` spawns nothing; an offline registry gives a note; registry lag,
+  `WICKED_CREW_SKILLS_SOURCE` and `--source-root` are the exceptions. The summary then names the copy crew will use
+  (`crew will use wicked-garden <version> (<source>, <path>)`), by crew's floor rule, and the copy a crew started
+  without this shell's `CLAUDE_CONFIG_DIR` would use when that differs. A view with no usable garden gets a `warning:` line.
+
 ## [0.11.2] - 2026-11-25
 
 Patch release on the train-14 cut 898a882a, carrying 2 PRs since 0.11.1: #83, #88. Pairs with wicked-crew 0.18.22

@@ -18,9 +18,9 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const { findGardenForCrew, ensureGardenForCrew, crewGardenFloor } = await import("../dist/crew-garden.js");
+const { findGardenForCrew, ensureGardenForCrew, crewGardenFloor, npmGardenForCrew, gardenReport, winShellArg, shownCommand, semverCompare } = await import("../dist/crew-garden.js");
 const { preflight } = await import("../dist/readiness.js");
-const { doneLine, crewStateOf, renderSummary, directHostsFor, GRID_LEGEND, STUDIO_URL } = await import("../dist/index.js");
+const { doneLine, crewStateOf, renderSummary, directHostsFor, GRID_LEGEND, STUDIO_URL, gardenStep } = await import("../dist/index.js");
 const { runUvInstaller, ensureUv } = await import("../dist/uv.js");
 const { pathFix } = await import("../dist/release-binary.js");
 const registry = JSON.parse(readFileSync(join(root, "registry.json"), "utf8"));
@@ -108,6 +108,8 @@ test("findGardenForCrew: the wicked-garden package beside crew's global install"
   symlinkSync(join(crew, "dist", "cli.js"), join(sb.bin, "wicked-crew"));
   assert.equal(findGardenForCrew(sb.env, "linux"), undefined);
   sb.pluginRoot(join(nm, "wicked-garden"));
+  assert.equal(findGardenForCrew(sb.env, "linux"), undefined, "no package.json naming wicked-garden: crew skips it");
+  writeFileSync(join(nm, "wicked-garden", "package.json"), '{"name":"wicked-garden"}');
   assert.equal(findGardenForCrew(sb.env, "linux")?.source, "npm package beside wicked-crew");
 });
 
@@ -379,6 +381,7 @@ test("the current crew (>= 0.18.0) on PATH gets the installer locations", { skip
   const sb = sandbox(t);
   const crew = fakeCrew(sb, "0.18.0");
   sb.pluginRoot(join(dirname(crew), "wicked-garden"));
+  writeFileSync(join(dirname(crew), "wicked-garden", "package.json"), '{"name":"wicked-garden"}');
   assert.equal(findGardenForCrew(sb.env, "linux")?.source, "npm package beside wicked-crew");
 });
 
@@ -448,10 +451,12 @@ test("#56: an npm garden below the floor is upgraded once with npm install -g wi
       const crew = fakeCrew(sb, "0.18.1");
       dir = join(dirname(crew), "wicked-garden");
       sb.pluginRoot(dir, "12.66.0");
+      writeFileSync(join(dir, "package.json"), '{"name":"wicked-garden"}'); // a real npm package (crew checks the name)
     } else dir = npmGarden(sb, "12.66.0");
     const calls = [];
     const r = ensure(sb, { run: (cmd, args) => { calls.push([cmd, ...args]); setVersion(dir, "12.67.0"); return { status: 0 }; } });
-    assert.deepEqual(calls, [["npm", "install", "-g", "wicked-garden@latest"]]);
+    // installer#90 r2: the repair writes into the prefix that owns the stale copy.
+    assert.deepEqual(calls, [["npm", "install", "-g", "--prefix", realpathSync(join(sb.tmp, "prefix")), "wicked-garden@latest"]]);
     assert.equal(r.action, "installed", r.message);
   }
 });
@@ -471,7 +476,7 @@ test("#56: a failed or ineffective upgrade is failed, never present", { skip }, 
   assert.equal(bad.action, "failed");
   assert.match(bad.message, /12\.66\.0/);
   assert.match(bad.message, /12\.66\.1/);
-  assert.match(bad.message, /npm install -g wicked-garden@latest/);
+  assert.match(bad.message, /npm install -g --prefix \S+ wicked-garden@latest/, "installer#90 r2: the repair names the owning prefix");
   let n = 0;
   const same = ensure(sb, { run: () => { n += 1; return { status: 0 }; } });
   assert.equal(same.action, "failed", "exit 0 but still 12.66.0");
@@ -485,7 +490,7 @@ test("#56: dry-run plans the upgrade; --source-root never installs the published
   const never = () => assert.fail("must not run npm");
   const dry = ensure(sb, { dryRun: true, run: never });
   assert.equal(dry.action, "planned");
-  assert.match(dry.message, /npm install -g wicked-garden@latest/);
+  assert.match(dry.message, /npm install -g --prefix \S+ wicked-garden@latest/);
   const src = ensure(sb, { sourceRoot: join(sb.tmp, "src"), run: never });
   assert.equal(src.action, "failed");
   assert.match(src.message, /--source-root/);
@@ -689,4 +694,232 @@ test("#64: status distinguishes installer targets from Crew helpers", { skip }, 
   const r = spawnSync(process.execPath, [join(root, "dist/index.js"), "status", "--offline", "--dry-run"], { env: sb.env, encoding: "utf8" });
   assert.equal(r.status, 1, r.stderr);
   assert.match(strip(r.stdout), /Detected CLIs:\n[^\n]*installer adds skills and MCP servers[^\n]*Wicked Crew picks its own helpers[^\n]*Studio under Helpers/);
+});
+
+// --- installer#90 (F-REL): the npm garden moves with the train; the summary names the copy crew uses ---
+
+/** crew `version` on PATH whose plugin-source.js carries `floor` (crewGardenFloor reads it as text). */
+function fakeCrewWithFloor(sb, version, floor) {
+  const crew = fakeCrew(sb, version);
+  mkdirSync(join(crew, "dist", "skills"), { recursive: true });
+  writeFileSync(join(crew, "dist", "skills", "plugin-source.js"), `export const REQUIRED_GARDEN_VERSION = '${floor}';\n`);
+  return crew;
+}
+
+/** An npm-global wicked-garden at `version` with its launcher on the sandbox PATH (crew's tier 4). */
+function fakeNpmGarden(sb, version) {
+  const pkg = join(sb.tmp, "prefix", "lib", "node_modules", "wicked-garden");
+  sb.pluginRoot(pkg, version);
+  writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "wicked-garden", version }));
+  writeFileSync(join(pkg, "install.mjs"), "", { mode: 0o755 });
+  symlinkSync(join(pkg, "install.mjs"), join(sb.bin, "wicked-garden"));
+  return pkg;
+}
+
+const prefixOf = (sb) => realpathSync(join(sb.tmp, "prefix"));
+const trainArgs = (sb) => ["npm", "install", "-g", "--prefix", prefixOf(sb), "wicked-garden@latest"];
+
+test("installer#90: a plugin cache at the train's version does not leave the npm garden a train behind", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  const cfg = join(sb.tmp, "cfg");
+  sb.pluginRoot(join(cfg, "plugins", "cache", "wicked-garden", "wicked-garden", "12.69.0"));
+  const pkg = fakeNpmGarden(sb, "12.67.0");
+  const env = { ...sb.env, CLAUDE_CONFIG_DIR: cfg };
+  const calls = [];
+  const r = ensureGardenForCrew({
+    productIds: ["wicked-crew"], dryRun: false, env, platform: "linux", latest: () => "12.69.0",
+    run: (cmd, args) => { calls.push([cmd, ...args]); sb.pluginRoot(pkg, "12.69.0"); return { status: 0 }; },
+  });
+  assert.deepEqual(calls, [trainArgs(sb)], "updated in the prefix that owns the copy crew falls back to");
+  assert.equal(r.action, "installed", r.message);
+  assert.match(r.message, /12\.67\.0 -> 12\.69\.0/);
+  assert.match(r.message, /crew will use wicked-garden 12\.69\.0 \(Claude Code plugin cache/);
+  // Current already: nothing runs, and the report still names the copy.
+  const again = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env, platform: "linux", latest: () => "12.69.0", run: () => assert.fail("already current") });
+  assert.equal(again.action, "present", again.message);
+});
+
+test("installer#90: dry-run spawns nothing (no npm view either) and plans the update", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  fakeNpmGarden(sb, "12.68.0");
+  const dry = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: true, env: sb.env, platform: "linux", latest: () => assert.fail("dry-run reads no registry"), run: () => assert.fail("dry-run") });
+  assert.equal(dry.action, "planned");
+  assert.match(dry.message, /would compare .*12\.68\.0.* with the published wicked-garden@latest/);
+  assert.ok(dry.message.includes(`npm install -g --prefix ${prefixOf(sb)} wicked-garden@latest`));
+});
+
+test("installer#90: a failed or stuck update fails the step, names the copy and its state, and runs npm once", { skip }, (t) => {
+  for (const [label, run, want] of [
+    ["stuck", () => ({ status: 0 }), /is still 12\.67\.0, behind the published 12\.69\.0 \(npm exited 0\)/],
+    ["npm error", () => ({ status: 243 }), /npm exited 243/],
+  ]) {
+    const sb = sandbox(t);
+    fakeCrewWithFloor(sb, "0.19.0", "12.66.0");
+    fakeNpmGarden(sb, "12.67.0");
+    let n = 0;
+    const r = ensureGardenForCrew({ productIds: ["wicked-crew", "wicked-garden"], dryRun: false, env: sb.env, platform: "linux", latest: () => "12.69.0", run: (...a) => { n += 1; return run(...a); } });
+    assert.equal(r.action, "failed", label);
+    assert.match(r.message, want, label);
+    assert.equal(n, 1, `${label}: one npm run`);
+  }
+});
+
+test("installer#90: prerelease, registry lag, offline and opt-outs", { skip }, (t) => {
+  // A prerelease of the published version is behind it (SemVer precedence, as crew compares).
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  const pkg = fakeNpmGarden(sb, "12.69.0-rc.1");
+  const calls = [];
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", latest: () => "12.69.0", run: (c, a) => { calls.push([c, ...a]); sb.pluginRoot(pkg, "12.69.0"); return { status: 0 }; } });
+  assert.deepEqual(calls, [trainArgs(sb)]);
+  assert.equal(r.action, "installed", r.message);
+  // Registry lag: published below crew's floor -> one install, by the floor step.
+  const lag = sandbox(t);
+  fakeCrewWithFloor(lag, "0.19.0", "12.69.0");
+  const lpkg = fakeNpmGarden(lag, "12.67.0");
+  const lcalls = [];
+  ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: lag.env, platform: "linux", latest: () => "12.68.0", run: (c, a) => { lcalls.push([c, ...a]); lag.pluginRoot(lpkg, "12.69.0"); return { status: 0 }; } });
+  assert.deepEqual(lcalls, [trainArgs(lag)], "one npm install, not two, into the owning prefix");
+  // Offline: a note, nothing run, still present.
+  const off = sandbox(t);
+  fakeCrewWithFloor(off, "0.19.0", "12.68.0");
+  fakeNpmGarden(off, "12.68.0");
+  const o = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: off.env, platform: "linux", latest: () => undefined, run: () => assert.fail("offline") });
+  assert.equal(o.action, "present");
+  assert.match(o.message, /could not read the published wicked-garden version/);
+  // WICKED_CREW_SKILLS_SOURCE and --source-root opt out of the train step.
+  const opt = sandbox(t);
+  fakeCrewWithFloor(opt, "0.19.0", "12.66.0");
+  const optPkg = fakeNpmGarden(opt, "12.67.0");
+  const never = () => assert.fail("opted out");
+  ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: { ...opt.env, WICKED_CREW_SKILLS_SOURCE: optPkg }, platform: "linux", latest: never, run: never });
+  ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, sourceRoot: opt.tmp, env: opt.env, platform: "linux", latest: never, run: never });
+});
+
+test("installer#90: crew's npm walk: every launcher on PATH in order, package.json must name wicked-garden; beside-crew copies are updated too", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.66.0");
+  // First PATH dir: a wrapper launcher that is not inside a garden package.
+  const early = join(sb.tmp, "early");
+  sb.exe(early, "wicked-garden");
+  const pkg = fakeNpmGarden(sb, "12.67.0");
+  const env = { ...sb.env, PATH: `${early}:${sb.bin}` };
+  assert.equal(npmGardenForCrew(env, "linux")?.path, realpathSync(pkg), "the later launcher's package");
+  // Beside crew only.
+  const sb2 = sandbox(t);
+  const crew = fakeCrewWithFloor(sb2, "0.19.0", "12.66.0");
+  const beside = join(dirname(crew), "wicked-garden");
+  sb2.pluginRoot(beside, "12.67.0");
+  writeFileSync(join(beside, "package.json"), '{"name":"wicked-garden"}');
+  const calls = [];
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb2.env, platform: "linux", latest: () => "12.69.0", run: (c, a) => { calls.push([c, ...a]); sb2.pluginRoot(beside, "12.69.0"); return { status: 0 }; } });
+  assert.deepEqual(calls, [trainArgs(sb2)]);
+  assert.equal(r.action, "installed", r.message);
+});
+
+test("installer#90: the real npm seam: `npm view wicked-garden@latest version --json` on crew's PATH, JSON parsed", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  const pkg = fakeNpmGarden(sb, "12.68.0");
+  const log = join(sb.tmp, "npm.log");
+  // A stand-in npm: `view` prints a JSON string (as with --json), `install` moves the fixture's manifest.
+  writeFileSync(join(sb.bin, "npm"), `#!/bin/sh\necho "$*" >> '${log}'\ncase "$1" in\n  view) echo '"12.69.0"' ;;\n  install) printf '%s' '{"name":"wicked-garden","version":"12.69.0"}' > '${join(pkg, ".claude-plugin", "plugin.json")}' ;;\nesac\n`, { mode: 0o755 });
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux" });
+  assert.equal(r.action, "installed", r.message);
+  const lines = readFileSync(log, "utf8").trim().split("\n");
+  assert.deepEqual(lines, ["view wicked-garden@latest version --json --fetch-retries=0", `install -g --prefix ${prefixOf(sb)} wicked-garden@latest`]);
+});
+
+test("installer#90: the summary names the garden crew will use, by crew's floor rule, and the other view when CLAUDE_CONFIG_DIR changes the pick", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  const cfg = join(sb.tmp, "cfg");
+  sb.pluginRoot(join(cfg, "plugins", "cache", "wicked-garden", "wicked-garden", "12.69.0"));
+  const pkg = fakeNpmGarden(sb, "12.69.0");
+  const env = { ...sb.env, CLAUDE_CONFIG_DIR: cfg };
+  const never = () => assert.fail("current");
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env, platform: "linux", latest: () => "12.69.0", run: never });
+  assert.equal(r.action, "present");
+  assert.match(r.message, /^crew will use wicked-garden 12\.69\.0 \(Claude Code plugin cache/);
+  assert.match(r.message, /without CLAUDE_CONFIG_DIR[^\n]* will use wicked-garden 12\.69\.0 \(npm package \(wicked-garden on PATH\)/);
+  assert.ok(r.message.includes(realpathSync(pkg)), "the npm copy is named by its path");
+  // An old ~/.claude cache below crew's floor is passed over, as crew does: the bare view still lands on npm.
+  sb.pluginRoot(join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.65.0"));
+  assert.match(gardenReport(env, "linux", "12.68.0"), /without CLAUDE_CONFIG_DIR[^\n]* will use wicked-garden 12\.69\.0 \(npm package/);
+  // One view only: one line.
+  const solo = gardenReport(sb.env, "linux", "12.68.0");
+  assert.match(solo, /^crew will use wicked-garden 12\.69\.0 \(npm package \(wicked-garden on PATH\)/);
+  assert.doesNotMatch(solo, /CLAUDE_CONFIG_DIR/);
+  // A refusal in the bare view is named as one, not as "install npm".
+  const sb2 = sandbox(t);
+  fakeCrewWithFloor(sb2, "0.19.0", "12.68.0");
+  const cfg2 = join(sb2.tmp, "cfg");
+  sb2.pluginRoot(join(cfg2, "plugins", "cache", "wicked-garden", "wicked-garden", "12.69.0"));
+  const dflt = join(sb2.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.69.0");
+  mkdirSync(join(dflt, ".claude-plugin"), { recursive: true });
+  writeFileSync(join(sb2.tmp, "m.json"), '{"version":"12.69.0"}');
+  symlinkSync(join(sb2.tmp, "m.json"), join(dflt, ".claude-plugin", "plugin.json"));
+  const refused = gardenReport({ ...sb2.env, CLAUDE_CONFIG_DIR: cfg2 }, "linux", "12.68.0");
+  assert.match(refused, /^warning: a crew started without CLAUDE_CONFIG_DIR[^\n]*crew refuses discovery \(.*symlink/m);
+  assert.doesNotMatch(refused, /npm install/);
+});
+
+test("installer#90: a failed garden step fails the run (gardenStep is true, printed in red)", () => {
+  const { r, out } = captureLog(() => gardenStep(["wicked-crew"], { dryRun: false }, () => ({ action: "failed", message: "the npm-global wicked-garden ... is still 12.67.0" })));
+  assert.equal(r, true);
+  assert.match(out, /is still 12\.67\.0/);
+  const ok = captureLog(() => gardenStep(["wicked-crew"], { dryRun: false }, () => ({ action: "present", message: "crew will use wicked-garden 12.69.0 (x, y)\nwarning: a crew started without CLAUDE_CONFIG_DIR will use no wicked-garden" })));
+  assert.equal(ok.r, false);
+  assert.match(ok.out, /crew will use wicked-garden 12\.69\.0/);
+});
+
+test("installer#90 r2: a stale Claude cache crew passes over does not fail the step when a copy crew accepts exists", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  sb.pluginRoot(join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.67.0"));
+  fakeNpmGarden(sb, "12.69.0");
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", latest: () => "12.69.0", run: () => assert.fail("nothing to do") });
+  assert.equal(r.action, "present", r.message);
+  assert.match(r.message, /crew will use wicked-garden 12\.69\.0 \(npm package/);
+});
+
+test("installer#90 r2: a prerelease of crew's floor is below it, as crew compares (the only source fails, named)", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  sb.pluginRoot(join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.68.0-rc.1"));
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew", "wicked-garden"], dryRun: false, env: sb.env, platform: "linux", latest: () => undefined, run: () => assert.fail("a plugin cache is never replaced by npm") });
+  assert.equal(r.action, "failed", r.message);
+  assert.match(r.message, /12\.68\.0-rc\.1 .*older than the 12\.68\.0/);
+  assert.ok(semverCompare("12.68.0-rc.1", "12.68.0") < 0);
+  assert.equal(semverCompare("12.69.0-01", "12.68.0"), undefined, "leading zero in a numeric prerelease: not SemVer, as crew rejects it");
+});
+
+test("installer#90 r2: a refusal fails a crew install even when wicked-garden is not in the set", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  const dflt = join(sb.home, ".claude", "plugins", "cache", "wicked-garden", "wicked-garden", "12.69.0");
+  mkdirSync(join(dflt, ".claude-plugin"), { recursive: true });
+  writeFileSync(join(sb.tmp, "m.json"), '{"version":"12.69.0"}');
+  symlinkSync(join(sb.tmp, "m.json"), join(dflt, ".claude-plugin", "plugin.json"));
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", latest: () => undefined, run: () => assert.fail("no install fixes a refusal") });
+  assert.equal(r.action, "failed");
+  assert.match(r.message, /symlink/);
+});
+
+test("installer#90 r2: Windows arguments are quoted for cmd.exe (a prefix with a space or `&`), and the shown command can be pasted", () => {
+  assert.equal(winShellArg("C:\\Users\\Jane Doe\\AppData\\Roaming\\npm"), '"C:\\Users\\Jane Doe\\AppData\\Roaming\\npm"');
+  assert.equal(winShellArg("C:\\a&b"), '"C:\\a&b"');
+  assert.equal(winShellArg("wicked-garden@latest"), "wicked-garden@latest");
+  assert.equal(shownCommand(["install", "-g", "--prefix", "C:\\Jane Doe", "wicked-garden@latest"], "win32"), 'npm install -g --prefix "C:\\Jane Doe" wicked-garden@latest');
+  assert.equal(shownCommand(["install", "-g", "--prefix", "/opt/my npm", "wicked-garden@latest"], "linux"), "npm install -g --prefix '/opt/my npm' wicked-garden@latest");
+});
+
+test("installer#90: crew installed without any garden it can use gets the warning line (not-needed still reports)", { skip }, (t) => {
+  const sb = sandbox(t);
+  fakeCrewWithFloor(sb, "0.19.0", "12.68.0");
+  const r = ensureGardenForCrew({ productIds: ["wicked-crew"], dryRun: false, env: sb.env, platform: "linux", latest: () => assert.fail("no npm copy"), run: () => assert.fail("garden not in the set") });
+  assert.equal(r.action, "not-needed");
+  assert.match(r.message, /^warning: crew will use no wicked-garden: none at or above 12\.68\.0; run `npm install -g wicked-garden@latest`/);
 });
