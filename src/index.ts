@@ -23,6 +23,7 @@ import type { CapabilityReadiness, PreflightOptions } from "./readiness.js";
 import { ensureUv, findUv, runUvPythonInstaller, UV_PYTHON } from "./uv.js";
 import { ensureClusterForCrew } from "./kubernetes.js";
 import { crewEnv, ensureGardenForCrew } from "./crew-garden.js";
+import { gardenPairing } from "./garden-pairing.js";
 
 /**
  * Everything a claude-plugin product needs resolved is checked BEFORE anything is installed,
@@ -49,6 +50,17 @@ interface DispatchFlags {
   claudeHomes: string[];  // --claude-home <dir> (repeatable): explicit Claude config dir(s)
   offline?: boolean;      // --offline: the readiness check makes no network lookup (npx fallback not checked)
   interactive?: boolean;  // the picker asks before running Astral's installer; `install <ids>` already authorizes it
+}
+
+/**
+ * garden#1600, before the first product: a garden is never paired with a crew older than its core-ts floor.
+ * True when refused (printed in red); a note or a dry-run plan is printed dim.
+ */
+export function pairingRefused(productIds: string[], flags: Pick<DispatchFlags, "dryRun" | "sourceRoot">, check: typeof gardenPairing = gardenPairing): boolean {
+  const r = check({ productIds, dryRun: flags.dryRun, ...(flags.sourceRoot ? { sourceRoot: flags.sourceRoot } : {}) });
+  if (r.action === "refused") console.log(chalk.red(`\n${r.message}`));
+  else if (r.message) console.log(chalk.dim(`\n${r.message}`));
+  return r.action === "refused";
 }
 
 /** Gate the whole resolved set before its first product: installing deps first could leave a partial crew setup. */
@@ -334,6 +346,7 @@ export async function dispatchToClis(
     }
   }
 
+  if (pairingRefused(productIds, flags)) return 1;
   if (!await prepareUv(productIds, flags)) return 1;
   await prepareClaudePython(productIds.map((id) => getProduct(id)).filter((p): p is Product => p !== undefined), clis.map((c) => c.cli), flags);
 
@@ -365,7 +378,7 @@ export async function dispatchToClis(
   // leaves no "ready … (Claude Code)" row (first-run C5).
   const hostsFor = (productId: string): string[] =>
     results.filter((r) => r.present && r.entries.some((e) => e.productId === productId && e.success && !e.skipped)).map((r) => r.cli);
-  gardenForCrew(productIds, flags);
+  const gardenFailed = gardenForCrew(productIds, flags);
   const rows = readinessFor(productIds, results.filter((r) => r.present).map((r) => r.cli), flags, hookAdapter, hostsFor);
   const pending = renderReadiness(
     rows,
@@ -373,10 +386,10 @@ export async function dispatchToClis(
   );
   const crew = crewStateOf(productIds, rows);
 
-  if (hadFailure) {
-    console.log(chalk.red("\nOne or more installations failed. See the summary above."));
+  if (hadFailure || gardenFailed) {
+    console.log(chalk.red(hadFailure ? "\nOne or more installations failed. See the summary above." : "\nThe wicked-garden step for crew failed. See above."));
     // A failed host (say, Claude Code's plugin registration) need not stop Studio: say so when crew is ready.
-    if (!flags.dryRun && crew === "ready") console.log(`${chalk.green("Wicked Crew is ready all the same. Start Wicked Studio:")}\n${startStudioLines()}`);
+    if (!flags.dryRun && crew === "ready" && !gardenFailed) console.log(`${chalk.green("Wicked Crew is ready all the same. Start Wicked Studio:")}\n${startStudioLines()}`);
     return 1;
   }
   console.log(doneLine(flags, pending, crew));
@@ -449,17 +462,33 @@ export function hostSkillsStep(
   return lines;
 }
 
-/** After the products are in place, before readiness: make crew's garden visible to crew (B3). */
-function gardenForCrew(productIds: string[], flags: DispatchFlags): void {
-  const r = ensureGardenForCrew({ productIds, dryRun: flags.dryRun, ...(flags.sourceRoot ? { sourceRoot: flags.sourceRoot } : {}) });
-  if (r.action === "failed") console.log(chalk.yellow(`\n${r.message}`));
-  else if (r.message) console.log(chalk.dim(`\n${r.message}`));
+/**
+ * crew's garden step, printed: true when it failed (installer#90: a garden crew cannot use, or an npm copy left
+ * behind the train, fails the run instead of ending in "Done!"). Warning lines of the summary print in yellow.
+ */
+export function gardenStep(productIds: string[], flags: Pick<DispatchFlags, "dryRun" | "sourceRoot">, ensure: typeof ensureGardenForCrew = ensureGardenForCrew): boolean {
+  const r = ensure({ productIds, dryRun: flags.dryRun, ...(flags.sourceRoot ? { sourceRoot: flags.sourceRoot } : {}) });
+  if (r.action === "failed") {
+    console.log(chalk.red(`\n${r.message}`));
+    return true;
+  }
+  if (r.message) {
+    console.log("");
+    for (const line of r.message.split("\n")) console.log(line.startsWith("warning:") ? chalk.yellow(line) : chalk.dim(line));
+  }
+  return false;
+}
+
+/** After the products are in place, before readiness: make crew's garden visible to crew (B3). True when it failed. */
+function gardenForCrew(productIds: string[], flags: DispatchFlags): boolean {
+  const failed = gardenStep(productIds, flags);
   // Crew's governed seats run in pods on a local cluster: install crew's part of it when the cluster can
   // hold seats (the engine's install proves the pod process limit and NetworkPolicy enforcement).
   // Judged and run in crew's own environment (its PATH), as readiness judges crew's needs.
   const k = ensureClusterForCrew({ productIds, dryRun: flags.dryRun, env: crewEnv(process.env, process.platform), warn: (line) => console.log(chalk.yellow(`\n${line}`)) });
   if (k.action === "failed" || k.action === "skipped") console.log(chalk.yellow(`\n${k.message}`));
   else if (k.message) console.log(chalk.dim(`\n${k.message}`));
+  return failed;
 }
 
 /** A plugin's registration outcome in the same vocabulary the scripts report. */
@@ -705,6 +734,7 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
     console.error(chalk.red(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
+  if (pairingRefused(all.map((p) => p.id), flags)) process.exit(1);
   if (!await prepareUv(all.map((p) => p.id), flags)) process.exit(1);
   await prepareClaudePython(all, ["claude"], flags);
   console.log(chalk.bold(flags.dryRun
@@ -733,11 +763,11 @@ async function legacyInstall(selection: UserSelection, flags: DispatchFlags): Pr
   }
 
   // The direct path registers plugins with Claude Code; every other product is machine-wide.
-  gardenForCrew(all.map((p) => p.id), flags);
+  const gardenFailed = gardenForCrew(all.map((p) => p.id), flags);
   const rows = readinessFor(all.map((p) => p.id), ["claude"], flags, undefined, directHostsFor(results));
   const pending = renderReadiness(rows, flags.dryRun ? "Readiness preflight (PATH probes only under --dry-run — nothing was installed):" : "Readiness (checked after install):");
-  if (failures.length > 0) {
-    console.log(chalk.red(`\n${failures.length} installation(s) failed. Check output above for details.`));
+  if (failures.length > 0 || gardenFailed) {
+    console.log(chalk.red(failures.length > 0 ? `\n${failures.length} installation(s) failed. Check output above for details.` : "\nThe wicked-garden step for crew failed. See above."));
     process.exit(1);
   }
   console.log(doneLine(flags, pending, crewStateOf(all.map((p) => p.id), rows)));
@@ -848,6 +878,7 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
     process.exit(1);
   }
 
+  if (pairingRefused([...added, ...selected].map((p) => p.id), flags)) process.exit(1);
   if (!await prepareUv([...added, ...selected].map((p) => p.id), flags)) process.exit(1);
 
   if (added.length > 0) {
@@ -860,7 +891,7 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
   const results = await installDirectly([...added, ...selected], flags);
   const failures = results.filter((r) => !r.success && !r.skipped);
   hostSkillsStep(results.filter((r) => r.success && !r.skipped).map((r) => r.productId), flags);
-  gardenForCrew([...added, ...selected].map((p) => p.id), flags);
+  if (gardenForCrew([...added, ...selected].map((p) => p.id), flags)) failures.push({ productId: "wicked-garden", success: false, skipped: false, message: "the wicked-garden step for crew failed" });
   const rows = readinessFor([...added, ...selected].map((p) => p.id), ["claude"], flags, undefined, directHostsFor(results));
   const pending = renderReadiness(
     rows,

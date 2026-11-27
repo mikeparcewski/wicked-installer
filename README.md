@@ -302,7 +302,8 @@ exit 0 unless a CLI failed, 2 for bad arguments. Contract: INTERFACE.md §12.5.
 
 Claude Code only loads plugins it has **registered** — a marketplace entry plus an
 install record whose payload lives in `<configDir>/plugins/cache/<marketplace>/<plugin>/<version>/`.
-That cache is also the only place wicked-crew's skills discovery reads. A bare copy
+That cache is also the first place wicked-crew's skills discovery reads (crew 0.18+ then falls back to the
+npm-global `wicked-garden` package; see below). A bare copy
 under `~/.claude/plugins/wicked-garden/` (what `npx wicked-garden install` produces,
 always into `~/.claude` whatever `CLAUDE_CONFIG_DIR` says) is loaded by nothing.
 
@@ -338,6 +339,30 @@ The URL in the `marketplace add` above is garden's published catalog: its entry 
 `~/.claude/plugins/wicked-garden/` (from `npx wicked-garden install`) or a skills/hooks copy
 an earlier `install-claude.js` recorded in its marker is detected and reported.
 `wicked-installer cleanup-legacy` removes those copies after its registration and ownership checks.
+
+**The garden crew reads moves with the train.** Which copy crew loads depends on the daemon's own
+environment. A crew started with this shell's `CLAUDE_CONFIG_DIR` reads that plugin cache. One started
+without it (a service or login item) reads `~/.claude`, then the npm-global `wicked-garden`, then Codex's
+plugin cache. `WICKED_CREW_SKILLS_SOURCE`, when set, is the only source. Except for that override, crew
+passes over a copy older than its floor.
+
+So whenever the install set includes wicked-crew and an npm-global `wicked-garden` exists that is older
+than the published `wicked-garden@latest`, the installer runs
+`npm install -g --prefix <the prefix that owns that copy> wicked-garden@latest` and checks that the copy
+moved. It does this even when a plugin cache already satisfies crew here. A run that leaves the copy behind
+fails, and so does the whole install.
+
+There are three exceptions:
+- **Registry lag:** when the published version is still older than crew's floor (just after a publish), the
+  train step skips the npm copy. The floor check then installs once only if no copy crew accepts exists;
+  otherwise the npm copy stays as it is until the next install.
+- **No published version:** when npm cannot say what is published (offline), the summary notes that the
+  copy was not checked.
+- **Opt-outs:** `WICKED_CREW_SKILLS_SOURCE` and `--source-root` skip the step.
+
+Except under `--dry-run`, where nothing has changed yet, the summary then names the copy crew will use (`crew will use wicked-garden <version> (<source>, <path>)`),
+judged by crew's floor rule. When `CLAUDE_CONFIG_DIR` is set, it also names the copy a crew started without
+it would use, if that is a different one. A view with no usable garden gets a `warning:` line.
 
 State is read from `plugins/known_marketplaces.json` / `plugins/installed_plugins.json`
 (what `claude plugin marketplace list --json` / `claude plugin list --json` print) rather
