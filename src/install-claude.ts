@@ -2657,11 +2657,15 @@ function heuristicUninstall(
     try {
       const kept = keepAside(target.dir, abs);
       actions.push({ kind: "remove", target: rel, result: "ok", detail: `moved to ${kept}: a v1 marker cannot tell the installer's copy from yours, so it is kept, not deleted` });
-      // The human output prints notes, not actions: the recovery path must be in a note too.
+      // On stderr at once, so the recovery path survives any later error that ends the run before a report (human and
+      // --json alike: stdout stays pure). The note carries it into the report's human output.
+      console.error(`kept ${rel} at ${kept}`);
       notes.push(`${rel} kept at ${kept} (a v1 marker cannot tell the installer's copy from yours)`);
     } catch (err) {
       // A refused or failed move leaves the dir where it is and keeps the marker record, so the uninstall can be re-run.
-      actions.push({ kind: "remove", target: rel, result: "failed", detail: `not moved (${err instanceof Error ? err.message : String(err)}); the dir is left in place` });
+      const why = `not moved (${err instanceof Error ? err.message : String(err)}); the dir is left in place`;
+      actions.push({ kind: "remove", target: rel, result: "failed", detail: why });
+      notes.push(`${rel} ${why}`); // the human output prints notes, not actions
       failures += 1;
     }
   };

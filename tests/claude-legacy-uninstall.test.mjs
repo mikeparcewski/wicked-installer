@@ -120,3 +120,44 @@ test("Claude v1-marker uninstall: a move that fails after another succeeded keep
     rmSync(w.home, { recursive: true, force: true });
   }
 });
+
+// PARTIAL FAILURE after a move (codex r2, coord fold a): a later error ends the run before any report. The kept path was
+// already printed on stderr at move time, so it is not lost.
+test("Claude v1-marker uninstall: a later error after the moves still leaves each kept path on stderr", { skip: skip || (process.getuid?.() === 0 ? "root ignores the mode" : false) }, () => {
+  const w = world();
+  const commands = join(w.cfg, "commands");
+  try {
+    mkdirSync(join(commands, "wicked-bus"), { recursive: true });
+    writeFileSync(join(commands, "wicked-bus", "x.md"), "x\n");
+    chmodSync(commands, 0o555); // commands/wicked-bus cannot be removed: the run errors after the skill moves
+    const r = run(w);
+    chmodSync(commands, 0o755);
+    assert.notEqual(r.status, 0, r.stdout);
+    const keptDir = join(w.cfg, "wicked-installer", "kept-skills");
+    const kept = readdirSync(keptDir);
+    assert.equal(kept.length, 2, kept.join(", "));
+    for (const name of kept) {
+      const rel = `skills/${name.replace(/-\d{4}-.*$/, "")}`;
+      assert.ok(r.stderr.includes(`kept ${rel} at ${join(keptDir, name)}\n`), `stderr names ${rel}:\n${r.stderr}`);
+    }
+  } finally {
+    if (existsSync(commands)) chmodSync(commands, 0o755);
+    rmSync(w.home, { recursive: true, force: true });
+  }
+});
+
+// coord fold b: a refused move's reason is in the human output, not only in --json actions.
+test("Claude v1-marker uninstall: the human output says why a dir was not moved", { skip: skip || (process.getuid?.() === 0 ? "root ignores the mode" : false) }, () => {
+  const w = world();
+  const stuck = join(w.cfg, "skills", "wicked-bus-status");
+  try {
+    chmodSync(stuck, 0o555);
+    const r = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "uninstall", "wicked-bus", "--claude-home", w.cfg], { encoding: "utf8", env: { HOME: w.home, USERPROFILE: w.home, PATH: "/usr/bin:/bin", NO_COLOR: "1" }, timeout: 60_000 });
+    chmodSync(stuck, 0o755);
+    assert.notEqual(r.status, 0, r.stdout);
+    assert.match(r.stdout, /skills\/wicked-bus-status not moved \(.+\); the dir is left in place/, r.stdout);
+  } finally {
+    if (existsSync(stuck)) chmodSync(stuck, 0o755);
+    rmSync(w.home, { recursive: true, force: true });
+  }
+});
