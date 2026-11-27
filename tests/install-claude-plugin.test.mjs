@@ -30,6 +30,7 @@ import { spawnSync } from "node:child_process";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const SCRIPT = join(ROOT, "dist", "install-claude.js");
+const { dirDigest } = await import(pathToFileURL(SCRIPT).href); // importing the compiled script runs nothing
 const STUB = join(__dirname, "claude-stub.mjs");
 const POSIX = process.platform !== "win32";
 const skip = POSIX ? false : "PATH fakes are POSIX shell scripts";
@@ -948,7 +949,8 @@ function plantVaultInstall(cfg, { files } = {}) {
     markerVersion: 2, cli: "claude", configDir: cfg, updatedAt: "2026-01-01T00:00:00.000Z",
     products: { "wicked-vault": { installedAt: "2026-01-01T00:00:00.000Z", lastResult: "installed", version: "0.0.0-test", source: "local", notes: [],
       files: files ?? [
-        { kind: "dir", path: "skills/wicked-vault-core" },
+        // The writer's own fingerprint (installer#104): a skill dir record without one is moved aside, not removed.
+        { kind: "dir", path: "skills/wicked-vault-core", sha256: dirDigest(cfg, join(cfg, "skills", "wicked-vault-core")) },
         { kind: "dir", path: "wicked-installer/products/wicked-vault" },
         { kind: "hooks-entry", file: "settings.json", event: "SessionStart", ownerMatch: { commandContains: owner } },
       ] } },
