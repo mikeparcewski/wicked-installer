@@ -1356,17 +1356,30 @@ function keepAside(home: string, dest: string, now: Date = new Date()): string {
 }
 
 /**
- * installer#101: relative links inside `dir` whose target lies outside it no longer resolve once the dir is moved.
- * Counted no-follow before the move, so the report can say so (the bytes they pointed to are untouched).
+ * installer#101: relative links inside `dir` whose target lies outside it can dangle or point elsewhere once the dir
+ * is moved. Counted no-follow before the move so the report can say so (the bytes they pointed to are untouched).
+ * Best effort: a subdir or link it cannot read is skipped, never a reason to stop the move.
  */
 function linksLeavingDir(dir: string): number {
   let count = 0;
   const walk = (at: string): void => {
-    for (const entry of readdirSync(at, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = readdirSync(at, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
       const abs = join(at, entry.name);
       if (entry.isSymbolicLink()) {
-        const to = readlinkSync(abs);
-        if (!isAbsolute(to) && !strictlyInside(dir, resolve(at, to))) count += 1;
+        let to: string;
+        try {
+          to = readlinkSync(abs);
+        } catch {
+          continue;
+        }
+        const resolved = resolve(at, to);
+        if (!isAbsolute(to) && resolved !== dir && !strictlyInside(dir, resolved)) count += 1;
       } else if (entry.isDirectory()) {
         walk(abs);
       }
@@ -1377,7 +1390,7 @@ function linksLeavingDir(dir: string): number {
 }
 
 function keptAction(target: string, kept: string, leaving = 0): Action {
-  const links = leaving > 0 ? `; ${leaving} relative link(s) inside point outside it and may no longer resolve` : "";
+  const links = leaving > 0 ? `; ${leaving} relative link(s) inside point outside it and may dangle or point elsewhere now` : "";
   return { kind: "collision-moved", target, result: "ok", detail: `a skill dir this installer did not write; moved to ${kept} before the install${links}` };
 }
 

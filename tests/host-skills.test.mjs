@@ -2,7 +2,7 @@
 // whose package ships them for all hosts (registry install.hostSkills: wicked-bus).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -227,7 +227,7 @@ for (const variant of ["outside", "dangling"]) {
   });
 }
 
-test("install-claude.js says when a moved dir holds relative links that point outside it (installer#101)", { skip: process.platform === "win32" ? "POSIX symlinks" : false }, () => {
+test("install-claude.js says when a moved dir holds relative links that point outside it (installer#101)", { skip: process.platform === "win32" ? "POSIX symlinks" : process.getuid?.() === 0 ? "root ignores the mode" : false }, () => {
   const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
   try {
     const src = join(home, "src");
@@ -239,14 +239,21 @@ test("install-claude.js says when a moved dir holds relative links that point ou
     writeFileSync(join(claudeHome, "skills", "notes.md"), "shared\n");
     symlinkSync("../notes.md", join(mine, "notes.md")); // leaves the dir: dangles after the move
     symlinkSync("SKILL.md", join(mine, "self.md")); // stays inside: still resolves
+    symlinkSync(".", join(mine, "here")); // the dir itself: still resolves
+    mkdirSync(join(mine, "locked")); // an unreadable subdir never stops the move (codex r1 W12)
+    chmodSync(join(mine, "locked"), 0o000);
     const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
     const r = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "wicked-bus", "--skip-binaries", "--source-root", src, "--claude-home", claudeHome, "--json"], { encoding: "utf8", env, timeout: 60_000 });
+    const kept = readdirSync(join(claudeHome, "wicked-installer", "kept-skills"));
+    for (const name of kept) chmodSync(join(claudeHome, "wicked-installer", "kept-skills", name, "locked"), 0o755);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     const moved = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus").actions.filter((a) => a.kind === "collision-moved");
     assert.equal(moved.length, 1, JSON.stringify(moved));
-    assert.match(moved[0].detail, /; 1 relative link\(s\) inside point outside it and may no longer resolve$/, moved[0].detail);
+    assert.match(moved[0].detail, /; 1 relative link\(s\) inside point outside it and may dangle or point elsewhere now$/, moved[0].detail);
     assert.equal(readFileSync(join(claudeHome, "skills", "notes.md"), "utf8"), "shared\n", "the link's target is untouched");
   } finally {
+    const stuck = join(home, ".claude", "skills", "wicked-bus-emit", "locked");
+    if (existsSync(stuck)) chmodSync(stuck, 0o755);
     rmSync(home, { recursive: true, force: true });
   }
 });
