@@ -15,6 +15,7 @@ interface Report {
   message: string;
   removed?: string[];
   notes?: string[];
+  actions?: Array<{ kind?: string; target?: string; result?: string; detail?: string }>;
 }
 interface Host {
   cli: Cli;
@@ -129,6 +130,12 @@ export async function runUninstallVerb(argv: string[], scriptsDir = dirname(file
       console.log(`  [${status}] ${report.message}`);
       console.log(`    removed ${report.removed?.length ?? 0} path(s)`);
       for (const note of report.notes ?? []) console.log(`    ${note}`);
+      // installer#105: what to act on or recover (failed, skipped, moved aside), unless a note already says it.
+      for (const act of report.actions ?? []) {
+        if (!act.detail || !(act.result === "failed" || act.result === "skipped" || act.kind === "collision-moved")) continue;
+        if ((report.notes ?? []).includes(`${act.target} ${act.detail}`)) continue;
+        console.log(`    ${act.target}: ${act.detail}`);
+      }
     }
   }
   return hosts.some((h) => !h.success) ? 1 : 0;
