@@ -592,20 +592,21 @@ function findSkillRootsRecursive(dir: string): string[] {
 
 
 /**
- * Skill dirs left alone this run: a same-named dir another tool wrote (its SKILL.md names another skill, or it
- * has none). Never overwritten; reported as `collision-skipped` actions, as the Claude script reports them.
+ * Skill dirs left alone this run: an existing dir this installer's marker does not record as this product's (another
+ * tool or the person wrote it, whatever its SKILL.md says). Never overwritten; reported as `collision-skipped`
+ * actions, as the Claude script reports them.
  */
 const foreignSkillDirs = new Map<string, string[]>();
-function foreignSkillDir(productId: string, dest: string, nextName: string, originalName: string | undefined, options: Options): boolean {
+function foreignSkillDir(productId: string, dest: string, options: Options): boolean {
   if (options.dryRun || !existsSync(dest)) return false;
-  const present = readSkillName(dest);
-  if (present !== undefined && (present === nextName || present === originalName)) return false;
+  const recorded: unknown = previousMarkerEntries(join(options.geminiHome, "wicked-installer", "antigravity-install.json")).find((e) => e.id === productId)?.skills;
+  if (Array.isArray(recorded) && recorded.includes(basename(dest))) return false;
   foreignSkillDirs.set(productId, [...(foreignSkillDirs.get(productId) ?? []), dest]);
   return true;
 }
 function foreignSkillActions(productId: string): { actions?: Array<{ kind: string; target: string; result: string; detail: string }> } {
   const dirs = foreignSkillDirs.get(productId) ?? [];
-  return dirs.length === 0 ? {} : { actions: dirs.map((target) => ({ kind: "collision-skipped", target, result: "skipped", detail: "foreign skill dir present; rename it and re-run" })) };
+  return dirs.length === 0 ? {} : { actions: dirs.map((target) => ({ kind: "collision-skipped", target, result: "skipped", detail: "a skill dir this installer did not write; rename it and re-run" })) };
 }
 
 function copySkills(product: Product, root: string, options: Options): number {
@@ -618,7 +619,7 @@ function copySkills(product: Product, root: string, options: Options): number {
     const originalName = readSkillName(skillRoot);
     const nextName = antigravitySkillName(product.id, originalName ?? "", rel);
     const dest = join(options.geminiHome, "config", "skills", sanitizePathPart(nextName));
-    if (foreignSkillDir(product.id, dest, nextName, originalName, options)) continue;
+    if (foreignSkillDir(product.id, dest, options)) continue;
     copyTree(skillRoot, dest, options);
     rewriteCopiedSkillName(dest, originalName, nextName, options);
     recordCopiedSkill(product.id, sanitizePathPart(nextName));

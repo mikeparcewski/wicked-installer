@@ -137,7 +137,7 @@ for (const [cli, homeFlag, homeRel, skillsRel] of [
   ["codex", "--codex-home", ".codex", "skills"],
   ["antigravity", "--gemini-home", ".gemini", join("config", "skills")],
 ]) {
-  test(`install-${cli}.js leaves a foreign same-named skill dir alone and reports it; a rerun over its own copy still updates`, { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
+  test(`install-${cli}.js leaves a foreign same-named skill dir alone and reports it, whatever its SKILL.md names; its own recorded copy is not reported`, { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
     const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
     try {
       const src = join(home, "src");
@@ -145,21 +145,20 @@ for (const [cli, homeFlag, homeRel, skillsRel] of [
       const skills = join(home, homeRel, skillsRel);
       const foreign = join(skills, "wicked-bus-emit");
       mkdirSync(foreign, { recursive: true });
-      writeFileSync(join(foreign, "SKILL.md"), "---\nname: someone-elses\n---\nmine\n");
+      // The person's own skill under the bus's install name, even naming itself as the bus skill does: the marker decides.
+      writeFileSync(join(foreign, "SKILL.md"), "---\nname: wicked-bus-emit\n---\nmine\n");
       const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
       const run = () => spawnSync(process.execPath, [join(ROOT, "dist", `install-${cli}.js`), "wicked-bus", "--skip-binaries", "--source-root", src, homeFlag, join(home, homeRel), "--json"], { encoding: "utf8", env, timeout: 60_000 });
       const r = run();
       assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-      assert.equal(readFileSync(join(foreign, "SKILL.md"), "utf8"), "---\nname: someone-elses\n---\nmine\n", "the foreign dir is untouched");
+      assert.equal(readFileSync(join(foreign, "SKILL.md"), "utf8"), "---\nname: wicked-bus-emit\n---\nmine\n", "the foreign dir is untouched");
       const entry = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus");
       assert.deepEqual(entry.actions?.map((a) => [a.kind, a.target, a.result]), [["collision-skipped", foreign, "skipped"]]);
       const own = readdirSync(skills).filter((d) => /status/.test(d));
       assert.equal(own.length, 1, readdirSync(skills).join(", "));
-      // The installer's own copy is not foreign: a second run rewrites it and reports nothing for it.
-      writeFileSync(join(skills, own[0], "extra.txt"), "x");
+      // The installer's own copy (recorded in its marker) is not foreign: a second run reports only the person's dir.
       const again = JSON.parse(run().stdout).reports.find((e) => e.productId === "wicked-bus");
       assert.deepEqual(again.actions?.map((a) => a.target), [foreign]);
-      assert.match(readFileSync(join(skills, own[0], "SKILL.md"), "utf8"), /^---\nname: \S+/);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
