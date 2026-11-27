@@ -130,7 +130,9 @@ interface ScriptReportEntry {
   /** What was delivered (EXP-01): registered | copied | acquired | manual. Absent from older scripts. */
   delivery?: string;
   /** Asset counts (`hooks` > 0 ⇒ the script installed the product's own hook adapter). */
-  assets?: { hooks?: number };
+  assets?: { hooks?: number; skills?: number };
+  /** The script's own action log; the Claude script records a skill it left alone as `collision-skipped`. */
+  actions?: Array<{ kind?: string; target?: string; result?: string; detail?: string }>;
 }
 
 interface ScriptReport {
@@ -218,13 +220,17 @@ interface CliRunResult {
   rawTail: string;
 }
 
-function runCliScript(
-  cli: CliOption,
-  productIds: string[],
-  flags: DispatchFlags,
-  skipBinaries: boolean,
-  pluginPackages = false,
-): CliRunResult {
+/**
+ * One argument of a command a person pastes: POSIX shells get single quotes (nothing expands inside), cmd.exe
+ * gets double quotes with `"` doubled. A plain argument is left as it is.
+ */
+export function shellQuote(arg: string, platform: NodeJS.Platform = process.platform): string {
+  if (/^[A-Za-z0-9_\/.:=@+,-]+$/.test(arg)) return arg;
+  return platform === "win32" ? `"${arg.replace(/"/g, '""')}"` : `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+/** A host script's arguments (after `node`), shared by the run and the retry line a person is shown. */
+export function cliScriptArgs(cli: Pick<CliOption, "cli" | "scriptPath">, productIds: string[], flags: Pick<DispatchFlags, "dryRun" | "force" | "sourceRoot" | "claudeHomes">, skipBinaries: boolean, pluginPackages = false): string[] {
   const args = [cli.scriptPath, ...productIds, "--json"];
   if (skipBinaries) args.push("--skip-binaries");
   if (pluginPackages) args.push("--plugin-packages");
@@ -232,7 +238,18 @@ function runCliScript(
   if (flags.force) args.push("--force");
   // --source-root is part of the shared flag surface (§3.2); --claude-home is the Claude script's own.
   if (flags.sourceRoot) args.push("--source-root", flags.sourceRoot);
-  if (cli.cli === "claude") for (const home of flags.claudeHomes) args.push("--claude-home", home);
+  if (cli.cli === "claude") for (const home of flags.claudeHomes ?? []) args.push("--claude-home", home);
+  return args;
+}
+
+function runCliScript(
+  cli: CliOption,
+  productIds: string[],
+  flags: DispatchFlags,
+  skipBinaries: boolean,
+  pluginPackages = false,
+): CliRunResult {
+  const args = cliScriptArgs(cli, productIds, flags, skipBinaries, pluginPackages);
 
   // Never rely on the script's shebang (Windows): always launch via node.
   const res = spawnSync(process.execPath, args, {
@@ -377,6 +394,84 @@ export async function dispatchToClis(
   }
   console.log(doneLine(flags, pending, crew));
   return 0;
+}
+
+/** The detected hosts whose install script ships beside this one (the interactive path's offer rule). */
+function detectedHosts(): CliOption[] {
+  return discoverCliScripts(__dirname).map((script) => {
+    const presence = detectCli(script.cli);
+    return { cli: script.cli, displayName: presence.displayName, scriptPath: script.scriptPath, detected: presence.detected, binOnPath: presence.binOnPath, homeDetected: presence.homeDetected };
+  }).filter((o) => o.detected);
+}
+
+/**
+ * The hosts the direct path gives hostSkills products' skills (installer#92, narrowed by its last codex check): only
+ * Claude Code's script moves a person's own same-named skill dir to kept-skills and reports it on every outcome. The
+ * other hosts join once their scripts do (wicked-installer#100).
+ */
+export const HOST_SKILLS_HOSTS: ReadonlySet<string> = new Set(["claude"]);
+
+/**
+ * (installer#87) The direct path installs npm-global products machine-wide and runs no host script, so a product
+ * whose package ships skills for every host (registry `install.hostSkills`, wicked-bus) reached none. Each detected
+ * host's own script now delivers them (binaries already acquired), at the path that script uses for every product.
+ * Under --dry-run nothing is spawned: the plan is printed. A host that fails is a warning naming its command: the
+ * product itself works without the skills. Returns the lines printed.
+ */
+export function hostSkillsStep(
+  productIds: string[],
+  flags: DispatchFlags,
+  deps: { hosts?: () => CliOption[]; run?: (cli: CliOption, ids: string[]) => CliRunResult; platform?: NodeJS.Platform } = {},
+): string[] {
+  const ids = productIds.filter((id) => getProduct(id)?.install.hostSkills === true);
+  if (ids.length === 0) return [];
+  const detected = (deps.hosts ?? detectedHosts)();
+  const hosts = detected.filter((h) => HOST_SKILLS_HOSTS.has(h.cli));
+  const held = detected.filter((h) => !HOST_SKILLS_HOSTS.has(h.cli));
+  const names = ids.map((id) => getProduct(id)?.displayName ?? id).join(", ");
+  const lines: string[] = [];
+  if (detected.length === 0) {
+    lines.push(`${names}: no supported host detected, so no host gets its skills; install one, then run \`npx wicked-installer install ${ids.join(" ")}\``);
+  } else if (flags.dryRun) {
+    if (hosts.length > 0) lines.push(`dry-run: would add the skills of ${names} to ${hosts.map((h) => h.displayName).join(", ")} (each host's own install script, binaries already acquired)`);
+  } else {
+    const run = deps.run ?? ((cli: CliOption, list: string[]) => runCliScript(cli, list, flags, true));
+    for (const host of hosts) {
+      const r = run(host, ids);
+      const mine = r.entries.filter((e) => ids.includes(e.productId));
+      const bad = mine.filter((e) => !e.success);
+      const missing = ids.filter((id) => !mine.some((e) => e.productId === id));
+      // A script that reports its skill count must have copied some (Claude skips a foreign same-named dir and still succeeds).
+      const empty = mine.filter((e) => e.success && typeof e.assets?.skills === "number" && e.assets.skills === 0);
+      const why = !r.present ? "the host is not present"
+        : bad[0]?.message ?? (!r.parsed ? "its script gave no report"
+        : r.status !== 0 ? `its script exited ${r.status ?? "?"}`
+        : missing.length > 0 ? `its script did not report ${missing.join(", ")}`
+        : empty.length > 0 ? "its script copied no skills"
+        : undefined);
+      // A skill the script left alone (a same-named dir it does not own) is named even when others were copied.
+      const leftAlone = mine.flatMap((e) => e.actions ?? []).filter((a) => a.kind === "collision-skipped" && a.result !== "ok");
+      const retry = cliScriptArgs(host, ids, { ...flags, dryRun: false }, true).map((a) => shellQuote(a, deps.platform)).join(" ");
+      if (why === undefined && leftAlone.length === 0) {
+        lines.push(`${names} skills added to ${host.displayName}`);
+      } else if (why === undefined) {
+        const which = leftAlone.map((a) => `${a.target ?? "?"} (${a.detail ?? a.result ?? "skipped"})`).join("; ");
+        lines.push(`warning: ${names} skills were added to ${host.displayName}, but ${leftAlone.length} ${leftAlone.length === 1 ? "was" : "were"} left alone: ${which}; then run \`node ${retry}\``);
+      } else {
+        lines.push(`warning: ${names} skills were not added to ${host.displayName} (${why}); run \`node ${retry}\``);
+      }
+      // installer#87 (DES B): a same-named skill dir the installer did not write was moved aside, never lost: say where.
+      for (const a of mine.flatMap((e) => e.actions ?? []).filter((x) => x.kind === "collision-moved")) {
+        lines.push(`${host.displayName}: ${a.target ?? "?"} was not written by the installer; ${a.detail?.replace(/^a skill dir this installer did not write; /, "") ?? "moved aside"}`);
+      }
+    }
+  }
+  if (held.length > 0) {
+    lines.push(`${names} skills are not added to ${held.map((h) => h.displayName).join(", ")} by this path yet: their scripts would overwrite a same-named skill dir you made (wicked-installer#100)`);
+  }
+  console.log("");
+  for (const line of lines) console.log(line.startsWith("warning:") ? chalk.yellow(line) : chalk.dim(line));
+  return lines;
 }
 
 /**
@@ -807,6 +902,7 @@ async function runInstallDirect(productIds: string[], flags: DispatchFlags): Pro
 
   const results = await installDirectly([...added, ...selected], flags);
   const failures = results.filter((r) => !r.success && !r.skipped);
+  hostSkillsStep(results.filter((r) => r.success && !r.skipped).map((r) => r.productId), flags);
   if (gardenForCrew([...added, ...selected].map((p) => p.id), flags)) failures.push({ productId: "wicked-garden", success: false, skipped: false, message: "the wicked-garden step for crew failed" });
   const rows = readinessFor([...added, ...selected].map((p) => p.id), ["claude"], flags, undefined, directHostsFor(results));
   const pending = renderReadiness(

@@ -57,7 +57,8 @@
       "requires": [],
       "install": {
         "type": "npm-global",
-        "package": "wicked-bus"
+        "package": "wicked-bus",
+        "hostSkills": true
       }
     },
     {

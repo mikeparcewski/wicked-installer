@@ -128,6 +128,7 @@ type ActionKind =
   | "acquire"
   | "migrate-removed"
   | "collision-skipped"
+  | "collision-moved"
   | "restore-prior"
   | "remove";
 
@@ -1327,6 +1328,25 @@ function skillDirOwner(markerPathRel: string, marker: MarkerV2, selfId: string):
   return undefined;
 }
 
+/**
+ * installer#87 (DES B): an existing skill dir this installer's marker does not record is never overwritten or deleted:
+ * it is moved to `<host home>/wicked-installer/kept-skills/<name>-<stamp>` (one rename on the same volume), then the
+ * skill installs. Duplicated per script by design (INTERFACE.md §15: each host script is self-contained).
+ */
+function keepAside(home: string, dest: string, now: Date = new Date()): string {
+  const dir = join(home, "wicked-installer", "kept-skills");
+  mkdirSync(dir, { recursive: true });
+  // No ':' or '.' in the name: Windows refuses ':' in a path segment.
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  let kept = join(dir, `${basename(dest)}-${stamp}`);
+  for (let n = 1; existsSync(kept); n++) kept = join(dir, `${basename(dest)}-${stamp}-${n}`);
+  renameSync(dest, kept);
+  return kept;
+}
+function keptAction(target: string, kept: string): Action {
+  return { kind: "collision-moved", target, result: "ok", detail: `a skill dir this installer did not write; moved to ${kept} before the install` };
+}
+
 // Two-signal signature: frontmatter name references the product AND the body
 // mentions the product id. A third-party dir squatting the name never matches.
 function skillSignatureMatches(dest: string, productId: string, root: string): boolean {
@@ -1357,6 +1377,7 @@ function installSkills(
   actions: Action[],
   marker: MarkerV2,
   mp: MarkerProduct,
+  prev: MarkerProduct | undefined,
 ): number {
   const skillsDir = join(root, "skills");
   const discovery = findSkillRoots(root);
@@ -1398,18 +1419,15 @@ function installSkills(
           actions.push({ kind: "collision-skipped", target: markerPathRel, result: "skipped", detail: `owned by ${owner}` });
           continue;
         }
-      } else if (!owner && !skillSignatureMatches(dest, product.id, target.dir)) {
-        // Genuinely foreign dir: never overwrite, even with --force.
-        actions.push({
-          kind: "collision-skipped",
-          target: markerPathRel,
-          result: options.force ? "failed" : "skipped",
-          detail: "foreign skill dir present; rename it and re-run",
-        });
-        continue;
-      } else {
-        // Ours (marker or signature): replace-on-install so upstream-deleted files don't linger.
+      } else if (prev?.files.some((f) => f.kind === "dir" && normalizeSlash(f.path) === normalizeSlash(markerPathRel))) {
+        // Ours by this product's prior marker entry (skillDirOwner skips selfId, and `marker` already holds the fresh
+        // entry): replace-on-install so upstream-deleted files don't linger.
         rmSync(dest, { recursive: true, force: true });
+      } else {
+        // installer#87 (DES B): no record, so it may be the person's own dir, whatever its SKILL.md says. Move it to
+        // <config>/wicked-installer/kept-skills/ before the install; never overwrite or delete it.
+        const kept = keepAside(target.dir, dest);
+        actions.push(keptAction(markerPathRel, kept));
       }
     }
 
@@ -2115,7 +2133,7 @@ function installOneInstall(
       let skillCount = 0;
       let hookCount = 0;
       if (source) {
-        skillCount = installSkills(product, source.root, target, options, actions, marker, mp);
+        skillCount = installSkills(product, source.root, target, options, actions, marker, mp, prev);
       }
       const mcpCount = wireMcp(product, target, options, actions, notes, mp, prev);
       if (source) {
