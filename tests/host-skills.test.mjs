@@ -129,3 +129,39 @@ test("Claude's real script leaves a foreign same-named skill dir alone: the step
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// codex-check on 0025669 (W20): the other host scripts overwrote a same-named skill dir they did not write.
+for (const [cli, homeFlag, homeRel, skillsRel] of [
+  ["pi", "--pi-home", join(".pi", "agent"), "skills"],
+  ["opencode", "--opencode-home", join(".config", "opencode"), "skills"],
+  ["codex", "--codex-home", ".codex", "skills"],
+  ["antigravity", "--gemini-home", ".gemini", join("config", "skills")],
+]) {
+  test(`install-${cli}.js leaves a foreign same-named skill dir alone and reports it; a rerun over its own copy still updates`, { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
+    const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
+    try {
+      const src = join(home, "src");
+      cpSync(join(ROOT, "tests", "fixtures", "wicked-bus-mini"), join(src, "wicked-bus"), { recursive: true });
+      const skills = join(home, homeRel, skillsRel);
+      const foreign = join(skills, "wicked-bus-emit");
+      mkdirSync(foreign, { recursive: true });
+      writeFileSync(join(foreign, "SKILL.md"), "---\nname: someone-elses\n---\nmine\n");
+      const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
+      const run = () => spawnSync(process.execPath, [join(ROOT, "dist", `install-${cli}.js`), "wicked-bus", "--skip-binaries", "--source-root", src, homeFlag, join(home, homeRel), "--json"], { encoding: "utf8", env, timeout: 60_000 });
+      const r = run();
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.equal(readFileSync(join(foreign, "SKILL.md"), "utf8"), "---\nname: someone-elses\n---\nmine\n", "the foreign dir is untouched");
+      const entry = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus");
+      assert.deepEqual(entry.actions?.map((a) => [a.kind, a.target, a.result]), [["collision-skipped", foreign, "skipped"]]);
+      const own = readdirSync(skills).filter((d) => /status/.test(d));
+      assert.equal(own.length, 1, readdirSync(skills).join(", "));
+      // The installer's own copy is not foreign: a second run rewrites it and reports nothing for it.
+      writeFileSync(join(skills, own[0], "extra.txt"), "x");
+      const again = JSON.parse(run().stdout).reports.find((e) => e.productId === "wicked-bus");
+      assert.deepEqual(again.actions?.map((a) => a.target), [foreign]);
+      assert.match(readFileSync(join(skills, own[0], "SKILL.md"), "utf8"), /^---\nname: \S+/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
