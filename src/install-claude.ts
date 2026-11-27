@@ -3002,7 +3002,20 @@ function emitReport(options: Options, verb: Verb, resolution: Resolution, report
     const status = report.success ? (report.skipped ? "manual" : "ok") : "failed";
     console.log(`[${status}] ${report.message}`);
     for (const note of report.notes) console.log(`  ${note}`);
+    for (const line of actionLines(report.actions, report.notes)) console.log(`  ${line}`);
   }
+}
+
+/**
+ * installer#105: the human output prints what a person must act on or recover, not only the summary: every failed,
+ * skipped or moved-aside action with a detail (a kept-skills path, a refusal and its reason, "remove it manually").
+ * A note that already says `<target> <detail>` is not repeated.
+ */
+function actionLines(actions: Action[] | undefined, notes: string[] = []): string[] {
+  return (actions ?? [])
+    .filter((a) => a.detail && (a.result === "failed" || a.result === "skipped" || a.kind === "collision-moved"))
+    .filter((a) => !notes.includes(`${a.target} ${a.detail}`)) // a note already saying exactly this (installer#99's)
+    .map((a) => `${a.target}: ${a.detail}`);
 }
 
 // ---------------------------------------------------------------------------
