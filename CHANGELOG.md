@@ -5,6 +5,34 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-27
+
+Patch release on the train-18 cut 5cebad6a, carrying 6 PRs since 0.11.3: #94, #92, #102, #103, #106, #107. Pairs with
+wicked-crew 0.20.1 (wicked-core-ts 0.16.2). The entries were written from each PR's description.
+
+### Fixed
+
+- **A garden is never paired with a crew older than its core-ts floor (wicked-garden#1600, #94).** The garden step
+  refuses to install a wicked-garden whose core-ts floor the installed or selected wicked-crew does not meet, and says
+  which crew it needs.
+- **Claude Code gets wicked-bus's skills, and a same-named skill dir is kept, not lost (#87, #92).** The direct path
+  delivers the bus skills to Claude Code (other hosts are held: #100). A skill dir the installer's marker does not
+  record is moved to `<config>/wicked-installer/kept-skills/<name>-<stamp>` before the install, and the summary says
+  where it went.
+- **The kept-skills move never goes through a link (#101, #102).** `kept-skills`, the source dir and each candidate
+  name are walked no-follow; a planted link (outside or dangling) is refused and the person's dir stays where it is.
+  The move's detail counts relative links inside the dir that may dangle or point elsewhere after it.
+- **A v1-marker uninstall keeps matching skill dirs, never deletes them (#99, #103).** A legacy marker records no
+  skill paths, so a dir under the product's prefix or naming the product is moved to kept-skills, not removed. A
+  refused move leaves the dir, keeps the record, and says why; each kept path is printed on stderr as it moves.
+- **A recorded skill dir is replaced or removed only while it is still the installer's copy (#104, #106).** Each
+  Claude skill dir record carries `sha256`, a digest of the dir as written. A reinstall, an uninstall or a `--force`
+  takeover replaces or removes only a dir that still has it; a changed dir, or a record written before this release,
+  is moved to kept-skills once. The marker schema declares the field; older installers ignore it.
+- **The human output prints what to act on or recover (#105, #107).** Without `--json`, the standalone script and the
+  central `uninstall` print every failed, skipped or moved-aside action as `<target>: <detail>` (kept paths, refusal
+  reasons, "remove it manually"), and an install's kept path goes to stderr at move time.
+
 ## [0.11.3] - 2026-11-27
 
 Patch release on the train-17 cut 35d86b17, carrying 1 PR since 0.11.2: #91. Pairs with wicked-crew 0.20.0
