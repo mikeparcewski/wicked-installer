@@ -165,7 +165,7 @@ interface PackageSource {
 // -------- Install marker v2 --------
 
 type MarkerFileRecord =
-  | { kind: "dir" | "file"; path: string }
+  | { kind: "dir" | "file"; path: string; sha256?: string }
   | { kind: "json-key"; file: string; pointer: string; wroteHash: string; prior?: unknown }
   | { kind: "hooks-entry"; file: string; event: string; ownerMatch: { commandContains: string } };
 
@@ -1389,9 +1389,48 @@ function linksLeavingDir(dir: string): number {
   return count;
 }
 
-function keptAction(target: string, kept: string, leaving = 0): Action {
+/**
+ * installer#104: a skill dir record's pathname is not proof the dir is still the installer's copy (a person may have
+ * replaced it with their own). The record carries this digest of the dir as written: sorted relative paths, each
+ * file's bytes, and any link or other entry, walked no-follow below `root`. Throws when the dir cannot be read.
+ */
+export function dirDigest(root: string, abs: string): string {
+  chainUnder(root, abs);
+  const hash = createHash("sha256");
+  const walk = (at: string, rel: string): void => {
+    const entries = readdirSync(at, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      const full = join(at, entry.name);
+      const r = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isSymbolicLink()) hash.update(`l\0${r}\0${readlinkSync(full)}\0`);
+      else if (entry.isDirectory()) {
+        hash.update(`d\0${r}\0`);
+        walk(full, r);
+      } else if (entry.isFile()) hash.update(`f\0${r}\0${createHash("sha256").update(readFileSync(full)).digest("hex")}\0`);
+      else hash.update(`o\0${r}\0`);
+    }
+  };
+  walk(abs, "");
+  return hash.digest("hex");
+}
+
+function prevRecord(prev: MarkerProduct | undefined, markerPathRel: string): MarkerFileRecord | undefined {
+  return prev?.files.find((f) => f.kind === "dir" && normalizeSlash(f.path) === normalizeSlash(markerPathRel));
+}
+
+/** True only when the record carries a digest and the dir on disk still has it; an unreadable dir is not proof. */
+function stillAsRecorded(root: string, abs: string, rec: MarkerFileRecord | undefined): boolean {
+  if (!rec || (rec.kind !== "dir" && rec.kind !== "file") || typeof rec.sha256 !== "string") return false;
+  try {
+    return dirDigest(root, abs) === rec.sha256;
+  } catch {
+    return false;
+  }
+}
+
+function keptAction(target: string, kept: string, leaving = 0, why = "a skill dir this installer did not write"): Action {
   const links = leaving > 0 ? `; ${leaving} relative link(s) inside point outside it and may dangle or point elsewhere now` : "";
-  return { kind: "collision-moved", target, result: "ok", detail: `a skill dir this installer did not write; moved to ${kept} before the install${links}` };
+  return { kind: "collision-moved", target, result: "ok", detail: `${why}; moved to ${kept} before the install${links}` };
 }
 
 // Two-signal signature: frontmatter name references the product AND the body
@@ -1459,17 +1498,32 @@ function installSkills(
       const owner = skillDirOwner(markerPathRel, marker, product.id);
       if (owner && owner !== product.id) {
         if (options.force) {
+          // installer#104: the other product's record is a pathname too. Its dir is deleted only while it still has
+          // that product's digest; a changed or pre-fingerprint dir is moved to kept-skills first.
+          const ownerRec = prevRecord(marker.products[owner], markerPathRel);
+          if (stillAsRecorded(target.dir, dest, ownerRec)) {
+            rmSync(dest, { recursive: true, force: true });
+          } else {
+            const leaving = linksLeavingDir(dest);
+            const kept = keepAside(target.dir, dest);
+            actions.push(keptAction(markerPathRel, kept, leaving, `a skill dir recorded to ${owner} that changed since it was written (or was recorded without a fingerprint)`));
+          }
           pruneOwnerFile(marker, owner, markerPathRel);
-          rmSync(dest, { recursive: true, force: true });
           actions.push({ kind: "collision-skipped", target: markerPathRel, result: "ok", detail: `ownership transferred from ${owner}` });
         } else {
           actions.push({ kind: "collision-skipped", target: markerPathRel, result: "skipped", detail: `owned by ${owner}` });
           continue;
         }
-      } else if (prev?.files.some((f) => f.kind === "dir" && normalizeSlash(f.path) === normalizeSlash(markerPathRel))) {
-        // Ours by this product's prior marker entry (skillDirOwner skips selfId, and `marker` already holds the fresh
-        // entry): replace-on-install so upstream-deleted files don't linger.
+      } else if (stillAsRecorded(target.dir, dest, prevRecord(prev, markerPathRel))) {
+        // Ours by this product's prior marker entry AND unchanged since it was written (installer#104: the pathname alone
+        // is not proof): replace-on-install so upstream-deleted files don't linger.
         rmSync(dest, { recursive: true, force: true });
+      } else if (prevRecord(prev, markerPathRel)) {
+        // Recorded, but the dir is no longer what this installer wrote (a person replaced or edited it), or the record
+        // predates fingerprints: it may be theirs. Kept, never deleted.
+        const leaving = linksLeavingDir(dest);
+        const kept = keepAside(target.dir, dest);
+        actions.push(keptAction(markerPathRel, kept, leaving, "a recorded skill dir that changed since this installer wrote it (or was recorded without a fingerprint)"));
       } else {
         // installer#87 (DES B): no record, so it may be the person's own dir, whatever its SKILL.md says. Move it to
         // <config>/wicked-installer/kept-skills/ before the install; never overwrite or delete it.
@@ -1484,7 +1538,8 @@ function installSkills(
       actions.push({ kind: "copy-skill", target: markerPathRel, result: "skipped", detail: `symlinks in the source were not copied (a link is never planted in the config dir): ${copied.skippedLinks.map((l) => relative(copyFrom, l)).join(", ")}` });
     }
     rewriteCopiedSkillName(target.dir, dest, originalName, nextName, options);
-    mp.files.push({ kind: "dir", path: markerPathRel });
+    // installer#104: the digest of the dir as written is the proof a later run checks before replacing or removing it.
+    mp.files.push(options.dryRun ? { kind: "dir", path: markerPathRel } : { kind: "dir", path: markerPathRel, sha256: dirDigest(target.dir, dest) });
     actions.push({ kind: "copy-skill", target: markerPathRel, result: options.dryRun ? "planned" : "ok" });
     count += 1;
   }
@@ -2483,6 +2538,7 @@ function removeMarkerEntry(
   target: Target,
   options: Options,
   actions: Action[],
+  notes: string[] = [],
 ): number {
   let failures = 0;
   const refuseOutside = (kind: ActionKind, disp: string): void => {
@@ -2619,9 +2675,24 @@ function removeMarkerEntry(
       actions.push({ kind: "remove", target: f.path, result: "skipped", detail: verdict.skip });
       continue;
     }
+    // installer#104: a recorded skill dir is removed only while it is still what this installer wrote; otherwise (a
+    // person replaced or edited it, or the record predates fingerprints) it is moved to kept-skills, never deleted.
+    const keep = f.kind === "dir" && normalizeSlash(f.path).startsWith("skills/") && !stillAsRecorded(target.dir, abs, f);
     if (options.dryRun) {
-      log(options, `  dry-run: remove ${abs}`);
-      actions.push({ kind: "remove", target: f.path, result: "planned" });
+      log(options, `  dry-run: ${keep ? "move to wicked-installer/kept-skills/" : "remove"} ${abs}`);
+      actions.push({ kind: "remove", target: f.path, result: "planned", ...(keep ? { detail: "would move to wicked-installer/kept-skills/ (changed since installed, or recorded without a fingerprint)" } : {}) });
+    } else if (keep) {
+      try {
+        const kept = keepAside(target.dir, abs);
+        console.error(`kept ${f.path} at ${kept}`); // at once: survives a later error that ends the run before a report
+        actions.push({ kind: "remove", target: f.path, result: "ok", detail: `moved to ${kept}: changed since this installer wrote it (or recorded without a fingerprint), so it is kept, not deleted` });
+        notes.push(`${f.path} kept at ${kept} (changed since installed, or recorded without a fingerprint)`);
+      } catch (err) {
+        const why = `not moved (${err instanceof Error ? err.message : String(err)}); the dir is left in place`;
+        actions.push({ kind: "remove", target: f.path, result: "failed", detail: why });
+        notes.push(`${f.path} ${why}`);
+        failures += 1;
+      }
     } else {
       rmSync(abs, { recursive: true, force: true });
       actions.push({ kind: "remove", target: f.path, result: "ok" });
@@ -2843,7 +2914,7 @@ function runUninstall(options: Options, registry: Registry): number {
         notes.push(`${target.dir}: not installed`);
         continue;
       }
-      const refused = removeMarkerEntry(entry, target, options, actions);
+      const refused = removeMarkerEntry(entry, target, options, actions, notes);
       if (refused > 0) {
         // A refused backup or a refused path: the entry is KEPT (the manifest still describes
         // what is on disk), the product is reported failed and the run exits non-zero.
