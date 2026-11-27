@@ -129,3 +129,61 @@ test("uninstall: a refused keep move leaves the changed dir in place and keeps t
     rmSync(w.home, { recursive: true, force: true });
   }
 });
+
+// codex r1 (W12, compatibility): the published marker schema declares every key a dir/file record carries.
+test("a real marker's dir and file records use only keys the published marker schema declares", { skip }, () => {
+  const w = world();
+  try {
+    run(w, "install");
+    const schema = JSON.parse(readFileSync(join(ROOT, "schemas", "install-marker.schema.json"), "utf8"));
+    const findRecordSchema = (node) => {
+      if (!node || typeof node !== "object") return undefined;
+      if (Array.isArray(node.oneOf)) {
+        const hit = node.oneOf.find((o) => o?.properties?.kind?.enum?.includes?.("dir"));
+        if (hit) return hit;
+      }
+      for (const v of Object.values(node)) {
+        const found = findRecordSchema(v);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const rec = findRecordSchema(schema);
+    assert.ok(rec && rec.additionalProperties === false, "the dir/file record schema is closed");
+    const declared = Object.keys(rec.properties);
+    const files = JSON.parse(readFileSync(w.marker, "utf8")).products["wicked-bus"].files.filter((f) => f.kind === "dir" || f.kind === "file");
+    assert.ok(files.length > 0);
+    for (const f of files) {
+      for (const key of Object.keys(f)) assert.ok(declared.includes(key), `${key} on ${f.path} is not declared by the schema (${declared.join(", ")})`);
+      if (f.sha256 !== undefined) assert.match(f.sha256, new RegExp(rec.properties.sha256.pattern));
+    }
+  } finally {
+    rmSync(w.home, { recursive: true, force: true });
+  }
+});
+
+// codex r1 (W10): --force takes over a dir another product records. That record is a pathname too: a changed dir is
+// moved to kept-skills before the takeover, and an unchanged one is replaced as before.
+test("--force keeps a changed dir recorded to another product, and replaces the unchanged one", { skip }, () => {
+  const w = world();
+  try {
+    run(w, "install");
+    const m = JSON.parse(readFileSync(w.marker, "utf8"));
+    m.products["wicked-other"] = m.products["wicked-bus"]; // the same real records, now owned by another product
+    delete m.products["wicked-bus"];
+    writeFileSync(w.marker, JSON.stringify(m, null, 2));
+    replaceWithMine(w);
+    const r = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "wicked-bus", "--force", "--skip-binaries", "--source-root", w.src, "--claude-home", w.cfg, "--json"], { encoding: "utf8", env: { HOME: w.home, USERPROFILE: w.home, PATH: "/usr/bin:/bin", NO_COLOR: "1" }, timeout: 60_000 });
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const kept = keptNames(w);
+    assert.equal(kept.length, 1, `the person's dir was deleted by the takeover: ${kept.join(", ")}`);
+    assert.equal(readFileSync(join(keptDir(w), kept[0], "SKILL.md"), "utf8"), MINE);
+    const rep = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus");
+    const moved = rep.actions.filter((a) => a.kind === "collision-moved");
+    assert.deepEqual(moved.map((a) => a.target), ["skills/wicked-bus-emit"]);
+    assert.match(moved[0].detail, /recorded to wicked-other that changed since it was written/);
+    assert.equal(rep.actions.filter((a) => a.kind === "collision-skipped" && /ownership transferred from wicked-other/.test(a.detail)).length, 2);
+  } finally {
+    rmSync(w.home, { recursive: true, force: true });
+  }
+});

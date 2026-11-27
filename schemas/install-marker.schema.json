@@ -39,6 +39,11 @@
                     "path": {
                       "type": "string",
                       "description": "configDir-relative when inside the config dir, else absolute (~/ shorthand allowed); forward slashes always."
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "Claude skill dirs (installer#104): digest of the dir as written (sorted relative paths, file bytes, any link or other entry; walked no-follow). A reinstall replaces, and an uninstall removes, only a dir that still has it; anything else is moved to wicked-installer/kept-skills/. Absent on records written before #104."
                     }
                   },
                   "additionalProperties": false

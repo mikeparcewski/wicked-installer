@@ -514,7 +514,7 @@ Rules:
 - `path`/`file` values: configDir-relative when inside the config dir; absolute (with `~/` shorthand) otherwise. Stored with forward slashes; normalized via `path.join` on read.
 - `json-key`: `pointer` is an RFC 6901 JSON Pointer into `file`. `wroteHash` = `sha256:` + hash of the canonical JSON (sorted keys) of the value written. `prior` = the pre-existing value (non-null only when `--force` replaced a foreign value), enabling restore on uninstall.
 - `hooks-entry`: owned hook objects are identified by `ownerMatch.commandContains` (§8.4) — ownership survives marker loss.
-- `dir` under `skills/` (Claude, installer#104): carries `sha256`, a digest of the dir as written (sorted relative paths, file bytes, any link or other entry; walked no-follow). The path alone is not proof: a reinstall replaces, and an uninstall removes, only a dir that still has that digest. A changed dir, an unreadable one, or a record without `sha256` (written before #104) is moved to `wicked-installer/kept-skills/`, never deleted. Readers that do not know the field ignore it.
+- `dir` under `skills/` (Claude, installer#104): carries `sha256`, a digest of the dir as written (sorted relative paths, file bytes, any link or other entry; walked no-follow). The path alone is not proof: a reinstall replaces, and an uninstall removes, only a dir that still has that digest. A changed dir, an unreadable one, or a record without `sha256` (written before #104) is moved to `wicked-installer/kept-skills/`, never deleted. The same check applies when `--force` takes over a dir another product records. Readers that do not know the field ignore it.
 - Record paths as CREATED (post-sanitization destination names), never source paths.
 
 ---

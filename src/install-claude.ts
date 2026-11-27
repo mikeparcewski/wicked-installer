@@ -1498,8 +1498,17 @@ function installSkills(
       const owner = skillDirOwner(markerPathRel, marker, product.id);
       if (owner && owner !== product.id) {
         if (options.force) {
+          // installer#104: the other product's record is a pathname too. Its dir is deleted only while it still has
+          // that product's digest; a changed or pre-fingerprint dir is moved to kept-skills first.
+          const ownerRec = prevRecord(marker.products[owner], markerPathRel);
+          if (stillAsRecorded(target.dir, dest, ownerRec)) {
+            rmSync(dest, { recursive: true, force: true });
+          } else {
+            const leaving = linksLeavingDir(dest);
+            const kept = keepAside(target.dir, dest);
+            actions.push(keptAction(markerPathRel, kept, leaving, `a skill dir recorded to ${owner} that changed since it was written (or was recorded without a fingerprint)`));
+          }
           pruneOwnerFile(marker, owner, markerPathRel);
-          rmSync(dest, { recursive: true, force: true });
           actions.push({ kind: "collision-skipped", target: markerPathRel, result: "ok", detail: `ownership transferred from ${owner}` });
         } else {
           actions.push({ kind: "collision-skipped", target: markerPathRel, result: "skipped", detail: `owned by ${owner}` });
