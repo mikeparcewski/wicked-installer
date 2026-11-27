@@ -2583,7 +2583,8 @@ function removeMarkerEntry(
 }
 
 // v1/legacy marker mode: remove only product-prefixed paths this convention would
-// have created, signature/prefix-gated; never touch shared JSON config.
+// have created, signature/prefix-gated; never touch shared JSON config. Skill dirs are moved to
+// kept-skills, never deleted (installer#99).
 function heuristicUninstall(
   id: string,
   target: Target,
@@ -2629,12 +2630,45 @@ function heuristicUninstall(
       throw err;
     }
   };
+  // installer#99: a v1 marker records no skill paths, so the installer cannot tell its own copy from a person's dir of
+  // the same name or signature. A matching skill dir is MOVED to <config>/wicked-installer/kept-skills/ (as installs
+  // do since #92), never deleted; the action says where it went.
+  const keepPath = (abs: string): void => {
+    const rel = toMarkerPath(target.dir, abs);
+    if (!strictlyInside(target.dir, abs)) {
+      actions.push({ kind: "remove", target: rel, result: "failed", detail: "refused: path is not strictly inside the config dir — nothing moved" });
+      failures += 1;
+      return;
+    }
+    let state: ChainResult;
+    try {
+      state = chainUnder(target.dir, abs);
+    } catch (err) {
+      if (!(err instanceof UnsafePathError)) throw err;
+      actions.push({ kind: "remove", target: rel, result: "skipped", detail: `refused: ${err.reason}` });
+      return;
+    }
+    if (!state.exists) return;
+    if (options.dryRun) {
+      log(options, `  dry-run: move ${abs} to wicked-installer/kept-skills/`);
+      actions.push({ kind: "remove", target: rel, result: "planned", detail: "would move to wicked-installer/kept-skills/ (a v1 marker cannot tell the installer's copy from yours)" });
+      return;
+    }
+    try {
+      const kept = keepAside(target.dir, abs);
+      actions.push({ kind: "remove", target: rel, result: "ok", detail: `moved to ${kept}: a v1 marker cannot tell the installer's copy from yours, so it is kept, not deleted` });
+    } catch (err) {
+      // A refused or failed move leaves the dir where it is and keeps the marker record, so the uninstall can be re-run.
+      actions.push({ kind: "remove", target: rel, result: "failed", detail: `not moved (${err instanceof Error ? err.message : String(err)}); the dir is left in place` });
+      failures += 1;
+    }
+  };
   const skillsDir = join(target.dir, "skills");
   if (realDir("skills")) {
     for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const abs = join(skillsDir, entry.name);
-      if (entry.name.startsWith(`${id}-`) || skillSignatureMatches(abs, id, target.dir)) removePath(abs);
+      if (entry.name.startsWith(`${id}-`) || skillSignatureMatches(abs, id, target.dir)) keepPath(abs);
     }
   }
   removePath(join(target.dir, "commands", id));
