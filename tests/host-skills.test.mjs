@@ -2,14 +2,14 @@
 // whose package ships them for all hosts (registry install.hostSkills: wicked-bus).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const { hostSkillsStep, cliScriptArgs } = await import("../dist/index.js");
+const { hostSkillsStep, cliScriptArgs, shellQuote } = await import("../dist/index.js");
 const FLAGS = { dryRun: false, force: false, interactive: false, claudeHomes: [] };
 const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const quiet = (fn) => { const o = console.log; console.log = () => {}; try { return fn(); } finally { console.log = o; } };
@@ -87,8 +87,45 @@ test("the retry line is the same invocation (target and source kept), and a zero
   const run = (cli) => ({ cli: cli.cli, displayName: cli.displayName, status: 0, present: true, parsed: true, entries: [{ productId: "wicked-bus", success: true, skipped: false, assets: { skills: 0 } }], rawTail: "" });
   const lines = quiet(() => hostSkillsStep(["wicked-bus"], flags, { hosts: () => [host("claude", "Claude Code")], run }));
   assert.match(lines[0], /copied no skills/);
-  assert.ok(lines[0].includes('--force --source-root "/src/my checkout" --claude-home /work/claude'), lines[0]);
+  assert.ok(lines[0].includes("--force --source-root '/src/my checkout' --claude-home /work/claude"), lines[0]);
   assert.doesNotMatch(lines[0], /--dry-run/);
   // The run and the retry share one builder: --json and --skip-binaries always, --claude-home only for Claude.
   assert.deepEqual(cliScriptArgs(host("codex", "Codex"), ["wicked-bus"], flags, true), ["/x/install-codex.js", "wicked-bus", "--json", "--skip-binaries", "--force", "--source-root", "/src/my checkout"]);
+});
+
+test("the retry line survives a POSIX shell: a path with $, a quote or a space reaches the script unchanged", { skip: process.platform === "win32" ? "POSIX sh" : false }, () => {
+  const odd = "/tmp/claude$cash it's";
+  const flags = { ...FLAGS, sourceRoot: "/src/a&b", claudeHomes: [odd] };
+  const bad = (cli) => ({ cli: cli.cli, displayName: cli.displayName, status: 1, present: true, parsed: false, entries: [], rawTail: "" });
+  const [line] = quiet(() => hostSkillsStep(["wicked-bus"], flags, { hosts: () => [host("claude", "Claude Code")], run: bad, platform: "linux" }));
+  const cmd = line.match(/run `node (.*)`$/)[1];
+  // Echo each argument the shell hands over, one per line, in place of running the script.
+  const r = spawnSync("/bin/sh", ["-c", `printf '%s\\n' ${cmd}`], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", cash: "EXPANDED" } });
+  const argv = r.stdout.split("\n").slice(0, -1);
+  assert.deepEqual(argv, cliScriptArgs(host("claude", "Claude Code"), ["wicked-bus"], flags, true));
+  assert.equal(shellQuote('C:\\Users\\a b\\"x"', "win32"), '"C:\\Users\\a b\\""x"""');
+});
+
+test("Claude's real script leaves a foreign same-named skill dir alone: the step names it instead of 'skills added'", { skip: process.platform === "win32" ? "POSIX fixture paths" : false }, () => {
+  const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
+  try {
+    const src = join(home, "src");
+    cpSync(join(ROOT, "tests", "fixtures", "wicked-bus-mini"), join(src, "wicked-bus"), { recursive: true });
+    const claudeHome = join(home, ".claude");
+    // A skill dir with the bus's install name that this installer never wrote (no marker, no signature).
+    mkdirSync(join(claudeHome, "skills", "wicked-bus-emit"), { recursive: true });
+    writeFileSync(join(claudeHome, "skills", "wicked-bus-emit", "SKILL.md"), "---\nname: someone-elses\n---\nmine\n");
+    const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
+    const run = (cli, ids) => {
+      const r = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), ...ids, "--skip-binaries", "--source-root", src, "--claude-home", claudeHome, "--json"], { encoding: "utf8", env, timeout: 60_000 });
+      const report = JSON.parse(r.stdout);
+      return { cli: cli.cli, displayName: cli.displayName, status: r.status, present: true, parsed: true, entries: report.reports, rawTail: "" };
+    };
+    const lines = quiet(() => hostSkillsStep(["wicked-bus"], FLAGS, { hosts: () => [host("claude", "Claude Code")], run, platform: "linux" }));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^warning: Wicked Bus skills were added to Claude Code, but 1 was left alone: skills\/wicked-bus-emit \(foreign skill dir present; rename it and re-run\); then run `node /, lines[0]);
+    assert.equal(readFileSync(join(claudeHome, "skills", "wicked-bus-emit", "SKILL.md"), "utf8").includes("mine"), true, "the foreign dir is untouched");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

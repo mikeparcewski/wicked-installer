@@ -119,6 +119,8 @@ interface ScriptReportEntry {
   delivery?: string;
   /** Asset counts (`hooks` > 0 ⇒ the script installed the product's own hook adapter). */
   assets?: { hooks?: number; skills?: number };
+  /** The script's own action log; the Claude script records a skill it left alone as `collision-skipped`. */
+  actions?: Array<{ kind?: string; target?: string; result?: string; detail?: string }>;
 }
 
 interface ScriptReport {
@@ -204,6 +206,15 @@ interface CliRunResult {
   home?: string;
   entries: ScriptReportEntry[];
   rawTail: string;
+}
+
+/**
+ * One argument of a command a person pastes: POSIX shells get single quotes (nothing expands inside), cmd.exe
+ * gets double quotes with `"` doubled. A plain argument is left as it is.
+ */
+export function shellQuote(arg: string, platform: NodeJS.Platform = process.platform): string {
+  if (/^[A-Za-z0-9_\/.:=@+,-]+$/.test(arg)) return arg;
+  return platform === "win32" ? `"${arg.replace(/"/g, '""')}"` : `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
 /** A host script's arguments (after `node`), shared by the run and the retry line a person is shown. */
@@ -390,7 +401,7 @@ function detectedHosts(): CliOption[] {
 export function hostSkillsStep(
   productIds: string[],
   flags: DispatchFlags,
-  deps: { hosts?: () => CliOption[]; run?: (cli: CliOption, ids: string[]) => CliRunResult } = {},
+  deps: { hosts?: () => CliOption[]; run?: (cli: CliOption, ids: string[]) => CliRunResult; platform?: NodeJS.Platform } = {},
 ): string[] {
   const ids = productIds.filter((id) => getProduct(id)?.install.hostSkills === true);
   if (ids.length === 0) return [];
@@ -416,10 +427,15 @@ export function hostSkillsStep(
         : missing.length > 0 ? `its script did not report ${missing.join(", ")}`
         : empty.length > 0 ? "its script copied no skills (a same-named skill dir it does not own is left alone)"
         : undefined);
-      if (why === undefined) {
+      // A skill the script left alone (a same-named dir it does not own) is named even when others were copied.
+      const leftAlone = mine.flatMap((e) => e.actions ?? []).filter((a) => a.kind === "collision-skipped" && a.result !== "ok");
+      const retry = cliScriptArgs(host, ids, { ...flags, dryRun: false }, true).map((a) => shellQuote(a, deps.platform)).join(" ");
+      if (why === undefined && leftAlone.length === 0) {
         lines.push(`${names} skills added to ${host.displayName}`);
+      } else if (why === undefined) {
+        const which = leftAlone.map((a) => `${a.target ?? "?"} (${a.detail ?? a.result ?? "skipped"})`).join("; ");
+        lines.push(`warning: ${names} skills were added to ${host.displayName}, but ${leftAlone.length} ${leftAlone.length === 1 ? "was" : "were"} left alone: ${which}; then run \`node ${retry}\``);
       } else {
-        const retry = cliScriptArgs(host, ids, { ...flags, dryRun: false }, true).map((a) => (/[\s"'$&|<>;()]/.test(a) ? JSON.stringify(a) : a)).join(" ");
         lines.push(`warning: ${names} skills were not added to ${host.displayName} (${why}); run \`node ${retry}\``);
       }
     }
