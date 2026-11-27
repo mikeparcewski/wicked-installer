@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -1334,17 +1335,63 @@ function skillDirOwner(markerPathRel: string, marker: MarkerV2, selfId: string):
  * skill installs. Duplicated per script by design (INTERFACE.md §15: each host script is self-contained).
  */
 function keepAside(home: string, dest: string, now: Date = new Date()): string {
-  const dir = join(home, "wicked-installer", "kept-skills");
-  mkdirSync(dir, { recursive: true });
+  // installer#101: never move through a link. `wicked-installer/kept-skills` is walked no-follow before and after it
+  // is created, and so is each candidate name: a planted link anywhere in that chain throws UnsafePathError, so the
+  // caller refuses and the person's dir stays where it is.
+  const rel = join("wicked-installer", "kept-skills");
+  const existing = lstatChainNoFollow(home, rel);
+  if (existing.exists && existing.kind !== "dir") throw new UnsafePathError(existing.abs, "not a directory");
+  if (!existing.exists) mkdirSync(join(home, rel), { recursive: true });
+  const made = lstatChainNoFollow(home, rel);
+  if (!made.exists || made.kind !== "dir") throw new UnsafePathError(join(home, rel), "not a directory");
+  const source = chainUnder(home, dest);
+  if (!source.exists || source.kind !== "dir") throw new UnsafePathError(dest, "not a directory");
   // No ':' or '.' in the name: Windows refuses ':' in a path segment.
   const stamp = now.toISOString().replace(/[:.]/g, "-");
-  let kept = join(dir, `${basename(dest)}-${stamp}`);
-  for (let n = 1; existsSync(kept); n++) kept = join(dir, `${basename(dest)}-${stamp}-${n}`);
+  let name = `${basename(dest)}-${stamp}`;
+  for (let n = 1; lstatChainNoFollow(home, join(rel, name)).exists; n++) name = `${basename(dest)}-${stamp}-${n}`;
+  const kept = join(home, rel, name);
   renameSync(dest, kept);
   return kept;
 }
-function keptAction(target: string, kept: string): Action {
-  return { kind: "collision-moved", target, result: "ok", detail: `a skill dir this installer did not write; moved to ${kept} before the install` };
+
+/**
+ * installer#101: relative links inside `dir` whose target lies outside it can dangle or point elsewhere once the dir
+ * is moved. Counted no-follow before the move so the report can say so (the bytes they pointed to are untouched).
+ * Best effort: a subdir or link it cannot read is skipped, never a reason to stop the move.
+ */
+function linksLeavingDir(dir: string): number {
+  let count = 0;
+  const walk = (at: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(at, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const abs = join(at, entry.name);
+      if (entry.isSymbolicLink()) {
+        let to: string;
+        try {
+          to = readlinkSync(abs);
+        } catch {
+          continue;
+        }
+        const resolved = resolve(at, to);
+        if (!isAbsolute(to) && resolved !== dir && !strictlyInside(dir, resolved)) count += 1;
+      } else if (entry.isDirectory()) {
+        walk(abs);
+      }
+    }
+  };
+  walk(dir);
+  return count;
+}
+
+function keptAction(target: string, kept: string, leaving = 0): Action {
+  const links = leaving > 0 ? `; ${leaving} relative link(s) inside point outside it and may dangle or point elsewhere now` : "";
+  return { kind: "collision-moved", target, result: "ok", detail: `a skill dir this installer did not write; moved to ${kept} before the install${links}` };
 }
 
 // Two-signal signature: frontmatter name references the product AND the body
@@ -1426,8 +1473,9 @@ function installSkills(
       } else {
         // installer#87 (DES B): no record, so it may be the person's own dir, whatever its SKILL.md says. Move it to
         // <config>/wicked-installer/kept-skills/ before the install; never overwrite or delete it.
+        const leaving = linksLeavingDir(dest);
         const kept = keepAside(target.dir, dest);
-        actions.push(keptAction(markerPathRel, kept));
+        actions.push(keptAction(markerPathRel, kept, leaving));
       }
     }
 

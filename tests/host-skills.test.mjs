@@ -2,7 +2,7 @@
 // whose package ships them for all hosts (registry install.hostSkills: wicked-bus).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -194,3 +194,78 @@ for (const [cli, homeFlag, homeRel, skillsRel, targetOf] of [
     }
   });
 }
+
+// installer#101: the kept-skills move never goes through a link. A planted `kept-skills` link (to a dir outside the
+// config dir, or dangling) is refused: the person's dir stays in place, nothing lands at the link's target, and the
+// product's report names the link.
+for (const variant of ["outside", "dangling"]) {
+  test(`install-claude.js refuses to move a skill dir through a planted kept-skills link (${variant})`, { skip: process.platform === "win32" ? "POSIX symlinks" : false }, () => {
+    const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
+    try {
+      const src = join(home, "src");
+      cpSync(join(ROOT, "tests", "fixtures", "wicked-bus-mini"), join(src, "wicked-bus"), { recursive: true });
+      const claudeHome = join(home, ".claude");
+      const mine = join(claudeHome, "skills", "wicked-bus-status");
+      const MINE = "---\nname: wicked-bus-status\n---\nLOCAL CUSTOM CONTENT\n";
+      mkdirSync(mine, { recursive: true });
+      writeFileSync(join(mine, "SKILL.md"), MINE);
+      const outside = join(home, "outside");
+      if (variant === "outside") mkdirSync(outside);
+      mkdirSync(join(claudeHome, "wicked-installer"), { recursive: true });
+      symlinkSync(outside, join(claudeHome, "wicked-installer", "kept-skills"));
+      const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
+      const r = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "wicked-bus", "--skip-binaries", "--source-root", src, "--claude-home", claudeHome, "--json"], { encoding: "utf8", env, timeout: 60_000 });
+      assert.equal(readFileSync(join(mine, "SKILL.md"), "utf8"), MINE, "the person's dir stays in place, untouched");
+      assert.equal(existsSync(outside) ? readdirSync(outside).length : 0, 0, "nothing was moved through the link");
+      const entry = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus");
+      assert.equal(entry.success, false, JSON.stringify(entry));
+      assert.match(entry.message, /kept-skills: is a symlink/, entry.message);
+      assert.notEqual(r.status, 0);
+      // PARTIAL FAILURE / IDENTITY REUSE: skills the failed run already copied are journaled in the marker, so with the
+      // link gone a re-run recognizes them as its own and moves only the person's dir.
+      const copiedBefore = existsSync(join(claudeHome, "skills", "wicked-bus-emit"));
+      process.stdout.write(`# ${variant}: the failed run had ${copiedBefore ? "already copied" : "not yet copied"} wicked-bus-emit\n`);
+      unlinkSync(join(claudeHome, "wicked-installer", "kept-skills"));
+      const again = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "wicked-bus", "--skip-binaries", "--source-root", src, "--claude-home", claudeHome, "--json"], { encoding: "utf8", env, timeout: 60_000 });
+      assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+      const moved = JSON.parse(again.stdout).reports.find((e) => e.productId === "wicked-bus").actions.filter((a) => a.kind === "collision-moved");
+      assert.deepEqual(moved.map((a) => a.target), ["skills/wicked-bus-status"], JSON.stringify(moved));
+      const kept = readdirSync(join(claudeHome, "wicked-installer", "kept-skills"));
+      assert.equal(kept.length, 1, kept.join(", "));
+      assert.equal(readFileSync(join(claudeHome, "wicked-installer", "kept-skills", kept[0], "SKILL.md"), "utf8"), MINE);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
+
+test("install-claude.js says when a moved dir holds relative links that point outside it (installer#101)", { skip: process.platform === "win32" ? "POSIX symlinks" : process.getuid?.() === 0 ? "root ignores the mode" : false }, () => {
+  const home = mkdtempSync(join(tmpdir(), "wicked-host-skills-"));
+  try {
+    const src = join(home, "src");
+    cpSync(join(ROOT, "tests", "fixtures", "wicked-bus-mini"), join(src, "wicked-bus"), { recursive: true });
+    const claudeHome = join(home, ".claude");
+    const mine = join(claudeHome, "skills", "wicked-bus-emit");
+    mkdirSync(mine, { recursive: true });
+    writeFileSync(join(mine, "SKILL.md"), "---\nname: wicked-bus-emit\n---\nmine\n");
+    writeFileSync(join(claudeHome, "skills", "notes.md"), "shared\n");
+    symlinkSync("../notes.md", join(mine, "notes.md")); // leaves the dir: dangles after the move
+    symlinkSync("SKILL.md", join(mine, "self.md")); // stays inside: still resolves
+    symlinkSync(".", join(mine, "here")); // the dir itself: still resolves
+    mkdirSync(join(mine, "locked")); // an unreadable subdir never stops the move (codex r1 W12)
+    chmodSync(join(mine, "locked"), 0o000);
+    const env = { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", NO_COLOR: "1" };
+    const r = spawnSync(process.execPath, [join(ROOT, "dist", "install-claude.js"), "wicked-bus", "--skip-binaries", "--source-root", src, "--claude-home", claudeHome, "--json"], { encoding: "utf8", env, timeout: 60_000 });
+    const kept = readdirSync(join(claudeHome, "wicked-installer", "kept-skills"));
+    for (const name of kept) chmodSync(join(claudeHome, "wicked-installer", "kept-skills", name, "locked"), 0o755);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const moved = JSON.parse(r.stdout).reports.find((e) => e.productId === "wicked-bus").actions.filter((a) => a.kind === "collision-moved");
+    assert.equal(moved.length, 1, JSON.stringify(moved));
+    assert.match(moved[0].detail, /; 1 relative link\(s\) inside point outside it and may dangle or point elsewhere now$/, moved[0].detail);
+    assert.equal(readFileSync(join(claudeHome, "skills", "notes.md"), "utf8"), "shared\n", "the link's target is untouched");
+  } finally {
+    const stuck = join(home, ".claude", "skills", "wicked-bus-emit", "locked");
+    if (existsSync(stuck)) chmodSync(stuck, 0o755);
+    rmSync(home, { recursive: true, force: true });
+  }
+});
