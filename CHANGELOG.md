@@ -5,6 +5,18 @@ All notable changes to wicked-installer are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-11-28
+
+Patch release on the train-19 cut 5afb04ce, carrying 1 PR since 0.11.4: #109. Pairs with wicked-crew 0.21.0
+(wicked-core-ts 0.17.0). The entry was written from the PR's description.
+
+### Fixed
+
+- **`--dry-run` names the one garden install once (#95, #109).** When the npm-global wicked-garden is below crew's
+  floor, the dry-run plan printed the same `npm install -g ... wicked-garden@latest` twice (the train step, then the
+  floor step), while a real run executes it once. The plan now keeps one line, the floor step's, which says why: the
+  copy is older than this crew's floor.
+
 ## [0.11.4] - 2026-11-27
 
 Patch release on the train-18 cut 5cebad6a, carrying 6 PRs since 0.11.3: #94, #92, #102, #103, #106, #107. Pairs with
