@@ -1,6 +1,6 @@
 # Install Wicked Crew on macOS or Windows (WSL2)
 
-This guide was checked against wicked-installer 0.11.4 and wicked-crew 0.20.1.
+This guide is for wicked-installer 0.11.5 and wicked-crew 0.21.0. It was last checked end to end against wicked-installer 0.11.4 and wicked-crew 0.20.1.
 
 Wicked Crew is provided as-is. There's no committed support, SLA or production-readiness claim.
 
